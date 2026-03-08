@@ -1,0 +1,198 @@
+---
+title: "IPsec VPN — IP Security Protocol"
+layer: "application"
+protocol: "ipsec-vpn"
+summary: "IPsec is the standard for site-to-site VPNs and many remote access deployments. It operates at the network layer, encrypting and authenticating IP packets directly — making it transparent to applications. Understanding IKEv2, ESP, tunnel vs transport mode, and the Phase 1/Phase 2 negotiation is essential for building and troubleshooting any router or firewall VPN."
+tags: ["application", "ipsec", "vpn", "ikev2", "esp", "ah", "site-to-site", "rfc7296"]
+order: 26
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+IPsec (Internet Protocol Security) is a suite of protocols that authenticate and encrypt IP packets. Unlike SSL VPN, which operates at the application layer, IPsec operates at **Layer 3** — it encrypts the IP payload (or the entire IP packet in tunnel mode) before it leaves the network stack.
+
+IPsec consists of three main components:
+
+**IKE (Internet Key Exchange)**: Negotiates and manages the Security Associations (SAs) — the agreed-upon parameters for encryption and authentication. **IKEv2** (RFC 7296, 2014) is the current standard. IKEv1 is legacy.
+
+**ESP (Encapsulating Security Payload)**: Encrypts and authenticates the payload. **This is what actually protects the data.** IP protocol number 50.
+
+**AH (Authentication Header)**: Authenticates but does not encrypt. Rarely used because ESP already provides authentication, and AH cannot traverse NAT. IP protocol number 51.
+
+---
+
+## Tunnel Mode vs Transport Mode
+
+**Tunnel mode** (site-to-site VPN, remote access): The entire original IP packet is encrypted and encapsulated inside a new IP packet. The outer packet carries the VPN gateway addresses; the inner packet carries the actual source and destination.
+
+```
+Original:  [IP: 192.168.1.10 → 10.0.0.50] [TCP] [Data]
+Tunnel:    [IP: GW1 → GW2] [ESP] [Encrypted: [IP: 192.168.1.10 → 10.0.0.50] [TCP] [Data]]
+```
+
+**Transport mode** (host-to-host, rarely used for VPN): Only the IP payload (TCP/UDP) is encrypted; the original IP header remains. Used for direct host-to-host encryption (e.g., between two servers using IPsec for internal traffic protection).
+
+---
+
+## IKEv2 — Phase 1 and Phase 2
+
+IPsec uses a two-phase negotiation:
+
+### Phase 1 — IKE SA (Control Channel)
+
+Phase 1 establishes a secure, authenticated channel between the two VPN endpoints. This channel is used to negotiate Phase 2. All Phase 1 traffic flows on **UDP port 500** (or UDP 4500 behind NAT — NAT Traversal).
+
+<FlowDiagram
+  parties={["Initiator (Site A FW)", "Responder (Site B FW)"]}
+  steps={[
+    { from: "Initiator (Site A FW)", to: "Responder (Site B FW)", label: "IKE_SA_INIT Request", sub: "Proposed crypto algorithms, DH group, nonce, DH public key" },
+    { from: "Responder (Site B FW)", to: "Initiator (Site A FW)", label: "IKE_SA_INIT Response", sub: "Selected algorithms, nonce, DH public key" },
+    { from: "Initiator (Site A FW)", to: "Responder (Site B FW)", label: "IKE_AUTH Request (encrypted)", sub: "Identity (certificate or PSK), AUTH payload, SA proposal" },
+    { from: "Responder (Site B FW)", to: "Initiator (Site A FW)", label: "IKE_AUTH Response (encrypted)", sub: "Identity, AUTH payload — Phase 1 complete" },
+    { from: "Initiator (Site A FW)", to: "Responder (Site B FW)", label: "CREATE_CHILD_SA Request", sub: "Phase 2: propose encryption for data (ESP)" },
+    { from: "Responder (Site B FW)", to: "Initiator (Site A FW)", label: "CREATE_CHILD_SA Response", sub: "Phase 2 SAs established — data can flow" },
+  ]}
+/>
+
+**IKEv2 advantages over IKEv1**: Fewer round trips (2 exchanges vs 6 in IKEv1 main mode), built-in NAT traversal, MOBIKE (connection migration when IP changes — important for mobile), built-in dead peer detection, simpler configuration.
+
+### Phase 2 — IPsec SA (Data Channel)
+
+Phase 2 establishes the actual ESP (data encryption) Security Associations — one for each direction (unidirectional). The parameters negotiated:
+
+- **Encryption algorithm**: AES-128/256-GCM (preferred), AES-128/256-CBC
+- **Integrity algorithm**: SHA-256, SHA-384, SHA-512 (HMAC)
+- **PFS (Perfect Forward Secrecy)**: A new DH exchange for each Phase 2 SA, so compromising one session key does not compromise others
+- **Lifetime**: How long before the SA is renegotiated (typically 3600 or 28800 seconds)
+- **Traffic selectors**: What traffic goes through this tunnel (source/destination subnets)
+
+---
+
+## ESP Packet Format
+
+<PacketDiagram
+  label="ESP Packet (Tunnel Mode)"
+  fields={[
+    { name: "Outer IP Header (new source/dest)", bytes: 3 },
+    { name: "ESP Header: SPI (4 bytes)", bytes: 2, highlight: true },
+    { name: "ESP Header: Sequence Number (4 bytes)", bytes: 2, highlight: true },
+    { name: "IV / Nonce (algorithm-dependent)", bytes: 2 },
+    { name: "Encrypted Payload (original IP + data)", bytes: 6, highlight: true },
+    { name: "ESP Trailer (padding + pad length + next header)", bytes: 2 },
+    { name: "Integrity Check Value (ICV)", bytes: 2, highlight: true },
+  ]}
+/>
+
+**SPI (Security Parameter Index)**: A 32-bit value that, combined with the destination IP and protocol (ESP/AH), identifies which SA to use to decrypt the packet.
+
+**Sequence Number**: Monotonically increasing. Prevents replay attacks — if a packet with the same sequence number has already been processed, it is rejected.
+
+**ICV**: The authentication tag verifying the packet has not been tampered with. With AEAD (AES-GCM), encryption and authentication are combined into a single operation.
+
+---
+
+## Authentication Methods
+
+**Pre-Shared Key (PSK)**: A shared secret string configured on both endpoints. Simpler to configure, but the same key must be securely distributed to all peers. Suitable for small deployments.
+
+**Digital Certificates (RSA/ECDSA)**: Each peer presents a certificate signed by a trusted CA. Scales to large deployments — each device has its own certificate; the CA handles trust. Standard for enterprise and carrier deployments.
+
+**EAP (in IKEv2)**: Allows username/password authentication for remote access users (IKEv2/EAP-MSCHAPv2, IKEv2/EAP-TLS). The gateway authenticates with a certificate; the client authenticates with EAP credentials. This is the mechanism used by the Windows native VPN client with IKEv2.
+
+---
+
+## NAT Traversal (NAT-T)
+
+IPsec ESP has no port numbers — it is an IP-level protocol. NAT devices need port numbers (TCP/UDP) to track sessions, so plain ESP cannot traverse NAT. **NAT-T (RFC 3947)** solves this by encapsulating ESP inside UDP port 4500:
+
+1. During IKE_SA_INIT, both peers include a NAT detection payload
+2. If either peer detects NAT in the path, both switch to UDP 4500 for IKE traffic
+3. All subsequent ESP packets are encapsulated in UDP 4500
+
+Modern IPsec implementations always enable NAT-T — there is no practical reason to disable it.
+
+---
+
+## Cisco IOS Site-to-Site IPsec Configuration
+
+```
+! Phase 1 — IKE Policy
+crypto ikev2 proposal SITE-TO-SITE
+ encryption aes-cbc-256
+ integrity sha256
+ group 14
+
+crypto ikev2 policy 10
+ proposal SITE-TO-SITE
+
+! Authentication
+crypto ikev2 keyring MY-KEYS
+ peer SITE-B
+  address 203.0.113.20
+  pre-shared-key cisco123!
+
+crypto ikev2 profile SITE-B-PROFILE
+ match identity remote address 203.0.113.20
+ authentication remote pre-share
+ authentication local pre-share
+ keyring local MY-KEYS
+
+! Phase 2 — IPsec Transform Set
+crypto ipsec transform-set AES-SHA esp-aes 256 esp-sha256-hmac
+ mode tunnel
+
+! Crypto Map
+crypto map VPN-MAP 10 ipsec-isakmp
+ set peer 203.0.113.20
+ set transform-set AES-SHA
+ set ikev2-profile SITE-B-PROFILE
+ match address VPN-ACL
+
+! Apply to WAN interface
+interface GigabitEthernet0/0
+ crypto map VPN-MAP
+
+! Traffic selector ACL
+ip access-list extended VPN-ACL
+ permit ip 192.168.1.0 0.0.0.255 10.0.0.0 0.0.0.255
+```
+
+---
+
+## Troubleshooting IPsec
+
+```bash
+# Cisco IOS — check IKE and IPsec SA status
+show crypto ikev2 sa
+show crypto ipsec sa
+
+# Check SA lifetimes and traffic counters
+show crypto ipsec sa detail
+
+# Real-time IKE debug (use with caution on production)
+debug crypto ikev2
+debug crypto ipsec
+
+# Linux (strongSwan)
+sudo ipsec status
+sudo ipsec statusall
+journalctl -u strongswan --follow
+```
+
+**Common failure points**:
+- Phase 1 mismatch: different encryption/hash/DH group proposal (check `show crypto ikev2 sa` for "FAILED" state)
+- Phase 2 mismatch: different transform set or mismatched traffic selectors
+- PSK mismatch: authentication fails silently — check syslog for "authentication failed"
+- NAT-T not enabled: ESP blocked by NAT device between peers
+
+---
+
+## References
+
+- [RFC 7296 — IKEv2](https://www.rfc-editor.org/rfc/rfc7296)
+- [RFC 4303 — ESP](https://www.rfc-editor.org/rfc/rfc4303)
+- [RFC 3947 — NAT-T for IKE](https://www.rfc-editor.org/rfc/rfc3947)

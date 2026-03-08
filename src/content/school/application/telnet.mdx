@@ -1,0 +1,141 @@
+---
+title: "Telnet — The Protocol SSH Replaced"
+layer: "application"
+protocol: "telnet"
+summary: "Telnet was the original remote terminal protocol — plain text, no encryption, no authentication beyond a username and password sent in cleartext. Understanding Telnet explains why SSH exists and why legacy network equipment still running Telnet is a critical vulnerability."
+tags: ["application", "telnet", "remote-access", "legacy", "cleartext", "rfc854"]
+order: 12
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Telnet (Teletype Network) was defined in RFC 854 (1983) and was the dominant remote terminal protocol for over a decade — before the internet became hostile, before packet sniffers were commonplace, before anyone seriously considered that network traffic might be intercepted.
+
+The fundamental problem with Telnet: **everything is plaintext**. Every character you type — including your username and password — flows across the network as unencrypted ASCII. Any device on the network path with a packet capture tool can read the entire session.
+
+SSH replaced Telnet for interactive remote access in the late 1990s. Telnet survives today in two places: **legacy network equipment** that has not been updated or replaced, and **diagnostic use** (manually testing application-layer protocols by connecting to a specific port).
+
+**Port 23, TCP.**
+
+---
+
+## How Telnet Works
+
+Telnet establishes a TCP connection and creates a virtual terminal (NVT — Network Virtual Terminal) between client and server. The NVT defines a common character encoding and control sequence format so that terminals with different capabilities can communicate.
+
+<FlowDiagram
+  parties={["Telnet Client", "Telnet Server"]}
+  steps={[
+    { from: "Telnet Client", to: "Telnet Server", label: "TCP Connect → port 23", sub: "" },
+    { from: "Telnet Server", to: "Telnet Client", label: "IAC DO ECHO", sub: "Option negotiation — server requests echo mode" },
+    { from: "Telnet Client", to: "Telnet Server", label: "IAC WILL ECHO", sub: "Client agrees" },
+    { from: "Telnet Server", to: "Telnet Client", label: "Login: ", sub: "Plaintext prompt" },
+    { from: "Telnet Client", to: "Telnet Server", label: "admin\\r\\n", sub: "Username — plaintext" },
+    { from: "Telnet Server", to: "Telnet Client", label: "Password: ", sub: "" },
+    { from: "Telnet Client", to: "Telnet Server", label: "password123\\r\\n", sub: "Password — plaintext, visible in packet capture" },
+    { from: "Telnet Server", to: "Telnet Client", label: "Router>", sub: "Interactive session begins — all commands plaintext" },
+  ]}
+/>
+
+### Option Negotiation
+
+Telnet uses an **IAC (Interpret As Command)** escape byte (0xFF) to embed control sequences within the data stream. Option negotiation uses four verbs:
+
+| Command | Meaning |
+|---------|---------|
+| `WILL` | I want to enable option X |
+| `WONT` | I refuse to enable option X |
+| `DO` | Please enable option X |
+| `DONT` | Please disable option X |
+
+Common options negotiated: echo (whether the server echoes characters back), suppress-go-ahead (full-duplex vs half-duplex mode), terminal type, window size.
+
+---
+
+## Why Telnet Is Dangerous
+
+<PacketDiagram
+  label="Telnet Packet — Everything Visible"
+  fields={[
+    { name: "IP Header", bytes: 3 },
+    { name: "TCP Header", bytes: 3 },
+    { name: "Payload: 'p' 'a' 's' 's' 'w' 'o' 'r' 'd'", bytes: 8, highlight: true },
+  ]}
+/>
+
+A single `tcpdump` or Wireshark capture on any device between the Telnet client and server reveals:
+- The username and password
+- Every command typed during the session
+- Every line of output returned
+- The complete configuration of the device if `show running-config` is run
+
+There is no encryption, no integrity protection, and no server authentication. A man-in-the-middle can inject commands into a Telnet session without detection.
+
+**Common attack**: A rogue device on the same network segment as a network administrator captures Telnet credentials to a router or switch. Those credentials often grant access to the entire network infrastructure.
+
+---
+
+## Telnet as a Diagnostic Tool
+
+Despite being dead as a remote administration protocol, `telnet` remains useful for testing TCP connectivity and manually probing application-layer protocols:
+
+```bash
+# Test if a port is open
+telnet 192.168.1.1 22          # Is SSH port reachable?
+telnet mail.example.com 25     # Can we reach the SMTP server?
+
+# Manually speak SMTP (for testing)
+telnet mail.example.com 25
+EHLO test.local
+MAIL FROM:<test@test.local>
+RCPT TO:<user@example.com>
+DATA
+Subject: Test
+.
+QUIT
+
+# Test HTTP (raw)
+telnet nakamas-it.com 80
+GET / HTTP/1.0
+Host: nakamas-it.com
+```
+
+This use of Telnet — as a raw TCP client to probe services — remains valid and common. It is connecting to **other** services (SMTP, HTTP, POP3) on their ports, not running Telnet remote access.
+
+---
+
+## Legacy Network Equipment
+
+Many older network devices — routers, switches, serial console servers, UPS units, industrial equipment — still have Telnet enabled as their default or only remote management interface. Disabling it or replacing it with SSH is standard hardening:
+
+**Cisco IOS — disable Telnet, enable SSH only:**
+```
+line vty 0 4
+ transport input ssh
+ login local
+```
+
+**Verify SSH is configured before disabling Telnet** — removing Telnet access from a device without SSH configured will leave the device accessible only via physical console.
+
+---
+
+## Key Concepts
+
+### Telnet is not "just old" — it is actively dangerous
+
+An administrator who Telnets into a switch from their workstation on a shared office network exposes credentials to every other device on that segment. On a corporate network, that means every other workstation's user, any rogue device, and any compromised system can capture those credentials.
+
+### The right replacement is SSH
+
+SSH (port 22) provides encrypted transport, public key authentication, and server identity verification. Every modern network device supports it. There is no valid operational reason to use Telnet for remote administration in 2026.
+
+---
+
+## References
+
+- [RFC 854 — Telnet Protocol Specification](https://www.rfc-editor.org/rfc/rfc854)
+- [RFC 855 — Telnet Option Specifications](https://www.rfc-editor.org/rfc/rfc855)

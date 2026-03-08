@@ -1,0 +1,133 @@
+---
+title: "SSL VPN — Remote Access over TLS"
+layer: "application"
+protocol: "ssl-vpn"
+summary: "SSL VPN uses TLS to create VPN tunnels that work through any HTTPS-capable firewall — no special ports to open, no IPsec negotiation to troubleshoot. Cisco AnyConnect, Palo Alto GlobalProtect, and Fortinet SSL VPN all use this approach for remote access, and understanding how they work explains why they succeed where IPsec struggles with NAT."
+tags: ["application", "ssl-vpn", "tls", "anyconnect", "remote-access", "clientless", "dtls"]
+order: 25
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+SSL VPN (also called TLS VPN) tunnels VPN traffic inside TLS connections. Since TLS on port 443 is the same protocol used for HTTPS, SSL VPN traffic is virtually indistinguishable from normal web traffic at the network level. This makes it far easier to deploy than IPsec:
+
+- Works through NAT (no UDP 500/4500 issues)
+- Works through corporate proxy servers
+- Works from hotels, airports, and restrictive networks
+- No special port-forwarding rules on the client's firewall
+
+SSL VPN comes in two models:
+
+**Clientless SSL VPN**: The user connects via a standard web browser. No software installed. The VPN gateway acts as a reverse proxy — the user accesses internal web applications, RDP sessions, and file shares through a web portal. Limited to web-based resources.
+
+**Client-based SSL VPN**: A VPN client (Cisco AnyConnect, Palo Alto GlobalProtect, Fortinet FortiClient) is installed on the device. Provides full network access — the device gets a virtual NIC and can reach any internal resource, not just web applications.
+
+---
+
+## How Cisco AnyConnect Works
+
+Cisco AnyConnect is the dominant enterprise SSL VPN client. It uses a combination of TLS and DTLS:
+
+- **TLS (TCP 443)**: Used for the initial connection, authentication, and as a fallback transport when DTLS is blocked
+- **DTLS (UDP 443)**: DTLS (Datagram TLS) is TLS over UDP — once authenticated via TLS, AnyConnect switches to DTLS for lower latency. Critical for real-time applications (VoIP, video) over the VPN
+
+<FlowDiagram
+  parties={["AnyConnect Client", "ASA/FTD Gateway"]}
+  steps={[
+    { from: "AnyConnect Client", to: "ASA/FTD Gateway", label: "HTTPS GET /+CSCOE+/logon.html", sub: "Browser-like request to start connection" },
+    { from: "ASA/FTD Gateway", to: "AnyConnect Client", label: "TLS handshake + server certificate", sub: "Client verifies server identity" },
+    { from: "AnyConnect Client", to: "ASA/FTD Gateway", label: "Username + Password (+ MFA token)", sub: "Credentials submitted over TLS" },
+    { from: "ASA/FTD Gateway", to: "AnyConnect Client", label: "Authentication success + AnyConnect manifest", sub: "Client downloads/updates AnyConnect if needed" },
+    { from: "AnyConnect Client", to: "ASA/FTD Gateway", label: "CONNECT tunnel (TLS)", sub: "Establish VPN tunnel" },
+    { from: "ASA/FTD Gateway", to: "AnyConnect Client", label: "IP address + routes + DNS", sub: "Virtual IP 10.0.100.50, split tunnel routes pushed" },
+    { from: "AnyConnect Client", to: "ASA/FTD Gateway", label: "DTLS session (UDP 443)", sub: "Switch to DTLS for lower latency" },
+    { from: "AnyConnect Client", to: "ASA/FTD Gateway", label: "Encapsulated user traffic (DTLS)", sub: "All VPN traffic encrypted in DTLS" },
+  ]}
+/>
+
+---
+
+## Clientless SSL VPN — Web Portal
+
+Clientless mode requires no installed software. The ASA/gateway presents a web portal at `https://vpn.nakamas-it.com`. After authentication, users access:
+
+- Internal HTTPS websites (proxied through the gateway)
+- RDP sessions (Java or HTML5 RDP client embedded in the browser)
+- SMB file shares (web-based file browser)
+- SSH (browser-based SSH client)
+
+The gateway rewrites URLs in proxied web pages to route through itself. This works well for simple web applications but breaks complex applications with JavaScript that constructs URLs dynamically.
+
+**Smart Tunnels / Port Forwarding**: A Java applet or thin client handles TCP port forwarding for non-HTTP applications (SMTP, IMAP, proprietary protocols) without a full VPN client.
+
+---
+
+## Authentication
+
+SSL VPNs support multiple authentication mechanisms, typically in combination:
+
+**Username + Password**: Validated against Active Directory (via LDAP or RADIUS), local database, or TACACS+.
+
+**Multi-Factor Authentication**: TOTP tokens (RSA SecurID, Cisco DUO), push notifications (DUO, Okta), SMS OTP. MFA is essential — a username and password alone is insufficient for VPN access.
+
+**Certificate-based authentication**: The client presents a machine or user certificate. Proves not just identity but also that the device is corporate-managed (the certificate was issued to a domain-joined machine). Used with Modern Authentication (Entra ID / SAML) in zero-trust architectures.
+
+**SAML / SSO**: AnyConnect and GlobalProtect support SAML 2.0 — the VPN gateway redirects authentication to an Identity Provider (Okta, Entra ID, Ping). Single sign-on with MFA handled centrally.
+
+---
+
+## Connection Profiles and Group Policies
+
+In Cisco ASA/FTD, **Connection Profiles** (tunnel groups) define how clients connect. **Group Policies** define what they get once connected:
+
+```
+group-policy REMOTE-WORKERS attributes
+ vpn-tunnel-protocol ssl-client dtls
+ split-tunnel-policy tunnelspecified
+ split-tunnel-network-list value INTERNAL-NETWORKS
+ dns-server value 10.0.0.10 10.0.0.11
+ default-domain value nakamas-it.com
+ vpn-session-timeout 28800
+ vpn-idle-timeout 30
+```
+
+**Split tunnelling policy**: `tunnelall` sends everything through the VPN. `tunnelspecified` only tunnels traffic to the listed networks — internet traffic goes directly. `excludespecified` tunnels everything except the listed networks.
+
+---
+
+## Always-On VPN
+
+Modern enterprise deployments configure **Always-On VPN** (Cisco term) or equivalent:
+
+- The VPN client connects automatically when the device is not on the corporate network
+- The connection is enforced — users cannot disconnect without administrator credentials
+- If the VPN drops, traffic is blocked until it reconnects (fail-close)
+- Critical for endpoint security in zero-trust architectures — all traffic is inspected regardless of location
+
+Always-On VPN is typically combined with Trusted Network Detection (TND) — the client detects when it is on the corporate network (based on a specific DNS response or internal probe) and automatically disconnects, since traffic is already on the trusted network.
+
+---
+
+## SSL VPN vs IPsec — When to Use Each
+
+| Consideration | SSL VPN | IPsec |
+|--------------|---------|-------|
+| Firewall traversal | Excellent — TCP/UDP 443 | Harder — UDP 500/4500 required |
+| NAT traversal | Native | Requires NAT-T |
+| Performance | Good (DTLS competitive) | Slightly higher throughput |
+| Site-to-site | Possible but uncommon | Standard choice |
+| Client required | Yes (full) / No (clientless) | Yes |
+| Vendor ecosystem | Cisco, Palo Alto, Fortinet | Universal — all firewalls |
+
+SSL VPN wins for remote access users behind varied networks. IPsec wins for site-to-site tunnels between firewalls where both ends are under administrative control.
+
+---
+
+## References
+
+- [RFC 6347 — DTLS 1.2](https://www.rfc-editor.org/rfc/rfc6347)
+- [Cisco AnyConnect Secure Mobility Client Administrator Guide](https://www.cisco.com/c/en/us/support/security/anyconnect-secure-mobility-client/)

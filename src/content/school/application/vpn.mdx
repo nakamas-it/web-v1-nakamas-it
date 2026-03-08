@@ -1,0 +1,119 @@
+---
+title: "VPN — Virtual Private Networks"
+layer: "application"
+protocol: "vpn"
+summary: "A VPN creates an encrypted tunnel over an untrusted network, making remote systems appear as if they are on the local network. Understanding what a VPN actually does — and what it does not — separates it from the marketing around it and frames why the underlying protocols (IPsec, SSL/TLS, WireGuard) matter."
+tags: ["application", "vpn", "tunnel", "encryption", "remote-access", "site-to-site", "ipsec", "ssl-vpn"]
+order: 24
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+A VPN (Virtual Private Network) is an encrypted tunnel between two points over an untrusted network — typically the internet. It achieves two things simultaneously: **confidentiality** (traffic cannot be read in transit) and **network extension** (the remote endpoint appears to be on the same network as the local end).
+
+VPNs are not a single protocol — they are a category of solution with several distinct implementations:
+
+| Technology | Protocol | Port | Common Use |
+|-----------|----------|------|-----------|
+| **IPsec** | ESP (IP 50) / IKEv2 (UDP 500/4500) | — | Site-to-site, enterprise remote access |
+| **SSL VPN** | TLS over TCP/UDP | 443 (typically) | Clientless remote access, enterprise |
+| **WireGuard** | WireGuard (UDP) | 51820 (default) | Modern, lightweight, personal and enterprise |
+| **OpenVPN** | TLS + custom | UDP 1194 | Open-source, cross-platform |
+| **L2TP/IPsec** | L2TP + IPsec | UDP 1701 + 500 | Legacy, built into Windows/iOS |
+| **PPTP** | PPTP | TCP 1723 | Broken — do not use |
+
+---
+
+## What a VPN Actually Does
+
+<FlowDiagram
+  parties={["Remote User", "Internet", "VPN Gateway", "Internal Network"]}
+  steps={[
+    { from: "Remote User", to: "VPN Gateway", label: "Encrypted VPN tunnel established", sub: "Original packets are encapsulated and encrypted" },
+    { from: "Remote User", to: "VPN Gateway", label: "Encrypted: { IP packet to 10.0.1.50 }", sub: "Outer packet: Remote User → VPN Gateway (public IPs)" },
+    { from: "VPN Gateway", to: "Internal Network", label: "Decapsulated: IP packet to 10.0.1.50", sub: "Inner packet forwarded on the internal network" },
+    { from: "Internal Network", to: "VPN Gateway", label: "Reply: IP packet from 10.0.1.50", sub: "" },
+    { from: "VPN Gateway", to: "Remote User", label: "Encrypted: { reply packet }", sub: "Return traffic encapsulated and encrypted" },
+  ]}
+/>
+
+The remote user's device gets a **virtual IP address** on the internal network (e.g., 10.0.0.50 from the VPN pool). Traffic to internal resources uses this address. From the internal network's perspective, the user is just another host on the LAN.
+
+---
+
+## Remote Access vs Site-to-Site
+
+**Remote Access VPN**: Individual users connect from wherever they are to gain access to the corporate network. Examples: employees working from home, contractors accessing internal systems. Requires a VPN client on each device.
+
+**Site-to-Site VPN**: Two entire networks are connected — the headquarters LAN and a branch office LAN, for example. No VPN client needed on individual machines; the routers/firewalls at each site handle the tunnel. Traffic between the two sites is automatically encrypted and routed through the tunnel.
+
+| Aspect | Remote Access | Site-to-Site |
+|--------|--------------|-------------|
+| Endpoints | Individual devices | Routers / Firewalls |
+| VPN client | Required on each device | Not needed — transparent to users |
+| Typical technology | SSL VPN, IPsec IKEv2 | IPsec, DMVPN |
+| Scale | Tens to thousands of users | Tens to hundreds of sites |
+| Authentication | User credentials + MFA | Pre-shared key or certificates |
+
+---
+
+## Split Tunnelling
+
+**Full tunnelling**: All traffic from the remote device goes through the VPN, including internet traffic. The corporate network becomes the internet gateway. Pro: maximum visibility and control. Con: uses corporate bandwidth for YouTube, adds latency.
+
+**Split tunnelling**: Only traffic destined for internal network ranges goes through the VPN; internet traffic goes directly. Pro: better performance, less corporate bandwidth consumption. Con: corporate IT cannot see or filter the user's internet traffic.
+
+Most modern enterprise SSL VPN solutions use split tunnelling by default, configured with specific routes pushed to the VPN client.
+
+---
+
+## VPN Protocols Compared
+
+### WireGuard — The Modern Choice
+
+WireGuard (2020) is a lean protocol built into the Linux kernel. It uses modern cryptography (ChaCha20, Poly1305, Curve25519, BLAKE2), has ~4,000 lines of code (vs ~100,000 for OpenVPN), and is significantly faster. Configuration is simple:
+
+```ini
+[Interface]
+PrivateKey = <client private key>
+Address = 10.100.0.2/24
+DNS = 10.0.0.1
+
+[Peer]
+PublicKey = <server public key>
+AllowedIPs = 10.0.0.0/8   # Routes through VPN
+Endpoint = vpn.nakamas-it.com:51820
+```
+
+WireGuard is stateless by design — connections resume transparently after IP changes (important for mobile).
+
+### OpenVPN — The Proven Open Standard
+
+OpenVPN uses TLS for key exchange and can run over TCP or UDP on any port — typically UDP 1194 or TCP 443. Running over TCP 443 allows it to traverse most firewalls (it looks like HTTPS). Certificate-based or username/password authentication. Mature, widely supported, but slower than WireGuard.
+
+### PPTP — Never Use
+
+PPTP (Point-to-Point Tunnelling Protocol) is cryptographically broken — MS-CHAPv2, its authentication mechanism, can be cracked in real time. Any system still using PPTP has no meaningful VPN security. It should have been retired by 2012.
+
+---
+
+## Key Concepts
+
+### A VPN is not anonymity
+
+A commercial "VPN service" that promises anonymity shifts trust from your ISP to the VPN provider — it does not eliminate it. The VPN provider can see all your traffic. For enterprise use, VPNs are about secure access to internal resources, not about anonymity.
+
+### MFA on VPN is not optional
+
+A VPN endpoint accepting only a username and password is one phished credential away from full network access. Every enterprise VPN should require a second factor — TOTP, hardware token, or push notification. Entra ID Conditional Access, Cisco DUO, and Okta all integrate with major VPN solutions.
+
+---
+
+## See Also
+
+- [IPsec VPN](/school/application/ipsec-vpn/) — deep dive on IPsec, IKEv2, and site-to-site tunnels
+- [SSL VPN](/school/application/ssl-vpn/) — clientless and client-based SSL VPN, Cisco AnyConnect
+- [DMVPN](/school/application/dmvpn/) — Cisco's Dynamic Multipoint VPN for large-scale site connectivity

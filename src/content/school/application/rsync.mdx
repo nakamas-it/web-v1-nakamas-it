@@ -1,0 +1,166 @@
+---
+title: "rsync — Efficient File Synchronisation"
+layer: "application"
+protocol: "rsync"
+summary: "rsync transfers only the differences between files, making it the standard tool for backups, deployments, and file synchronisation across systems. Its delta algorithm minimises bandwidth; its SSH transport makes it secure. Most production backup pipelines and deployment scripts use rsync under the hood."
+tags: ["application", "rsync", "backup", "synchronisation", "delta", "ssh", "rfc"]
+order: 18
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+rsync is a file transfer utility and protocol designed around a single insight: when synchronising files between two systems, you usually do not need to transfer the entire file — only the parts that changed. The **rsync delta-transfer algorithm** computes the differences between the source and destination versions of a file and transfers only the changed blocks.
+
+rsync operates in two transport modes:
+- **Over SSH** (most common): `rsync -avz user@remote:/path/ /local/path/` — no daemon required, inherits SSH security
+- **rsync daemon mode**: A standalone rsync daemon listens on **TCP port 873**, serving defined modules (directory trees) with optional authentication
+
+rsync is not just a protocol — it is the de facto standard tool for:
+- Incremental backups (`rsnapshot`, Bacula, Amanda all use it)
+- Deploying static websites and files to servers
+- Mirroring software repositories (most Linux mirror networks use rsync)
+- Synchronising configuration across server fleets
+
+---
+
+## The Delta Algorithm
+
+The rsync algorithm, developed by Andrew Tridgell, works in three phases:
+
+**Phase 1 — Checksum generation (receiver side)**:
+The receiving system splits the destination file into fixed-size blocks (typically 700 bytes) and computes two checksums for each block: a fast rolling Adler-32 checksum and a slower MD4 checksum. It sends this list of checksums to the sender.
+
+**Phase 2 — Block matching (sender side)**:
+The sender scans the source file using a sliding window. For each position, it computes the rolling checksum. If it matches any block's rolling checksum, it computes the MD4 checksum to confirm. Matching blocks are referenced by their offset in the destination file rather than transmitted. Non-matching data is added to a literal list.
+
+**Phase 3 — Delta transmission**:
+The sender transmits a sequence of instructions: "copy block N from existing file" or "insert these literal bytes". The receiver reconstructs the new file by following these instructions.
+
+The result: if you modify 10KB of a 1GB file, rsync transfers approximately 10KB, not 1GB.
+
+---
+
+## rsync Over SSH
+
+<FlowDiagram
+  parties={["rsync Client", "SSH Daemon", "rsync (remote)","Filesystem"]}
+  steps={[
+    { from: "rsync Client", to: "SSH Daemon", label: "SSH connection → port 22", sub: "Authenticated, encrypted channel" },
+    { from: "SSH Daemon", to: "rsync (remote)", label: "exec rsync --server ...", sub: "rsync started as remote subprocess" },
+    { from: "rsync Client", to: "rsync (remote)", label: "File list exchange", sub: "Client sends list of files to sync" },
+    { from: "rsync (remote)", to: "Filesystem", label: "Read destination checksums", sub: "Block checksums of existing files" },
+    { from: "rsync (remote)", to: "rsync Client", label: "Block checksum list", sub: "" },
+    { from: "rsync Client", to: "rsync (remote)", label: "Delta (changed blocks only)", sub: "Only differences transmitted" },
+    { from: "rsync (remote)", to: "Filesystem", label: "Reconstruct files", sub: "Apply delta to existing files" },
+    { from: "rsync (remote)", to: "rsync Client", label: "Transfer statistics", sub: "Bytes sent, received, transfer rate" },
+  ]}
+/>
+
+---
+
+## Common rsync Commands
+
+```bash
+# Basic sync — local to remote
+rsync -avz /local/path/ user@remote.host:/remote/path/
+
+# Remote to local (backup pull)
+rsync -avz user@remote.host:/remote/path/ /local/backup/
+
+# Dry run — show what would change without doing it
+rsync -avzn /source/ user@remote:/dest/
+
+# Mirror with deletion (remove files in dest not in source)
+rsync -avz --delete /source/ user@remote:/dest/
+
+# Exclude patterns
+rsync -avz --exclude='*.log' --exclude='.git/' /source/ user@remote:/dest/
+
+# Preserve hard links, ACLs, extended attributes
+rsync -avzHAX /source/ /dest/
+
+# Limit bandwidth (KB/s)
+rsync -avz --bwlimit=10000 /source/ user@remote:/dest/
+
+# Resume interrupted transfer (partial files)
+rsync -avz --partial --progress /source/ user@remote:/dest/
+
+# Use specific SSH key or port
+rsync -avz -e "ssh -i ~/.ssh/backup_key -p 2222" /source/ user@remote:/dest/
+```
+
+### Key Options
+
+| Flag | Effect |
+|------|--------|
+| `-a` (archive) | Recursive, preserve permissions/ownership/timestamps/symlinks |
+| `-v` | Verbose — show files being transferred |
+| `-z` | Compress data during transfer |
+| `-n` | Dry run — no changes made |
+| `--delete` | Delete destination files not present in source |
+| `--progress` | Show per-file transfer progress |
+| `--partial` | Keep partially transferred files (enables resume) |
+| `--checksum` | Compare by checksum instead of timestamp+size |
+| `--bwlimit` | Throttle transfer speed |
+
+---
+
+## rsync Daemon Mode
+
+When rsync runs as a daemon (port 873), it serves **modules** — named directory trees defined in `/etc/rsyncd.conf`:
+
+```ini
+# /etc/rsyncd.conf
+[backups]
+    path = /var/backups/
+    comment = Backup storage
+    read only = false
+    auth users = backupuser
+    secrets file = /etc/rsyncd.secrets
+    hosts allow = 10.0.0.0/24
+
+[mirrors]
+    path = /srv/mirror/
+    comment = Public mirror
+    read only = true
+```
+
+Connect to a module:
+```bash
+rsync -avz backupuser@backup.server::backups/myhost/ /local/restore/
+```
+
+Daemon mode authentication uses a simple username:password file — not SSH keys. The password is transmitted as an MD5 hash of a challenge. For any sensitive use, prefer rsync over SSH rather than the daemon protocol.
+
+---
+
+## Backup Patterns
+
+**Push backup** (client initiates): Each server runs a cron job pushing its data to a backup server. Simple but requires the backup server to have SSH access from each client, or clients to have write access to the backup destination.
+
+**Pull backup** (backup server initiates): The backup server SSHes into each client and pulls data. Preferred from a security standpoint — clients do not need outbound access to the backup server; the backup server controls the schedule.
+
+**Snapshot backups with hard links** (`rsnapshot`): Uses rsync plus hard links to maintain multiple point-in-time snapshots while storing only changed files once. A week of hourly snapshots of a 100GB system might use only 105GB total storage.
+
+---
+
+## Key Concepts
+
+### The trailing slash matters
+
+`rsync /source/ /dest/` syncs the **contents** of source into dest. `rsync /source /dest/` syncs the **directory itself** into dest, creating `/dest/source/`. This distinction trips up even experienced administrators — always verify with `--dry-run` first.
+
+### rsync does not encrypt by default in daemon mode
+
+rsync over SSH inherits SSH's encryption. rsync daemon mode (port 873) is plaintext. Never use daemon mode for sensitive data over untrusted networks — use the SSH transport instead.
+
+---
+
+## References
+
+- [rsync documentation — rsync.samba.org](https://rsync.samba.org/documentation.html)
+- [The rsync Algorithm (Tridgell & Mackerras)](https://rsync.samba.org/tech_report/)

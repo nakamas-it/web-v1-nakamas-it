@@ -1,0 +1,158 @@
+---
+title: "TACACS+ — Terminal Access Controller Access-Control System"
+layer: "application"
+protocol: "tacacs"
+summary: "TACACS+ is Cisco's AAA protocol for controlling access to network infrastructure — routers, switches, and firewalls. Unlike RADIUS, it separates authentication, authorisation, and accounting into independent transactions and encrypts the entire payload, making it the preferred choice for device administration in enterprise environments."
+tags: ["application", "tacacs", "aaa", "authentication", "authorisation", "accounting", "cisco", "rfc8907"]
+order: 13
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+TACACS+ (Terminal Access Controller Access-Control System Plus) is an AAA protocol designed specifically for **network device administration** — controlling who can log into routers, switches, and firewalls, and what commands they are allowed to run once they are in. It was developed by Cisco and remained proprietary until RFC 8907 (2020) standardised it.
+
+TACACS+ is frequently confused with its predecessors (TACACS and XTACACS), which are entirely different protocols despite the similar name. TACACS+ is not backward compatible with either.
+
+**TCP port 49.**
+
+### TACACS+ vs RADIUS
+
+| Feature | TACACS+ | RADIUS |
+|---------|---------|--------|
+| Transport | TCP | UDP |
+| Encryption | Full payload | Password only |
+| AAA separation | Separate transactions | Combined |
+| Primary use | Device administration | Network access (VPN, Wi-Fi) |
+| Command authorisation | Yes (per-command) | No |
+| Vendor | Cisco-origin (now RFC) | Open standard |
+| Accounting granularity | Per-command | Per-session |
+
+The defining advantages of TACACS+: **full payload encryption** and **command-level authorisation**. With TACACS+, you can permit a junior engineer to run `show` commands but deny `configure terminal`. RADIUS cannot do this.
+
+---
+
+## The Three Functions — Separated
+
+Unlike RADIUS, which typically combines authentication and authorisation into a single exchange, TACACS+ treats each function as an independent transaction with its own packet exchange:
+
+<FlowDiagram
+  parties={["Admin Client", "Network Device (NAS)", "TACACS+ Server"]}
+  steps={[
+    { from: "Admin Client", to: "Network Device (NAS)", label: "SSH connection", sub: "Admin initiates session to router/switch" },
+    { from: "Network Device (NAS)", to: "TACACS+ Server", label: "Authentication START", sub: "Username provided" },
+    { from: "TACACS+ Server", to: "Network Device (NAS)", label: "Authentication GETPASS", sub: "Server requests password" },
+    { from: "Network Device (NAS)", to: "TACACS+ Server", label: "Authentication CONTINUE", sub: "Password provided" },
+    { from: "TACACS+ Server", to: "Network Device (NAS)", label: "Authentication PASS", sub: "Identity verified" },
+    { from: "Network Device (NAS)", to: "TACACS+ Server", label: "Authorisation REQUEST", sub: "What is this user allowed to do?" },
+    { from: "TACACS+ Server", to: "Network Device (NAS)", label: "Authorisation PASS", sub: "Privilege level 15, permitted services" },
+    { from: "Admin Client", to: "Network Device (NAS)", label: "show running-config", sub: "Command entered" },
+    { from: "Network Device (NAS)", to: "TACACS+ Server", label: "Authorisation REQUEST (cmd=show)", sub: "Per-command authorisation check" },
+    { from: "TACACS+ Server", to: "Network Device (NAS)", label: "Authorisation PASS", sub: "Command permitted" },
+    { from: "Network Device (NAS)", to: "TACACS+ Server", label: "Accounting SEND (cmd=show running-config)", sub: "Command logged to TACACS+ server" },
+  ]}
+/>
+
+---
+
+## Packet Structure
+
+<PacketDiagram
+  label="TACACS+ Packet Header"
+  fields={[
+    { name: "Major Version (4 bits)", bytes: 1 },
+    { name: "Type: Auth/Author/Acct (1 byte)", bytes: 1, highlight: true },
+    { name: "Sequence Number (1 byte)", bytes: 1 },
+    { name: "Flags (1 byte)", bytes: 1 },
+    { name: "Session ID (4 bytes)", bytes: 2 },
+    { name: "Length (4 bytes)", bytes: 2 },
+    { name: "Encrypted Body", bytes: 6, highlight: true },
+  ]}
+/>
+
+The body is encrypted using MD5 with the shared secret as the key. Every packet in a session uses the same session ID but an incrementing sequence number. The sequence number prevents replay attacks within a session.
+
+**Note**: TACACS+ encryption uses MD5, which is considered weak by modern standards. RFC 8907 acknowledges this and recommends TLS transport as a future direction. For current deployments, TACACS+ over a dedicated management network is the practical mitigation.
+
+---
+
+## Command Authorisation — The Key Differentiator
+
+TACACS+ can authorise every individual command before the device executes it. This enables granular role-based access control for network infrastructure:
+
+**Example policy** on a TACACS+ server (Cisco ISE / FreeRADIUS / TACACS+ daemon):
+
+```
+# Network engineers — full access
+group = network-engineers {
+    service = exec {
+        priv-lvl = 15
+    }
+    cmd = configure { permit .* }
+    cmd = show { permit .* }
+}
+
+# Helpdesk — read-only
+group = helpdesk {
+    service = exec {
+        priv-lvl = 1
+    }
+    cmd = show { permit .* }
+    cmd = ping { permit .* }
+    cmd = configure { deny .* }
+    default cmd = deny
+}
+```
+
+Every time a helpdesk user types a command, the network device sends an authorisation request to TACACS+. Attempted `configure terminal` → denied before execution → logged.
+
+---
+
+## Cisco IOS Configuration
+
+```
+aaa new-model
+
+! Define TACACS+ servers
+tacacs server ISE-PRIMARY
+ address ipv4 10.0.0.10
+ key SecureSharedSecret123
+
+tacacs server ISE-SECONDARY
+ address ipv4 10.0.0.11
+ key SecureSharedSecret123
+
+! Authentication — use TACACS+, fall back to local if server unreachable
+aaa authentication login default group tacacs+ local
+
+! Authorisation — check every EXEC command
+aaa authorization exec default group tacacs+ local
+aaa authorization commands 15 default group tacacs+ local if-authenticated
+
+! Accounting — log all commands
+aaa accounting exec default start-stop group tacacs+
+aaa accounting commands 15 default start-stop group tacacs+
+```
+
+**Critical**: Always configure `local` as a fallback authentication method. If the TACACS+ server is unreachable and there is no fallback, administrators are locked out of every device simultaneously.
+
+---
+
+## Key Concepts
+
+### TACACS+ is for infrastructure access; RADIUS is for user access
+
+Use TACACS+ for SSH access to routers, switches, and firewalls — where per-command authorisation and full audit logging matter. Use RADIUS for VPN, Wi-Fi, and 802.1X — where per-session access control is sufficient. Many enterprise environments run both in parallel.
+
+### Every command is an audit trail
+
+With TACACS+ accounting enabled, every command run on every device by every administrator is logged to a central server with a timestamp, username, device IP, and the exact command. This is invaluable for change management audits and incident response.
+
+---
+
+## References
+
+- [RFC 8907 — The TACACS+ Protocol](https://www.rfc-editor.org/rfc/rfc8907)

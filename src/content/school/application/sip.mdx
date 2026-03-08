@@ -1,0 +1,165 @@
+---
+title: "SIP — Session Initiation Protocol"
+layer: "application"
+protocol: "sip"
+summary: "SIP is the signalling protocol that sets up, manages, and tears down voice and video calls over IP networks. It handles the phone ringing and the 'answer' — the actual audio flows separately over RTP. Every VoIP phone, every Teams call, every WebRTC session builds on the concepts SIP defined."
+tags: ["application", "sip", "voip", "telephony", "rtp", "sdp", "rfc3261"]
+order: 21
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+SIP (Session Initiation Protocol) is defined in RFC 3261 (2002) and is the dominant VoIP signalling protocol. It is a text-based, request-response protocol deliberately modelled on HTTP — SIP methods, headers, and response codes follow similar patterns to HTTP.
+
+SIP's responsibility is **session control**: establishing, modifying, and terminating communication sessions. Like RTSP, SIP does not carry media — it negotiates the parameters of the call (codecs, IP addresses, ports) using **SDP (Session Description Protocol)**, and the actual voice/video flows via **RTP** on separate ports.
+
+SIP is used in:
+- Enterprise IP PBX systems (Cisco CUCM, Avaya, Asterisk, FreePBX)
+- SIP trunks connecting PBX to the PSTN (public telephone network)
+- SIP phones (hardware desk phones and softphones)
+- WebRTC browsers (using JSEP, a SIP-adjacent mechanism)
+- Carrier interconnect (ITSPs — Internet Telephony Service Providers)
+
+**Ports**: UDP 5060 (standard, preferred for speed), TCP 5060 (reliable delivery), TLS 5061 (**SIPS** — SIP over TLS).
+
+---
+
+## SIP Components
+
+**User Agent (UA)**: The endpoint — a SIP phone, softphone, or PBX. Has two roles:
+- **UAC (User Agent Client)**: Sends requests (INVITE, BYE, etc.)
+- **UAS (User Agent Server)**: Receives requests and sends responses
+
+**SIP Proxy Server**: Routes SIP requests toward their destination. Stateless (just forwards) or stateful (tracks transactions). Analogous to an HTTP proxy.
+
+**SIP Registrar**: Accepts REGISTER requests and stores the current location (IP:port) of each SIP address. When a call arrives for `alice@nakamas-it.com`, the proxy queries the registrar to find Alice's current IP.
+
+**SIP Redirect Server**: Responds with a redirect (3xx) pointing the UAC to the next-hop address rather than forwarding the request itself.
+
+In practice, PBX systems (Asterisk, FreePBX) act as Registrar, Proxy, and B2BUA (Back-to-Back User Agent) simultaneously.
+
+---
+
+## SIP Methods
+
+| Method | Purpose |
+|--------|---------|
+| `INVITE` | Initiate a call session |
+| `ACK` | Acknowledge receipt of a final response to INVITE |
+| `BYE` | Terminate an established session |
+| `CANCEL` | Cancel a pending INVITE (before it is answered) |
+| `REGISTER` | Register current location with a SIP registrar |
+| `OPTIONS` | Query capabilities of a UA or proxy |
+| `SUBSCRIBE` | Subscribe to event notifications (presence, voicemail) |
+| `NOTIFY` | Deliver event notifications to a subscriber |
+| `REFER` | Ask a UA to transfer a call (call transfer) |
+| `MESSAGE` | Instant message (SMS over SIP) |
+| `INFO` | Mid-session information (DTMF tones) |
+
+---
+
+## SIP Response Codes
+
+Deliberately similar to HTTP:
+
+| Range | Meaning | Example |
+|-------|---------|---------|
+| 1xx | Provisional (informational) | 100 Trying, 180 Ringing, 183 Session Progress |
+| 2xx | Success | 200 OK (call answered) |
+| 3xx | Redirection | 302 Moved Temporarily |
+| 4xx | Client error | 404 Not Found, 401 Unauthorized, 486 Busy Here, 487 Request Terminated |
+| 5xx | Server error | 500 Internal Server Error, 503 Service Unavailable |
+| 6xx | Global failure | 600 Busy Everywhere, 603 Decline |
+
+---
+
+## A Complete SIP Call Flow
+
+<FlowDiagram
+  parties={["Alice (UAC)", "SIP Proxy", "Bob (UAS)"]}
+  steps={[
+    { from: "Alice (UAC)", to: "SIP Proxy", label: "INVITE sip:bob@nakamas-it.com", sub: "SDP offer: Alice's RTP IP:port + codec list" },
+    { from: "SIP Proxy", to: "Bob (UAS)", label: "INVITE sip:bob@nakamas-it.com", sub: "Proxied — Via header records path" },
+    { from: "Bob (UAS)", to: "SIP Proxy", label: "100 Trying", sub: "" },
+    { from: "SIP Proxy", to: "Alice (UAC)", label: "100 Trying", sub: "" },
+    { from: "Bob (UAS)", to: "SIP Proxy", label: "180 Ringing", sub: "Bob's phone is ringing" },
+    { from: "SIP Proxy", to: "Alice (UAC)", label: "180 Ringing", sub: "Alice hears ringback tone" },
+    { from: "Bob (UAS)", to: "SIP Proxy", label: "200 OK", sub: "SDP answer: Bob's RTP IP:port + selected codec" },
+    { from: "SIP Proxy", to: "Alice (UAC)", label: "200 OK", sub: "" },
+    { from: "Alice (UAC)", to: "SIP Proxy", label: "ACK", sub: "Three-way handshake complete" },
+    { from: "SIP Proxy", to: "Bob (UAS)", label: "ACK", sub: "" },
+    { from: "Alice (UAC)", to: "Bob (UAS)", label: "RTP audio stream (direct)", sub: "Voice flows directly — SIP proxy not in the media path" },
+    { from: "Bob (UAS)", to: "Alice (UAC)", label: "RTP audio stream (direct)", sub: "" },
+    { from: "Alice (UAC)", to: "SIP Proxy", label: "BYE", sub: "Alice hangs up" },
+    { from: "SIP Proxy", to: "Bob (UAS)", label: "BYE", sub: "" },
+    { from: "Bob (UAS)", to: "SIP Proxy", label: "200 OK", sub: "" },
+    { from: "SIP Proxy", to: "Alice (UAC)", label: "200 OK", sub: "Session terminated — RTP stops" },
+  ]}
+/>
+
+Notice: once the call is established, RTP flows **directly** between Alice and Bob — the SIP proxy is no longer in the path. This is different from older circuit-switched telephony where a central switch always processed the audio.
+
+---
+
+## SDP — The Negotiation Language
+
+The INVITE body contains an SDP payload describing what Alice can send and receive:
+
+```
+v=0
+o=alice 1234567890 1234567890 IN IP4 192.168.1.10
+s=Call
+c=IN IP4 192.168.1.10
+t=0 0
+m=audio 12340 RTP/AVP 0 8 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-15
+```
+
+- `c=` — Alice's IP for RTP
+- `m=audio 12340` — Alice will receive RTP on port 12340
+- `a=rtpmap:0 PCMU/8000` — G.711 μ-law (codec 0)
+- `a=rtpmap:8 PCMA/8000` — G.711 A-law (codec 8)
+- `a=rtpmap:101 telephone-event` — DTMF tones in-band
+
+Bob's 200 OK contains an SDP answer selecting the codec and providing his RTP endpoint. Both sides then send RTP to each other's declared IP:port.
+
+---
+
+## NAT Traversal — The Hard Problem
+
+SIP was designed assuming end-to-end IP connectivity. NAT breaks this because the SIP UA inside NAT puts its private IP in the SDP `c=` line — the remote party cannot reach a private IP. Solutions:
+
+**STUN (Session Traversal Utilities for NAT)**: The UA discovers its public IP/port by querying a STUN server. It then inserts the public IP in SDP.
+
+**TURN (Traversal Using Relays around NAT)**: When STUN fails (symmetric NAT), media is relayed through a TURN server. Higher latency, but works in all NAT scenarios.
+
+**ALG (Application Layer Gateway)**: The NAT device understands SIP and rewrites the private IP in SDP headers. Frequently causes problems — SIP ALGs on consumer routers are notoriously buggy. The standard advice: disable SIP ALG.
+
+**SIP Proxy in the media path (B2BUA)**: The proxy terminates both legs of the call and relays media. Adds latency but eliminates all NAT problems since both UAs communicate with the proxy's public IP.
+
+---
+
+## SRTP — Encrypted Voice
+
+Plain RTP carries voice as unencrypted packets — anyone with network access can capture and replay calls. **SRTP (Secure RTP, RFC 3711)** adds encryption and authentication to RTP streams:
+
+- Encryption: AES-128 or AES-256 in Counter Mode
+- Authentication: HMAC-SHA1
+
+SRTP keys are negotiated via **SDES (SDP Security Descriptions)** in the SIP INVITE — embedded in the SDP body, which is why SIP itself must also be encrypted (SIPS/TLS) when SDES is used. The modern alternative, **DTLS-SRTP**, negotiates keys directly in the DTLS handshake without exposing them in SDP.
+
+---
+
+## References
+
+- [RFC 3261 — SIP: Session Initiation Protocol](https://www.rfc-editor.org/rfc/rfc3261)
+- [RFC 3550 — RTP](https://www.rfc-editor.org/rfc/rfc3550)
+- [RFC 3711 — SRTP](https://www.rfc-editor.org/rfc/rfc3711)
+- [RFC 5389 — STUN](https://www.rfc-editor.org/rfc/rfc5389)

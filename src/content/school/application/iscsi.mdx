@@ -1,0 +1,141 @@
+---
+title: "iSCSI — IP Storage Networking"
+layer: "application"
+protocol: "iscsi"
+summary: "iSCSI encapsulates SCSI storage commands inside TCP/IP packets, turning an Ethernet network into a storage fabric. It lets servers mount remote disk volumes over standard IP networks — the same way Fibre Channel SANs work, but without dedicated storage hardware."
+tags: ["application", "iscsi", "storage", "san", "scsi", "tcp", "rfc7143"]
+order: 17
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+iSCSI (Internet Small Computer Systems Interface) carries SCSI commands over TCP/IP networks. SCSI is the command set used to communicate with storage devices — disks, tape drives, optical drives. Traditionally, SCSI required a direct physical connection or a dedicated Fibre Channel (FC) fabric. iSCSI puts those commands inside TCP packets, making block-level storage accessible over any IP network.
+
+**What iSCSI enables**: A server boots from a disk image on a remote storage array. A hypervisor cluster shares a storage pool across multiple hosts over a standard Ethernet switch. A NAS provides iSCSI LUNs alongside NFS/SMB shares. All of this over the same Ethernet infrastructure used for data traffic — no specialised HBAs or FC switches required.
+
+**TCP port 3260** is the standard iSCSI port.
+
+### iSCSI vs Other Storage Protocols
+
+| Protocol | Transport | Granularity | Typical Use |
+|----------|-----------|-------------|------------|
+| **iSCSI** | TCP/IP | Block (LUN) | SAN over Ethernet, VMware datastores |
+| **NFS** | TCP/UDP | File | Linux file sharing, VMware NFS datastores |
+| **SMB/CIFS** | TCP | File | Windows file sharing |
+| **Fibre Channel** | FC fabric | Block | Enterprise SAN, high performance |
+| **NVMe-oF** | RDMA/TCP | Block | High-performance NVMe over fabric |
+
+---
+
+## Initiators and Targets
+
+iSCSI uses a client-server model with specific terminology:
+
+**Initiator**: The client — the server that wants to access storage. This can be a software initiator (built into the OS — Windows, Linux, ESXi all include one) or a hardware iSCSI HBA.
+
+**Target**: The server — the storage device that presents disk volumes. This is the NAS, SAN controller, or software target (TrueNAS, Linux `targetcli`, Windows iSCSI Target Server).
+
+**LUN (Logical Unit Number)**: A logical volume presented by the target. The initiator sees a LUN as a raw block device (like a local disk) that it can partition and format.
+
+---
+
+## iSCSI Qualified Names (IQN)
+
+Every iSCSI node (initiator or target) is identified by an **IQN** — a globally unique name:
+
+```
+iqn.2026-01.com.nakamas-it:storage01.lun01
+├── iqn                    ← prefix
+├── 2026-01                ← year-month of domain registration
+├── com.nakamas-it         ← reversed domain name
+└── storage01.lun01        ← unique string assigned by the admin
+```
+
+Initiators have IQNs too (e.g., `iqn.1993-08.org.debian:server01`). Target access control lists (ACLs) use IQNs to restrict which initiators can connect to which LUNs.
+
+---
+
+## iSCSI Session Flow
+
+<FlowDiagram
+  parties={["Initiator (Server)", "iSCSI Target (Storage)"]}
+  steps={[
+    { from: "Initiator (Server)", to: "iSCSI Target (Storage)", label: "TCP Connect → port 3260", sub: "" },
+    { from: "Initiator (Server)", to: "iSCSI Target (Storage)", label: "Login Request PDU", sub: "Initiator IQN, CHAP auth, negotiation parameters" },
+    { from: "iSCSI Target (Storage)", to: "Initiator (Server)", label: "Login Response PDU", sub: "Authentication result, negotiated parameters" },
+    { from: "Initiator (Server)", to: "iSCSI Target (Storage)", label: "SCSI Command PDU (READ LBA 0, length 512)", sub: "Read sector 0 of the LUN" },
+    { from: "iSCSI Target (Storage)", to: "Initiator (Server)", label: "Data-In PDU (512 bytes)", sub: "Requested data" },
+    { from: "iSCSI Target (Storage)", to: "Initiator (Server)", label: "SCSI Response PDU (status: Good)", sub: "Command completed successfully" },
+    { from: "Initiator (Server)", to: "iSCSI Target (Storage)", label: "SCSI Command PDU (WRITE LBA 1024)", sub: "Write data" },
+    { from: "Initiator (Server)", to: "iSCSI Target (Storage)", label: "Data-Out PDU (data)", sub: "Write data follows" },
+    { from: "iSCSI Target (Storage)", to: "Initiator (Server)", label: "R2T PDU (Ready to Transfer)", sub: "Target ready to receive data" },
+    { from: "iSCSI Target (Storage)", to: "Initiator (Server)", label: "SCSI Response PDU (status: Good)", sub: "" },
+    { from: "Initiator (Server)", to: "iSCSI Target (Storage)", label: "Logout Request PDU", sub: "Graceful disconnect" },
+  ]}
+/>
+
+### iSCSI PDU Structure
+
+<PacketDiagram
+  label="iSCSI Basic Header Segment (48 bytes)"
+  fields={[
+    { name: "Opcode (1 byte)", bytes: 1, highlight: true },
+    { name: "Flags (1 byte)", bytes: 1 },
+    { name: "AHS Length + Data Segment Length", bytes: 3 },
+    { name: "LUN (8 bytes)", bytes: 3, highlight: true },
+    { name: "Initiator Task Tag (4 bytes)", bytes: 2 },
+    { name: "CmdSN / StatSN / ExpCmdSN", bytes: 6, highlight: true },
+    { name: "Reserved", bytes: 4 },
+  ]}
+/>
+
+**Opcode** identifies the PDU type: SCSI Command (0x01), SCSI Data-Out (0x05), SCSI Response (0x21), Data-In (0x25), Login Request (0x43), etc.
+
+**CmdSN / StatSN**: Command and status sequence numbers ensure PDUs are processed in order and detect retransmissions. Critical for maintaining SCSI command ordering guarantees over TCP.
+
+---
+
+## Authentication — CHAP
+
+iSCSI uses **CHAP (Challenge Handshake Authentication Protocol)** to authenticate initiators to targets:
+
+1. Target sends a random challenge
+2. Initiator responds with MD5(CHAP ID + secret + challenge)
+3. Target verifies the response using its stored copy of the secret
+
+**Mutual CHAP** also authenticates the target to the initiator — preventing a rogue storage device from impersonating the target.
+
+CHAP secrets should be at minimum 12 characters and ideally 128-bit random values. Weak CHAP secrets are vulnerable to offline dictionary attacks if traffic is captured.
+
+---
+
+## Multipathing and MPIO
+
+Enterprise iSCSI deployments use **multiple network paths** between initiator and target for redundancy and performance:
+
+- Two network interfaces on the server (two initiator IPs)
+- Two interfaces on the storage array (two target IPs)
+- MPIO (Multipath I/O) software aggregates these into a single logical device
+
+If one path fails (cable, switch, NIC), MPIO failover happens transparently. With active-active multipathing, both paths carry I/O simultaneously for higher throughput.
+
+---
+
+## Network Considerations
+
+**Dedicated storage network**: iSCSI should run on a dedicated VLAN or physical network, separate from regular data traffic. Storage I/O is latency-sensitive; network congestion from user traffic can cause iSCSI timeouts, filesystem corruption, or VM crashes.
+
+**Jumbo frames**: iSCSI benefits significantly from **MTU 9000 (jumbo frames)** — larger frames mean more data per packet, reducing CPU overhead and improving throughput. All switches in the path must support and be configured for jumbo frames; mismatched MTU causes fragmentation and poor performance.
+
+**No routing**: iSCSI storage traffic should stay on a local Layer 2 segment. Routing iSCSI through a firewall or WAN introduces latency that SCSI timeout values may not tolerate.
+
+---
+
+## References
+
+- [RFC 7143 — Internet Small Computer System Interface (iSCSI) Protocol](https://www.rfc-editor.org/rfc/rfc7143)
+- [RFC 3720 — iSCSI (original, superseded by 7143)](https://www.rfc-editor.org/rfc/rfc3720)

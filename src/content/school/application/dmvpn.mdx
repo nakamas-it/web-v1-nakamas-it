@@ -1,0 +1,140 @@
+---
+title: "DMVPN — Dynamic Multipoint VPN"
+layer: "application"
+protocol: "dmvpn"
+summary: "Cisco DMVPN solves the hub-and-spoke scaling problem of traditional site-to-site VPNs. Instead of configuring a tunnel between every pair of sites, DMVPN uses a single hub configuration and allows spokes to dynamically discover each other and build direct spoke-to-spoke tunnels on demand — dramatically reducing configuration complexity and improving performance for multi-site networks."
+tags: ["application", "dmvpn", "vpn", "cisco", "gre", "nhrp", "ipsec", "hub-spoke"]
+order: 27
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Traditional site-to-site IPsec VPN has a scaling problem: a fully meshed network of N sites requires N×(N-1)/2 tunnels. For 10 sites: 45 tunnels. For 50 sites: 1,225 tunnels. Each tunnel requires individual configuration on both endpoints.
+
+DMVPN (Dynamic Multipoint VPN) solves this with three components working together:
+
+**mGRE (Multipoint Generic Routing Encapsulation)**: A single GRE interface on the hub that accepts tunnels from multiple spokes. Spokes create a single mGRE tunnel interface that can talk to any other DMVPN peer.
+
+**NHRP (Next Hop Resolution Protocol)**: A protocol similar to ARP but for tunnel endpoints. Spokes register their public IP with the hub (the NHRP server). When a spoke needs to send traffic to another spoke, it queries NHRP to discover that spoke's public IP.
+
+**IPsec**: Encrypts all GRE tunnel traffic. IPsec profiles are applied to the mGRE interface rather than configured per-peer — a single configuration protects all tunnels.
+
+---
+
+## DMVPN Phases
+
+DMVPN has three phases with different spoke-to-spoke communication models:
+
+**Phase 1 — Hub-and-Spoke only**: All traffic flows through the hub. Spokes communicate with each other only via the hub. Simple, but the hub is in the forwarding path for all inter-spoke traffic.
+
+**Phase 2 — Spoke-to-Spoke direct (per-subnet)**: When Spoke A wants to reach a subnet behind Spoke B, it queries NHRP for Spoke B's public IP and builds a direct tunnel. Subsequent traffic to that subnet goes directly spoke-to-spoke, bypassing the hub. Routing must be per-subnet (no route summarisation on the hub).
+
+**Phase 3 — Spoke-to-Spoke direct (summarised routes)**: The hub sends NHRP redirect messages telling spokes to go direct. Works with route summarisation — the most scalable and most commonly deployed phase.
+
+---
+
+## How NHRP Works
+
+<FlowDiagram
+  parties={["Spoke A", "Hub (NHRP Server)", "Spoke B"]}
+  steps={[
+    { from: "Spoke A", to: "Hub (NHRP Server)", label: "NHRP Registration", sub: "My NBMA (public) IP is 203.0.113.10, my tunnel IP is 10.1.0.2" },
+    { from: "Spoke B", to: "Hub (NHRP Server)", label: "NHRP Registration", sub: "My NBMA IP is 203.0.113.20, my tunnel IP is 10.1.0.3" },
+    { from: "Spoke A", to: "Hub (NHRP Server)", label: "NHRP Resolution Request", sub: "What is the NBMA IP for tunnel IP 10.1.0.3?" },
+    { from: "Hub (NHRP Server)", to: "Spoke A", label: "NHRP Resolution Reply", sub: "10.1.0.3 is at NBMA address 203.0.113.20" },
+    { from: "Spoke A", to: "Spoke B", label: "Direct tunnel (mGRE + IPsec)", sub: "Spoke A builds direct IPsec tunnel to 203.0.113.20" },
+    { from: "Spoke A", to: "Spoke B", label: "Data traffic", sub: "All subsequent traffic bypasses the hub" },
+  ]}
+/>
+
+Once a spoke has resolved another spoke's NBMA address, it caches the mapping (NHRP cache entry with a configurable timeout). Direct tunnels are torn down when idle.
+
+---
+
+## DMVPN Configuration (Hub)
+
+```
+! mGRE tunnel interface — hub side
+interface Tunnel0
+ ip address 10.1.0.1 255.255.255.0
+ ip nhrp network-id 1
+ ip nhrp authentication DMVPN-KEY
+ ip nhrp map multicast dynamic        ! Allow spokes to register
+ tunnel source GigabitEthernet0/0     ! Hub's WAN interface
+ tunnel mode gre multipoint           ! mGRE — accepts multiple spokes
+ tunnel key 12345
+
+! IPsec profile applied to the tunnel
+crypto ipsec profile DMVPN-PROFILE
+ set transform-set AES-SHA
+ set ikev2-profile DMVPN-IKE
+
+interface Tunnel0
+ tunnel protection ipsec profile DMVPN-PROFILE
+
+! Routing — OSPF or EIGRP over the DMVPN tunnel
+router ospf 1
+ network 10.1.0.0 0.0.0.255 area 0
+ network 192.168.0.0 0.0.255.255 area 0
+```
+
+### DMVPN Configuration (Spoke)
+
+```
+interface Tunnel0
+ ip address 10.1.0.2 255.255.255.0
+ ip nhrp network-id 1
+ ip nhrp authentication DMVPN-KEY
+ ip nhrp nhs 10.1.0.1                        ! Next Hop Server = hub tunnel IP
+ ip nhrp map 10.1.0.1 203.0.113.1            ! Hub's public IP → tunnel IP mapping
+ ip nhrp map multicast 203.0.113.1           ! Hub handles multicast (routing protocols)
+ tunnel source GigabitEthernet0/0
+ tunnel mode gre multipoint
+ tunnel key 12345
+ tunnel protection ipsec profile DMVPN-PROFILE
+
+router ospf 1
+ network 10.1.0.0 0.0.0.255 area 0
+ network 192.168.10.0 0.0.0.255 area 0
+```
+
+The spoke only needs to know the hub's public IP and tunnel IP — not the addresses of any other spoke. All spoke discovery is handled by NHRP dynamically.
+
+---
+
+## Routing Over DMVPN
+
+DMVPN requires a routing protocol to distribute spoke subnets. The choice affects behaviour:
+
+**OSPF**: Works well with DMVPN Phase 3. Set spoke tunnel interfaces to `ip ospf network point-to-multipoint` or `broadcast` mode. With Phase 3, the hub summarises spoke routes — spokes use NHRP redirects to find direct paths.
+
+**EIGRP**: Often preferred for DMVPN. Use `no ip split-horizon eigrp` on the hub tunnel interface (required because the hub receives and re-advertises routes on the same interface). EIGRP's partial updates reduce overhead on large DMVPN networks.
+
+**BGP**: Used in large-scale DMVPN deployments (carrier-grade, SD-WAN-like setups). Each spoke is an eBGP peer to the hub. Scales to thousands of spokes without OSPF's flooding concerns.
+
+---
+
+## DMVPN with Dynamic Spoke IPs
+
+DMVPN handles spokes with dynamic public IPs (cable/DSL/4G) naturally — the spoke registers its current public IP with the hub via NHRP on each connection. The hub always knows the current NBMA address of each spoke. This makes DMVPN well-suited for branch offices on consumer internet connections.
+
+**Dual-hub redundancy**: Deploy two hub routers. Each spoke registers with both hubs. If the primary hub fails, routing protocols detect it (OSPF/EIGRP timers) and spokes use the secondary hub. Spoke-to-spoke tunnels can be rebuilt through the secondary hub's NHRP.
+
+---
+
+## DMVPN vs SD-WAN
+
+Modern SD-WAN solutions (Cisco Viptela/SD-WAN, Meraki Auto VPN, VMware VeloCloud) replace DMVPN in many new deployments with controller-driven overlay networking, per-application traffic steering, and cloud-based management. DMVPN remains prevalent in existing Cisco IOS/IOS-XE deployments and environments without cloud management.
+
+The concepts are similar: a dynamic hub-and-spoke overlay with on-demand spoke-to-spoke paths. SD-WAN adds application-aware routing, centralised management, and multi-cloud integration.
+
+---
+
+## References
+
+- [RFC 2332 — NBMA Next Hop Resolution Protocol (NHRP)](https://www.rfc-editor.org/rfc/rfc2332)
+- [Cisco DMVPN Design Guide](https://www.cisco.com/c/en/us/td/docs/solutions/Enterprise/WAN_and_MAN/DMVPN_2_Phase3/)

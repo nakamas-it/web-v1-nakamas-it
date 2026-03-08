@@ -1,0 +1,139 @@
+---
+title: "iperf — Network Performance Testing"
+layer: "application"
+protocol: "iperf"
+summary: "iperf is the standard tool for measuring network bandwidth, latency, and packet loss between two endpoints. Before blaming the application, the database, or the cloud, you run iperf — if the raw pipe cannot sustain the required throughput, nothing else matters."
+tags: ["application", "iperf", "bandwidth", "performance", "testing", "throughput", "jitter"]
+order: 20
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+iperf is an active network measurement tool — it generates traffic between two endpoints and measures what the network actually delivers. Unlike passive monitoring tools (which observe existing traffic), iperf creates a controlled test stream that reveals the true capacity and characteristics of the network path.
+
+**iperf3** is the current version (the original iperf and iperf2 are legacy). It is not a formal IETF protocol — it has its own JSON-based control protocol over **TCP port 5201** (configurable). The test data itself flows on the same port for TCP tests or on dynamically assigned ports for UDP tests.
+
+iperf3 is available on Linux, Windows, macOS, and most network operating systems. It is pre-installed on many network appliances and available in all major Linux distributions.
+
+---
+
+## Basic Architecture
+
+iperf3 uses a client-server model. One endpoint runs as the **server** (listener), the other as the **client** (initiator). The client connects to the server, negotiates test parameters, and drives the test. The server reports results back to the client at the end.
+
+<FlowDiagram
+  parties={["iperf3 Client", "iperf3 Server"]}
+  steps={[
+    { from: "iperf3 Client", to: "iperf3 Server", label: "TCP Connect → port 5201", sub: "Control channel" },
+    { from: "iperf3 Client", to: "iperf3 Server", label: "JSON: test parameters", sub: "Protocol, duration, streams, buffer size, direction" },
+    { from: "iperf3 Server", to: "iperf3 Client", label: "JSON: acknowledged", sub: "" },
+    { from: "iperf3 Client", to: "iperf3 Server", label: "TEST_START", sub: "Begin test" },
+    { from: "iperf3 Client", to: "iperf3 Server", label: "Data stream (TCP or UDP)", sub: "Test traffic at maximum possible rate" },
+    { from: "iperf3 Server", to: "iperf3 Client", label: "Interval reports (every 1s)", sub: "Throughput, retransmits, RTT (per interval)" },
+    { from: "iperf3 Client", to: "iperf3 Server", label: "TEST_END", sub: "" },
+    { from: "iperf3 Server", to: "iperf3 Client", label: "JSON: final results", sub: "Total bytes, average throughput, retransmits, CPU usage" },
+  ]}
+/>
+
+---
+
+## Common iperf3 Commands
+
+```bash
+# Start a server
+iperf3 -s
+
+# Start a server on a specific port, as daemon
+iperf3 -s -p 5202 -D
+
+# Basic TCP throughput test (10 seconds, default)
+iperf3 -c 192.168.1.100
+
+# Extended test — 30 seconds, 4 parallel streams
+iperf3 -c 192.168.1.100 -t 30 -P 4
+
+# UDP test — 100 Mbps target rate
+iperf3 -c 192.168.1.100 -u -b 100M
+
+# Reverse mode — server sends, client receives (tests downstream)
+iperf3 -c 192.168.1.100 -R
+
+# Bidirectional test (simultaneous upload and download)
+iperf3 -c 192.168.1.100 --bidir
+
+# JSON output (for scripting)
+iperf3 -c 192.168.1.100 -J
+
+# Set TCP window size (test buffer tuning impact)
+iperf3 -c 192.168.1.100 -w 4M
+
+# Specific number of bytes instead of time
+iperf3 -c 192.168.1.100 -n 10G
+```
+
+---
+
+## Reading iperf3 Output
+
+```
+[ ID] Interval        Transfer     Bitrate         Retr  Cwnd
+[  5]   0.00-1.00 sec  1.09 GBytes  9.39 Gbits/sec    0   3.00 MBytes
+[  5]   1.00-2.00 sec  1.10 GBytes  9.46 Gbits/sec    0   3.00 MBytes
+[  5]   2.00-3.00 sec  1.10 GBytes  9.45 Gbits/sec    0   3.00 MBytes
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[  5]   0.00-10.00 sec  11.0 GBytes  9.43 Gbits/sec    0             sender
+[  5]   0.00-10.00 sec  11.0 GBytes  9.43 Gbits/sec                  receiver
+```
+
+**Bitrate**: Achieved throughput — compare to the expected link speed (1Gbps Ethernet → expect ~940 Mbps after protocol overhead).
+
+**Retr**: TCP retransmissions — non-zero indicates packet loss or congestion. High retransmits alongside low throughput point to a network problem.
+
+**Cwnd (Congestion Window)**: TCP's estimate of how much data can be in flight. A small, non-growing Cwnd indicates the TCP stack is being throttled by packet loss.
+
+### UDP Test Output
+
+```
+[ ID] Interval        Transfer     Bitrate         Jitter    Lost/Total
+[  5]  0.00-10.00 sec   119 MBytes  99.9 Mbits/sec  0.045 ms  0/85855 (0%)
+```
+
+**Jitter**: Variation in packet arrival delay — critical for VoIP and real-time applications. Target < 10ms for voice; < 1ms for demanding real-time applications.
+
+**Lost/Total**: Packets lost vs total sent. Any loss in a controlled test environment warrants investigation.
+
+---
+
+## TCP vs UDP Tests — When to Use Each
+
+**TCP test** (default): Measures maximum achievable throughput with flow control. TCP will use the full available bandwidth and back off if there is loss. Good for: baseline link capacity, storage replication throughput, backup network testing.
+
+**UDP test** (`-u`): Measures jitter and loss at a specified target rate. UDP does not retransmit, so packet loss is directly observable. Good for: VoIP capacity validation, testing QoS queue behaviour, identifying buffer problems at specific traffic rates.
+
+---
+
+## Practical Scenarios
+
+**Pre-deployment network validation**: Before deploying a hyperconverged cluster, run iperf3 between all nodes at the expected storage traffic rate. Confirm jumbo frames are working (test with `-w 4M`), confirm no unexpected packet loss.
+
+**Troubleshooting "the application is slow"**: Run iperf3 between the application server and database server. If you get 1 Gbps, the network is fine — look elsewhere. If you get 100 Mbps on a 1G link, the network is the problem.
+
+**WAN link validation**: After a circuit install, run iperf3 to a server at the other site. Compare achieved throughput to the contracted bandwidth. Identify if CIR (Committed Information Rate) is being honoured.
+
+**Firewall throughput testing**: Place iperf3 servers on both sides of a firewall (inside and outside). Test at increasing rates to determine the firewall's actual throughput capacity under realistic traffic.
+
+---
+
+## Key Concepts
+
+### Multiple parallel streams matter for WAN testing
+
+A single TCP stream on a high-latency path (WAN) may not fill the pipe due to TCP slow start and the bandwidth-delay product. Use `-P 4` or `-P 8` (4–8 parallel streams) to saturate a high-latency WAN link properly. If one stream gives 100 Mbps but four give 400 Mbps on a 400 Mbps link, the per-stream limitation is TCP, not the network.
+
+### Always test in both directions
+
+Asymmetric problems are common — a link may perform well in one direction but poorly in the other due to different return paths, asymmetric QoS, or half-duplex issues. Use `-R` (reverse) and `--bidir` to test both directions.

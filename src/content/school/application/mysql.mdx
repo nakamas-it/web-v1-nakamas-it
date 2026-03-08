@@ -1,0 +1,156 @@
+---
+title: "MySQL Protocol — Database Wire Protocol"
+layer: "application"
+protocol: "mysql"
+summary: "The MySQL client-server protocol governs how applications talk to a MySQL or MariaDB database — the handshake, authentication, query execution, and result streaming. Understanding it matters for network security design, connection pooling, and diagnosing database connectivity issues."
+tags: ["application", "mysql", "mariadb", "database", "sql", "wire-protocol"]
+order: 19
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+MySQL uses a custom binary application-layer protocol for client-server communication. Every query your application sends, every result set returned, every authentication exchange — all defined by this protocol. It operates over **TCP port 3306** by default, though Unix domain sockets are used for local connections.
+
+The protocol is also used by **MariaDB** (a MySQL fork) and compatible databases like Amazon Aurora and Percona Server. Most MySQL client libraries (mysql2, JDBC Connector/J, PyMySQL, Connector/NET) implement this protocol directly.
+
+Understanding the wire protocol is valuable for:
+- Firewall and network ACL design
+- Diagnosing connection and authentication failures
+- Understanding what connection poolers (ProxySQL, MaxScale) do
+- SSL/TLS configuration for encrypted database connections
+
+---
+
+## Connection and Authentication
+
+<FlowDiagram
+  parties={["Application", "MySQL Server"]}
+  steps={[
+    { from: "Application", to: "MySQL Server", label: "TCP Connect → port 3306", sub: "" },
+    { from: "MySQL Server", to: "Application", label: "Initial Handshake Packet", sub: "Protocol version, server version, connection ID, auth plugin name, nonce" },
+    { from: "Application", to: "MySQL Server", label: "Handshake Response", sub: "Username, auth response (hashed password), database name, capabilities" },
+    { from: "MySQL Server", to: "Application", label: "OK Packet or ERR Packet", sub: "Authentication result" },
+    { from: "Application", to: "MySQL Server", label: "COM_QUERY: SELECT * FROM users WHERE id=1", sub: "Query sent as text" },
+    { from: "MySQL Server", to: "Application", label: "Result Set Header Packet", sub: "Number of columns" },
+    { from: "MySQL Server", to: "Application", label: "Column Definition Packets (×N)", sub: "Name, type, flags for each column" },
+    { from: "MySQL Server", to: "Application", label: "EOF Packet", sub: "End of column definitions" },
+    { from: "MySQL Server", to: "Application", label: "Row Data Packets (×M)", sub: "One packet per row, values as text" },
+    { from: "MySQL Server", to: "Application", label: "EOF Packet", sub: "End of result set" },
+    { from: "Application", to: "MySQL Server", label: "COM_QUIT", sub: "Graceful disconnect" },
+  ]}
+/>
+
+---
+
+## Packet Structure
+
+<PacketDiagram
+  label="MySQL Packet"
+  fields={[
+    { name: "Payload Length (3 bytes)", bytes: 3, highlight: true },
+    { name: "Sequence Number (1 byte)", bytes: 1 },
+    { name: "Payload (variable)", bytes: 8, highlight: true },
+  ]}
+/>
+
+Every MySQL packet has a 4-byte header: 3 bytes for payload length (limiting packets to 16MB — larger data is split across multiple packets) and 1 byte sequence number that increments within a single command/response exchange.
+
+---
+
+## Authentication Plugins
+
+MySQL supports multiple authentication mechanisms:
+
+**`mysql_native_password`** (legacy default): SHA1-based challenge-response. The server sends a random nonce; the client sends SHA1(SHA1(password) XOR SHA1(nonce + SHA1(SHA1(password)))). Never transmits the password. Still widely used but deprecated in MySQL 8.0.
+
+**`caching_sha2_password`** (default since MySQL 8.0): SHA256-based, with a server-side cache for performance. Requires either TLS or RSA key exchange for the initial authentication — plaintext TCP connections are rejected unless the password cache is warm.
+
+**`auth_socket` / `unix_socket`** (Linux local connections): Authenticates using the OS user identity of the connecting process. The `root` OS user can connect as the MySQL `root` user without a password. No network transmission at all — only works via Unix socket.
+
+**`LDAP` / PAM plugins**: Enterprise MySQL versions support authentication against LDAP or PAM, allowing database credentials to be managed alongside OS and application credentials.
+
+---
+
+## TLS for MySQL
+
+MySQL connections are plaintext by default — queries, result sets, and credentials (for `mysql_native_password`) flow unencrypted over the network. Enable TLS:
+
+```sql
+-- Check current connection TLS status
+SHOW STATUS LIKE 'Ssl_cipher';
+
+-- Require TLS for a specific user
+ALTER USER 'appuser'@'%' REQUIRE SSL;
+
+-- Require TLS + valid client certificate
+ALTER USER 'appuser'@'%' REQUIRE X509;
+```
+
+Server-side `my.cnf`:
+```ini
+[mysqld]
+ssl_ca     = /etc/mysql/ssl/ca.pem
+ssl_cert   = /etc/mysql/ssl/server-cert.pem
+ssl_key    = /etc/mysql/ssl/server-key.pem
+require_secure_transport = ON  # Reject plaintext connections
+```
+
+Client connection string with TLS:
+```
+mysql://appuser:password@dbhost:3306/mydb?ssl=true&sslmode=verify-full
+```
+
+---
+
+## Prepared Statements
+
+The MySQL protocol supports **prepared statements** — a two-phase execution model:
+
+1. **COM_STMT_PREPARE**: Client sends the query with `?` placeholders. Server parses and returns a statement ID and parameter count.
+2. **COM_STMT_EXECUTE**: Client sends the statement ID and parameter values as binary types. Server executes and returns results.
+
+Benefits: Parameters are transmitted as typed binary values, not as embedded SQL text — **SQL injection is structurally impossible** through a prepared statement. The server also caches the query execution plan, improving performance for repeated queries.
+
+```python
+# Correct — prepared statement
+cursor.execute("SELECT * FROM users WHERE email = %s", (user_input,))
+
+# Wrong — string interpolation (SQL injection risk)
+cursor.execute(f"SELECT * FROM users WHERE email = '{user_input}'")
+```
+
+---
+
+## Connection Pooling
+
+Opening a new MySQL connection involves a TCP handshake, TLS handshake (if enabled), and authentication exchange — 50–200ms per connection. Applications that open and close connections per request cannot scale.
+
+**Connection poolers** maintain a pool of persistent MySQL connections and multiplex application requests through them:
+
+- **Application-side pools**: HikariCP (Java), mysqlclient pool (Python), mysql2 pool (Node.js) — built into the client library
+- **Proxy poolers**: **ProxySQL**, **MaxScale** — a dedicated proxy that understands the MySQL protocol, provides read/write splitting, query routing, and connection multiplexing across multiple backend servers
+
+ProxySQL in particular is common in production: it appears to applications as a MySQL server (port 6033 by default), accepts application connections, and routes queries to backend MySQL replicas based on rules.
+
+---
+
+## Key Concepts
+
+### Port 3306 should never be internet-facing
+
+A MySQL server exposed on port 3306 to the internet will be found by scanners within minutes and subjected to constant brute-force authentication attempts. MySQL should only be reachable from application servers — bind to `127.0.0.1` for local-only access, or restrict via firewall to specific application server IPs.
+
+### `max_connections` is a hard limit
+
+MySQL has a configurable maximum number of simultaneous connections (`max_connections`, default 151). Exceeding this causes `ERROR 1040: Too many connections` — the application cannot connect. Connection pooling prevents this from being a bottleneck.
+
+---
+
+## References
+
+- [MySQL Internals — Client/Server Protocol](https://dev.mysql.com/doc/internals/en/client-server-protocol.html)
+- [MySQL 8.0 Reference — Connection Security](https://dev.mysql.com/doc/refman/8.0/en/security-connections.html)

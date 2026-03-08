@@ -1,0 +1,124 @@
+---
+title: "NetBIOS — Network Basic Input/Output System"
+layer: "application"
+protocol: "netbios"
+summary: "NetBIOS is the legacy name resolution and session service that Windows networks relied on before DNS took over. It still runs silently in most Windows environments, and understanding it explains why you can browse network shares by machine name on a local segment — and why it is a significant lateral movement enabler for attackers."
+tags: ["application", "netbios", "nbt", "wins", "smb", "windows", "name-resolution", "rfc1001"]
+order: 15
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+NetBIOS (Network Basic Input/Output System) originated in the early 1980s as an API for network communication on IBM PC networks. It was never designed as a protocol — it was an API that got adapted for network use. As TCP/IP became dominant, Microsoft implemented **NetBIOS over TCP/IP (NBT)**, defined in RFC 1001/1002 (1987), allowing NetBIOS applications to run over IP networks.
+
+NetBIOS provides three services, each on its own port:
+
+| Service | Port | Protocol | Function |
+|---------|------|----------|---------|
+| **Name Service** | 137 | UDP/TCP | Register and resolve NetBIOS names |
+| **Datagram Service** | 138 | UDP | Connectionless messaging and browsing |
+| **Session Service** | 139 | TCP | Connection-oriented sessions (SMB over NetBIOS) |
+
+Modern Windows networks use SMB directly over TCP port 445 (without NetBIOS), but NetBIOS on ports 137-139 remains enabled by default and actively used for backward compatibility.
+
+---
+
+## NetBIOS Names
+
+Every device on a NetBIOS network has a **NetBIOS name** — up to 15 characters, padded to 16, with the 16th byte indicating the resource type:
+
+| Suffix (16th byte) | Resource |
+|-------------------|---------|
+| `<00>` | Workstation service |
+| `<03>` | Messenger service |
+| `<06>` | RAS Server service |
+| `<20>` | File Server service (SMB) |
+| `<1B>` | Domain Master Browser |
+| `<1C>` | Domain Controllers |
+| `<1D>` | Local Master Browser |
+
+When you ping `\\FILESERVER`, Windows resolves the NetBIOS name `FILESERVER<20>` to an IP address before opening a TCP connection to port 445.
+
+---
+
+## Name Resolution — How NetBIOS Finds Hosts
+
+<FlowDiagram
+  parties={["Client", "Network (Broadcast)", "WINS Server"]}
+  steps={[
+    { from: "Client", to: "Network (Broadcast)", label: "Name Query (broadcast)", sub: "Who is FILESERVER<20>? (UDP 137, broadcast)" },
+    { from: "Network (Broadcast)", to: "Client", label: "Positive Name Query Response", sub: "I am FILESERVER — here is my IP (if host is present)" },
+    { from: "Client", to: "WINS Server", label: "Name Query (unicast)", sub: "If broadcast fails, query WINS server (UDP 137)" },
+    { from: "WINS Server", to: "Client", label: "Name Query Response", sub: "IP address for FILESERVER<20>" },
+  ]}
+/>
+
+**Node types** determine the order of resolution methods:
+
+| Node Type | Behaviour |
+|-----------|-----------|
+| **B-node** (broadcast) | Broadcast only — does not query WINS |
+| **P-node** (point-to-point) | WINS only — no broadcast |
+| **M-node** (mixed) | Broadcast first, then WINS |
+| **H-node** (hybrid) | WINS first, then broadcast — default on Windows |
+
+**WINS (Windows Internet Name Service)** is the server-side NetBIOS name database — the NetBIOS equivalent of DNS. In modern environments it is mostly retired; DNS handles name resolution, but Windows still falls back to NetBIOS broadcast (NBNS) when DNS fails.
+
+---
+
+## LLMNR and NBNS — The Attacker's Gift
+
+When a Windows machine cannot resolve a name via DNS, it falls back to:
+1. **LLMNR (Link-Local Multicast Name Resolution)** — multicast on the local segment
+2. **NBNS (NetBIOS Name Service)** — broadcast on the local segment
+
+Both are unauthenticated. Any host on the network can respond to these queries claiming to be the requested name. This is the basis of **LLMNR/NBNS poisoning attacks** — a staple of internal network penetration testing:
+
+1. User types `\\FILESERVERR` (typo) — DNS returns NXDOMAIN
+2. Windows sends LLMNR/NBNS query: "Who is FILESERVERR?"
+3. Attacker (running Responder) replies: "That's me — connect here"
+4. Windows sends SMB authentication — NTLM challenge/response captured
+5. Attacker cracks NTLM hash offline or relays it to another service
+
+**Mitigation**: Disable LLMNR via Group Policy (`Computer Configuration → Administrative Templates → Network → DNS Client → Turn off multicast name resolution`). Disable NetBIOS over TCP/IP on all adapters. These two changes eliminate the most common internal credential harvesting technique.
+
+---
+
+## NetBIOS and Modern Windows
+
+Modern file sharing (SMB2/SMB3) runs directly over **TCP port 445** and does not require NetBIOS. The NetBIOS session service (port 139) is only needed when communicating with very old systems (Windows 9x era).
+
+Despite this, ports 137-139 remain enabled by default on Windows. In a domain environment with proper DNS, they serve almost no legitimate purpose but provide significant attack surface. Disabling them on endpoints is standard hardening:
+
+```powershell
+# Disable NetBIOS over TCP/IP on all adapters (PowerShell)
+$adapters = Get-WmiObject Win32_NetworkAdapterConfiguration
+foreach ($adapter in $adapters) {
+    $adapter.SetTcpipNetbios(2)  # 2 = Disabled
+}
+```
+
+Or via DHCP Option 43/46 to set all clients to P-node (WINS only, no broadcast).
+
+---
+
+## Key Concepts
+
+### NetBIOS browsing — the "Network Neighbourhood"
+
+The NetBIOS Datagram Service (port 138) powered Windows Network Neighbourhood — the browser service that listed machines and shares on the local subnet. Every subnet elected a **Master Browser** that maintained the list. In large networks, browsing was notoriously unreliable across subnets. Active Directory and DNS-based service discovery replaced this, but the browser service persisted until Windows 10 20H2, when it was finally removed.
+
+### Block NetBIOS at the firewall — always
+
+NetBIOS ports (137-139) should never be reachable from outside the local network segment. Exposing these ports to the internet invites SMB worm propagation (WannaCry used SMB/NetBIOS extensively). Block outbound 137-139 and 445 at the perimeter firewall.
+
+---
+
+## References
+
+- [RFC 1001 — Protocol Standard for a NetBIOS Service on a TCP/UDP Transport: Concepts and Methods](https://www.rfc-editor.org/rfc/rfc1001)
+- [RFC 1002 — Protocol Standard for a NetBIOS Service on a TCP/UDP Transport: Detailed Specifications](https://www.rfc-editor.org/rfc/rfc1002)

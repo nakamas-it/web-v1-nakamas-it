@@ -1,0 +1,169 @@
+---
+title: "SMB — Server Message Block"
+layer: "application"
+protocol: "smb"
+summary: "SMB is the Windows file sharing protocol — how Windows maps network drives, how Samba lets Linux and macOS join Windows networks, and how ransomware spreads laterally across corporate networks. SMB3 with encryption is a fundamentally different security posture than the SMB1 that WannaCry exploited."
+tags: ["application", "smb", "cifs", "windows", "file-sharing", "samba", "rfc9361"]
+order: 22
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+SMB (Server Message Block) is the protocol that powers Windows file sharing, printer sharing, and inter-process communication. When you map a network drive (`\\fileserver\share`), browse Network Neighbourhood, or access a NAS from Windows, you are speaking SMB.
+
+The protocol has a complex history:
+
+| Version | Year | Key Features |
+|---------|------|-------------|
+| **SMB1** (CIFS) | 1984 | Original — no encryption, many vulnerabilities. **Disable everywhere.** |
+| **SMB2** | 2006 | Windows Vista — reduced command set, better performance, signing |
+| **SMB2.1** | 2010 | Windows 7 — large MTU, better caching |
+| **SMB3** | 2012 | Windows 8 — transparent failover, scale-out, **encryption** |
+| **SMB3.1.1** | 2015 | Windows 10 — pre-auth integrity, AES-128-GCM encryption |
+
+**TCP port 445** is the current standard (SMB directly over TCP). Port 139 (SMB over NetBIOS) is legacy and should be disabled.
+
+---
+
+## SMB1 — The Protocol That Would Not Die
+
+SMB1 was developed in the 1980s for small LAN environments where security was not a consideration. It has dozens of known vulnerabilities, was exploited by **EternalBlue** (MS17-010), and powered the **WannaCry** ransomware that caused billions in damages in 2017.
+
+Microsoft disabled SMB1 by default in Windows 10 version 1709 and Windows Server 2019. Despite this:
+- Many organisations still have SMB1 enabled on older servers and NAS devices
+- Some network scanners and monitoring tools require SMB1
+- Industrial and medical devices with embedded Windows XP still speak only SMB1
+
+**Action**: Audit for SMB1 with `Get-SmbServerConfiguration | Select EnableSMB1Protocol`. If it is `True`, disable it: `Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force`.
+
+---
+
+## SMB Connection Flow
+
+<FlowDiagram
+  parties={["Windows Client", "File Server"]}
+  steps={[
+    { from: "Windows Client", to: "File Server", label: "TCP Connect → port 445", sub: "" },
+    { from: "Windows Client", to: "File Server", label: "SMB2 NEGOTIATE", sub: "Proposed dialects: SMB 2.0.2, 2.1, 3.0, 3.0.2, 3.1.1" },
+    { from: "File Server", to: "Windows Client", label: "NEGOTIATE Response", sub: "Selected dialect: SMB 3.1.1, capabilities, server GUID" },
+    { from: "Windows Client", to: "File Server", label: "SESSION_SETUP (NTLM/Kerberos)", sub: "Authentication negotiation" },
+    { from: "File Server", to: "Windows Client", label: "SESSION_SETUP Response", sub: "Session ID assigned" },
+    { from: "Windows Client", to: "File Server", label: "TREE_CONNECT \\\\server\\share", sub: "Connect to specific share" },
+    { from: "File Server", to: "Windows Client", label: "TREE_CONNECT Response", sub: "Tree ID, share capabilities" },
+    { from: "Windows Client", to: "File Server", label: "CREATE (filename, desired access)", sub: "Open or create a file" },
+    { from: "File Server", to: "Windows Client", label: "CREATE Response (file handle)", sub: "" },
+    { from: "Windows Client", to: "File Server", label: "READ (handle, offset, length)", sub: "Read file data" },
+    { from: "File Server", to: "Windows Client", label: "READ Response (data)", sub: "" },
+    { from: "Windows Client", to: "File Server", label: "CLOSE (handle)", sub: "Close file" },
+    { from: "Windows Client", to: "File Server", label: "TREE_DISCONNECT", sub: "Disconnect from share" },
+  ]}
+/>
+
+---
+
+## SMB Packet Structure
+
+<PacketDiagram
+  label="SMB2 Packet Header (64 bytes)"
+  fields={[
+    { name: "Protocol ID (\\xFESMB)", bytes: 2 },
+    { name: "Header Length (64)", bytes: 1 },
+    { name: "Credit Charge", bytes: 1 },
+    { name: "Status / Channel Sequence", bytes: 2, highlight: true },
+    { name: "Command (2 bytes)", bytes: 1, highlight: true },
+    { name: "Credits Granted", bytes: 1 },
+    { name: "Flags", bytes: 2 },
+    { name: "Message ID (8 bytes)", bytes: 3, highlight: true },
+    { name: "Session ID (8 bytes)", bytes: 3, highlight: true },
+    { name: "Signature (16 bytes)", bytes: 4 },
+  ]}
+/>
+
+**Credits**: SMB2+ uses a credit system for flow control. The client requests credits; the server grants them. Each request consumes credits; the server replenishes them in responses. This prevents a client from flooding the server with requests.
+
+**Message ID**: Unique identifier per request, used to match responses to requests. Allows pipelining — the client can have multiple outstanding requests simultaneously without waiting for each response.
+
+---
+
+## Authentication
+
+SMB authentication uses the GSSAPI framework, supporting multiple mechanisms:
+
+**Kerberos** (domain environments): The preferred mechanism. The client presents a Kerberos service ticket for the SMB server's SPN (`cifs/fileserver.nakamas-it.com`). No password is sent over the network.
+
+**NTLM** (fallback, workgroup, non-domain): Challenge-response authentication using the user's password hash. NTLMv2 is the minimum acceptable version — NTLMv1 is broken. NTLM relay attacks allow an attacker to capture and relay NTLM authentication to another server.
+
+**Anonymous / Guest**: No authentication — access with any or no credentials. Should be disabled in all environments.
+
+---
+
+## SMB Signing and Encryption
+
+**SMB Signing**: Adds an HMAC to every SMB packet, preventing man-in-the-middle modification. Required by default on domain controllers; optional elsewhere. When signing is not enforced, NTLM relay attacks can modify SMB traffic in transit.
+
+Enable signing via Group Policy: `Computer Configuration → Windows Settings → Security Settings → Local Policies → Security Options → Microsoft network client/server: Digitally sign communications (always) → Enabled`
+
+**SMB Encryption** (SMB3): Full AES encryption of SMB traffic — not just signing. Configured per-share or per-server:
+
+```powershell
+# Encrypt all traffic to this server
+Set-SmbServerConfiguration -EncryptData $true
+
+# Encrypt a specific share
+Set-SmbShare -Name "Finance" -EncryptData $true
+
+# Require encryption (reject unencrypted clients)
+Set-SmbServerConfiguration -RejectUnencryptedAccess $true
+```
+
+SMB encryption makes SMB suitable for use over untrusted networks (not just the internal LAN).
+
+---
+
+## Samba — SMB on Linux and macOS
+
+**Samba** is the open-source implementation of the SMB protocol stack for Unix-like systems. It allows Linux and macOS machines to:
+- Act as file and print servers accessible from Windows clients
+- Join an Active Directory domain as a member server
+- Act as an Active Directory Domain Controller (Samba 4)
+
+Basic Samba file share configuration (`/etc/samba/smb.conf`):
+
+```ini
+[global]
+   workgroup = NAKAMAS-IT
+   realm = NAKAMAS-IT.COM
+   security = ADS
+   min protocol = SMB2
+
+[data]
+   path = /srv/data
+   valid users = @domain-users
+   read only = no
+   create mask = 0664
+```
+
+macOS uses SMB3 natively for Finder file sharing and Time Machine backups over the network.
+
+---
+
+## Security Hardening Checklist
+
+- Disable SMB1 (`Set-SmbServerConfiguration -EnableSMB1Protocol $false`)
+- Enable SMB signing on all clients and servers
+- Enable SMB encryption for sensitive shares
+- Block SMB at the perimeter firewall (ports 445 and 139 should never reach the internet)
+- Restrict SMB to specific IP ranges via Windows Firewall rules
+- Use Kerberos authentication — disable NTLMv1, restrict NTLMv2
+- Monitor for lateral movement: unusual SMB connections between workstations
+
+---
+
+## References
+
+- [MS-SMB2 — Server Message Block (SMB) Protocol Versions 2 and 3](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/)
+- [Samba — samba.org](https://www.samba.org/)

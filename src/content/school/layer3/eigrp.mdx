@@ -1,0 +1,176 @@
+---
+title: "EIGRP — Enhanced Interior Gateway Routing Protocol"
+layer: "layer3"
+protocol: "eigrp"
+summary: "EIGRP is Cisco's advanced distance-vector routing protocol — faster convergence than RIP, simpler than OSPF, and the default interior routing protocol in most Cisco enterprise deployments. The DUAL algorithm guarantees loop-free paths and instant failover to a pre-calculated backup route without triggering a full network recalculation."
+tags: ["layer3", "eigrp", "routing", "dual", "cisco", "distance-vector", "rfc7868"]
+order: 12
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+EIGRP (Enhanced Interior Gateway Routing Protocol) was developed by Cisco in 1992 as a proprietary protocol. It was opened as an informational RFC in 2013 and standardised in RFC 7868 (2016), though it remains most commonly deployed in Cisco environments.
+
+EIGRP is classified as an **advanced distance-vector** protocol — sometimes called a "hybrid" protocol. It shares characteristics with distance-vector protocols (each router knows only its neighbours' information, not the full topology) but adds features that make it behave more like a link-state protocol:
+
+- **Partial, bounded updates**: Only changed routes are sent, only to affected neighbours (not periodic full table dumps like RIP)
+- **DUAL algorithm**: Guarantees loop-free paths at all times
+- **Rapid convergence**: Pre-computed backup paths activate instantly on primary failure
+- **Multiple metrics**: Bandwidth, delay, reliability, load, and MTU (in practice, only bandwidth and delay are used)
+
+**IP Protocol 88** (not TCP or UDP — EIGRP has its own transport layer built in, called RTP — Reliable Transport Protocol, not to be confused with the audio RTP).
+
+---
+
+## EIGRP Metric — The Composite Formula
+
+EIGRP calculates a **composite metric** from up to five components. In default configuration, only **bandwidth** and **delay** are used:
+
+```
+Metric = 256 × (K1 × BW + (K2 × BW)/(256 - Load) + K3 × Delay) × K5/(Reliability + K4)
+```
+
+With default K-values (K1=1, K2=0, K3=1, K4=0, K5=0), this simplifies to:
+
+```
+Metric = 256 × (10^7 / min_bandwidth_kbps + sum_of_delays_in_tens_of_microseconds)
+```
+
+**Bandwidth**: The lowest bandwidth link on the path (bottleneck). Expressed as 10^7 divided by the bandwidth in Kbps.
+
+**Delay**: The cumulative delay along the path. Each interface has a configured delay (in tens of microseconds). The sum of all interface delays on the path.
+
+**Example**: A path through a 100 Mbps link (delay 10µs) and a 1 Gbps link (delay 1µs):
+- Bandwidth: 10^7 / 100,000 = 100
+- Delay: (10 + 1) / 10 = 1.1 (in tens of µs)
+- Metric ≈ 256 × (100 + 1.1) = ~25,882
+
+---
+
+## DUAL — The Diffusing Update Algorithm
+
+The DUAL algorithm is what separates EIGRP from simple distance-vector protocols. It guarantees **loop-free paths at all times**, even during convergence.
+
+### Key Terms
+
+**Feasible Distance (FD)**: The best metric from this router to the destination network (the metric of the Successor route).
+
+**Reported Distance (RD)** / **Advertised Distance (AD)**: The metric a neighbour reports for reaching the destination.
+
+**Successor**: The best-metric next hop to a destination. This is the route installed in the routing table.
+
+**Feasible Successor (FS)**: A backup next hop that satisfies the **Feasibility Condition**: its Reported Distance must be **less than** the current Feasible Distance. This guarantees the backup path cannot loop through us.
+
+**Feasibility Condition**: RD < FD. If a neighbour's reported distance is less than our current best metric, that neighbour cannot be routing through us — so using it as a backup is loop-free.
+
+### Instant Failover with a Feasible Successor
+
+When a Feasible Successor exists:
+
+```
+Primary: RouterA → RouterB → Destination (FD = 1000)
+Backup:  RouterA → RouterC → Destination (RD = 800 < FD 1000 ✓ — Feasible Successor)
+```
+
+If RouterB goes down, RouterA **instantly** activates the RouterC path — no queries, no recalculation, no topology change propagation. Convergence time: milliseconds.
+
+### Active State — When No Feasible Successor Exists
+
+When the Successor fails and there is no Feasible Successor, the route enters **Active state**:
+1. The router sends **Query** packets to all neighbours asking "Do you have a path to this network?"
+2. Neighbours respond with **Reply** packets (or send Queries further if they also lose their route)
+3. When all Replies are received, the router recalculates and selects a new Successor
+
+This query/reply mechanism is **bounded** — it propagates only as far as routers that use the failed path, not across the entire network like OSPF's LSA flooding.
+
+---
+
+## EIGRP Packet Types
+
+EIGRP uses five packet types, delivered reliably via its own RTP (Reliable Transport Protocol):
+
+| Packet | Purpose |
+|--------|---------|
+| **Hello** | Neighbour discovery and keepalive (multicast 224.0.0.10) |
+| **Update** | Route information (sent when topology changes) |
+| **Query** | Ask neighbours for a path to a destination (Active state) |
+| **Reply** | Response to a Query |
+| **Acknowledgement** | Confirm receipt of a reliable packet |
+
+---
+
+## EIGRP Neighbour Relationship
+
+<FlowDiagram
+  parties={["Router A", "Router B"]}
+  steps={[
+    { from: "Router A", to: "Router B", label: "Hello (multicast 224.0.0.10)", sub: "AS number, K-values, hold time" },
+    { from: "Router B", to: "Router A", label: "Hello (multicast 224.0.0.10)", sub: "AS number, K-values, hold time" },
+    { from: "Router A", to: "Router B", label: "Update (full routing table)", sub: "Unicast — initial full update to new neighbour" },
+    { from: "Router B", to: "Router A", label: "ACK", sub: "" },
+    { from: "Router B", to: "Router A", label: "Update (full routing table)", sub: "Unicast — full update back" },
+    { from: "Router A", to: "Router B", label: "ACK", sub: "" },
+    { from: "Router A", to: "Router B", label: "Hello (periodic)", sub: "Keepalive — default every 5s (LAN) or 60s (WAN)" },
+    { from: "Router A", to: "Router B", label: "Update (partial — route change only)", sub: "Bounded, partial update on topology change" },
+  ]}
+/>
+
+**Neighbour requirements**: Same AS number, same K-values (metric weights), compatible authentication, same subnet. Mismatched K-values prevent adjacency even if all other parameters match.
+
+**Hello interval**: 5 seconds on LAN, 60 seconds on serial WAN. **Hold time**: 3× Hello interval (15s / 180s). If no Hello is received within the hold time, the neighbour is declared dead and routes through it are removed.
+
+---
+
+## EIGRP Configuration (Cisco IOS)
+
+```
+! Classic EIGRP (IOS 12.x style)
+router eigrp 100                        ! AS 100
+ network 192.168.1.0 0.0.0.255          ! Advertise this network
+ network 10.0.0.0 0.255.255.255
+ no auto-summary                        ! Required — disable classful summarisation
+ passive-interface GigabitEthernet0/2   ! Don't send Hellos out this interface
+
+! Named EIGRP (IOS 15.x / IOS-XE — preferred)
+router eigrp ENTERPRISE
+ !
+ address-family ipv4 unicast autonomous-system 100
+  !
+  af-interface GigabitEthernet0/2
+   passive-interface
+  !
+  topology base
+   redistribute ospf 1 metric 1000000 100 255 1 1500
+  !
+  network 192.168.1.0 0.0.0.255
+  network 10.0.0.0 0.255.255.255
+  eigrp router-id 1.1.1.1
+```
+
+---
+
+## EIGRP vs OSPF — When to Use Each
+
+| Consideration | EIGRP | OSPF |
+|--------------|-------|------|
+| Vendor support | Cisco-focused (RFC available) | Universal |
+| Configuration complexity | Simpler | More complex (areas, DR/BDR) |
+| Convergence | Very fast (FS instant failover) | Fast (SPF calculation) |
+| Metric | Composite (BW + delay) | Cost (bandwidth-based) |
+| Unequal-cost load balancing | Yes (`variance` command) | No |
+| Scalability | Good | Excellent (hierarchical areas) |
+| IPv6 support | EIGRPv6 | OSPFv3 |
+
+**Rule of thumb**: Use EIGRP in homogeneous Cisco environments where simplicity and fast convergence are priorities. Use OSPF in multi-vendor environments or when strict standards compliance is required.
+
+**Unequal-cost load balancing** is a unique EIGRP feature: the `variance` multiplier allows traffic to be distributed across paths with different metrics, proportional to their metric difference. OSPF and most other protocols only do equal-cost load balancing.
+
+---
+
+## References
+
+- [RFC 7868 — Cisco's Enhanced Interior Gateway Routing Protocol (EIGRP)](https://www.rfc-editor.org/rfc/rfc7868)

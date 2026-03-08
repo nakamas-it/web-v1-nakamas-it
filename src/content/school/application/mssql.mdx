@@ -1,0 +1,172 @@
+---
+title: "MSSQL — Microsoft SQL Server Protocol"
+layer: "application"
+protocol: "mssql"
+summary: "The TDS (Tabular Data Stream) protocol powers all communication between applications and Microsoft SQL Server. Every query, every stored procedure call, every bulk insert goes through TDS. Understanding it matters for firewall design, connection security, Always On availability groups, and diagnosing authentication failures."
+tags: ["application", "mssql", "sql-server", "tds", "database", "windows", "rfc"]
+order: 23
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Microsoft SQL Server uses **TDS (Tabular Data Stream)** as its wire protocol — a proprietary binary protocol developed by Sybase in the 1980s and inherited by Microsoft when they licensed the database technology. All SQL Server clients — ADO.NET, JDBC, ODBC, Python `pyodbc`, the `sqlcmd` utility — speak TDS under the hood.
+
+**TCP port 1433** is the default for the default SQL Server instance. Named instances use dynamic ports (registered with the SQL Browser service on UDP port 1434).
+
+TDS is also used by **Azure SQL Database**, **Azure SQL Managed Instance**, and **Amazon RDS for SQL Server** — any tool that connects to SQL Server speaks TDS regardless of where the database runs.
+
+---
+
+## SQL Server Instances and Port Discovery
+
+**Default instance**: Listens on TCP 1433. Connect with: `server\` or just the server name.
+
+**Named instances**: Listen on a dynamic port. The **SQL Server Browser service** (UDP 1434) maps instance names to their current port:
+
+```bash
+# Query SQL Browser to find instance ports
+nmap -sU -p 1434 --script ms-sql-info 192.168.1.10
+```
+
+Connection string for a named instance:
+```
+Server=192.168.1.10\SQLEXPRESS;Database=mydb;...
+# or
+Server=192.168.1.10,49172;Database=mydb;...  (direct port)
+```
+
+Blocking UDP 1434 at the firewall forces clients to use explicit port numbers — a common hardening step that also prevents instance enumeration.
+
+---
+
+## TDS Connection and Authentication
+
+<FlowDiagram
+  parties={["Application", "SQL Server"]}
+  steps={[
+    { from: "Application", to: "SQL Server", label: "TCP Connect → port 1433", sub: "" },
+    { from: "Application", to: "SQL Server", label: "Pre-Login Packet", sub: "TDS version, encryption requirement, instance name" },
+    { from: "SQL Server", to: "Application", label: "Pre-Login Response", sub: "TDS version agreed, encryption capability" },
+    { from: "Application", to: "SQL Server", label: "TLS Handshake (if encryption required)", sub: "Encrypts all subsequent traffic" },
+    { from: "Application", to: "SQL Server", label: "Login7 Packet", sub: "Username, password (for SQL auth), database, client info" },
+    { from: "SQL Server", to: "Application", label: "Login ACK + Environment Change", sub: "Auth success, database context, server version" },
+    { from: "Application", to: "SQL Server", label: "SQL Batch: SELECT @@VERSION", sub: "" },
+    { from: "SQL Server", to: "Application", label: "Row data + Done token", sub: "Result set returned" },
+    { from: "Application", to: "SQL Server", label: "RPC Request: sp_executesql", sub: "Prepared statement execution" },
+    { from: "SQL Server", to: "Application", label: "Result set + Return status", sub: "" },
+  ]}
+/>
+
+---
+
+## TDS Packet Structure
+
+<PacketDiagram
+  label="TDS Packet Header (8 bytes)"
+  fields={[
+    { name: "Type (1 byte)", bytes: 1, highlight: true },
+    { name: "Status (1 byte)", bytes: 1 },
+    { name: "Length (2 bytes)", bytes: 2 },
+    { name: "SPID — Server Process ID (2 bytes)", bytes: 2, highlight: true },
+    { name: "PacketID (1 byte)", bytes: 1 },
+    { name: "Window (1 byte)", bytes: 1 },
+    { name: "Payload (variable)", bytes: 4, highlight: true },
+  ]}
+/>
+
+**Type** field identifies the packet purpose:
+- `0x01` — SQL Batch (T-SQL statement)
+- `0x03` — RPC (stored procedure call)
+- `0x04` — Table Response
+- `0x07` — Bulk Load Data
+- `0x10` — TLS/SSL exchange
+- `0x12` — Pre-Login
+
+**SPID**: The server-assigned process ID for this connection — useful for matching application connections to `sys.dm_exec_sessions` in SQL Server.
+
+---
+
+## Authentication Modes
+
+**Windows Authentication (integrated security)**: The application uses the current Windows user's Kerberos or NTLM credentials. No password in the connection string. Credentials are passed transparently by the Windows security layer.
+
+```
+Server=sqlserver;Database=mydb;Integrated Security=SSPI;
+```
+
+**SQL Server Authentication**: Username and password stored in SQL Server's own user database. Sent inside the TLS-encrypted Login7 packet.
+
+```
+Server=sqlserver;Database=mydb;User Id=appuser;Password=...;Encrypt=True;
+```
+
+**Microsoft recommends Windows Authentication** — it leverages Kerberos, supports MFA through Entra ID, and avoids embedding database passwords in connection strings.
+
+**Entra ID (Azure AD) Authentication**: For Azure SQL, applications can authenticate using managed identities or service principals — no passwords at all.
+
+---
+
+## Encryption
+
+By default, SQL Server encrypts only the login packet (the password). All subsequent query traffic (including result sets containing sensitive data) is plaintext unless full encryption is configured.
+
+**Force encryption on the server**:
+- SQL Server Configuration Manager → SQL Server Network Configuration → Protocols for MSSQLSERVER → Properties → Force Encryption = Yes
+
+**Require encryption from the client**:
+```
+Server=sqlserver;Database=mydb;Encrypt=True;TrustServerCertificate=False;
+```
+
+`TrustServerCertificate=False` requires the client to validate the server's TLS certificate — preventing MITM attacks. `TrustServerCertificate=True` encrypts traffic but does not verify server identity (better than nothing, still vulnerable to MITM).
+
+---
+
+## Always On Availability Groups
+
+SQL Server **Always On Availability Groups** provide high availability and disaster recovery. Key networking components:
+
+**Availability Group Listener**: A virtual network name and IP address that clients connect to. The listener routes connections to the current primary replica. If the primary fails, the listener IP moves to the new primary — transparent to applications.
+
+**Endpoint ports**: Replicas communicate database mirroring traffic over TCP port 5022 (default) — this must be open between all replica nodes in the firewall.
+
+**Read-only routing**: The listener can route read-intent connections (connection string: `ApplicationIntent=ReadOnly`) to secondary replicas, offloading reporting workloads from the primary.
+
+---
+
+## SQL Server Browser Service
+
+The SQL Browser service (UDP 1434) allows clients to discover named instance ports. It maintains a list of all SQL Server instances on the machine and their current ports.
+
+```
+# Client sends to UDP 1434:
+CLNT_UCAST_INST\SQLEXPRESS
+
+# Browser responds:
+ServerName=SQLSERVER;InstanceName=SQLEXPRESS;IsClustered=No;Version=15.0.2000;tcp=49172
+```
+
+**Security implication**: SQL Browser reveals the presence and version of all SQL Server instances on a machine. Block UDP 1434 at the network perimeter and use explicit port numbers in connection strings for named instances.
+
+---
+
+## Key Concepts
+
+### The `sa` account is a permanent target
+
+The `sa` (system administrator) account is the built-in SQL Server superuser with SQL Authentication. Brute-force attacks against `sa` are constant on internet-exposed SQL Servers. Mitigations: rename `sa`, set a strong random password, disable it if Windows Authentication is exclusively used, and never expose port 1433 to the internet.
+
+### Connection strings contain secrets
+
+SQL Server connection strings with SQL Authentication embed database passwords. These frequently end up in configuration files, environment variables, source control, or application crash logs. Use Windows Authentication or managed identities to eliminate passwords from connection strings entirely.
+
+---
+
+## References
+
+- [MS-TDS — Tabular Data Stream Protocol](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-tds/)
+- [SQL Server Security Best Practices — Microsoft](https://learn.microsoft.com/en-us/sql/relational-databases/security/sql-server-security-best-practices)
