@@ -1,0 +1,153 @@
+---
+title: "Copper Cabling — Ethernet over Twisted Pair"
+layer: "layer1"
+protocol: "copper"
+summary: "The physical medium that carries most wired Ethernet traffic — what twisted pair cable actually is, how it works, and how the categories differ."
+tags: ["layer1", "ethernet", "twisted-pair", "cat6", "rj45", "physical"]
+order: 1
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Long before a packet has a source or destination IP address, before MAC addresses are looked up, before any protocol logic runs at all, data is nothing more than electrical voltage on a copper wire. Layer 1 — the Physical Layer — is the foundation everything else is built on. Get it wrong, and nothing above it works, no matter how well the rest of the stack is configured.
+
+Twisted pair copper cable is the dominant physical medium for wired Ethernet in buildings worldwide. If you walk into a server room, an office, or a network closet anywhere on the planet, the overwhelming majority of cables you will find connecting devices to switches are copper twisted pair terminated with RJ-45 connectors. It is inexpensive, flexible, easy to terminate in the field, and capable of carrying 10 Gbps over distances that cover nearly every in-building deployment scenario.
+
+Understanding the physical layer is not just academic. Cable quality, termination errors, distance violations, and interference sources are responsible for a significant proportion of real-world connectivity issues — problems that do not generate clean error messages, that show up as intermittent drops or degraded speeds rather than outright failures, and that can be nearly invisible without the right diagnostic tools and a solid understanding of what is happening electrically.
+
+---
+
+## Why Twisted? The Physics of Noise Cancellation
+
+The "twisted" in twisted pair is not cosmetic. It is the core mechanism that makes copper Ethernet practical in real environments where electrical noise is everywhere.
+
+When a current flows through a wire, it generates a magnetic field around that wire. Conversely, a changing magnetic field near a wire will induce a voltage in that wire — this is electromagnetic interference (EMI). In an environment full of motors, fluorescent lights, other cables, and power lines, a plain copper wire would pick up so much noise that signals would be indistinguishable from the interference.
+
+Twisting two wires together solves this with a principle called **differential signaling**. Instead of sending a signal on one wire and using a common ground, Ethernet transmits two equal and opposite signals simultaneously — one wire carries the positive (+) signal, the other carries an inverted (-) copy of the same signal. Any external interference affects both wires nearly equally because they are physically close to each other. The receiver subtracts one wire's voltage from the other's: the wanted signal doubles (because the two copies add), while the interference cancels out (because the same interference on both wires subtracts to zero).
+
+The twist rate — how many twists per centimeter — matters. Different pairs within the same cable are twisted at slightly different rates to reduce **crosstalk**: interference between adjacent pairs inside the same cable jacket. Higher category cables use tighter twists and more precise manufacturing tolerances to reduce this internal crosstalk, which is the primary differentiator between cable categories.
+
+---
+
+## Inside the Cable — Eight Wires, Four Pairs
+
+A standard Ethernet cable contains eight conductors organized into four twisted pairs. The pairs are color-coded according to the TIA-568 standard:
+
+| Pair | Wire Colors            | Standard Function in 1000BASE-T |
+|------|------------------------|----------------------------------|
+| 1    | Blue / White-Blue      | Bidirectional (pair BI_DA)       |
+| 2    | Orange / White-Orange  | Bidirectional (pair BI_DB)       |
+| 3    | Green / White-Green    | Bidirectional (pair BI_DC)       |
+| 4    | Brown / White-Brown    | Bidirectional (pair BI_DD)       |
+
+Older 10/100 Mbps Ethernet (10BASE-T and 100BASE-TX) used only two of the four pairs — one pair for transmit and one for receive. Gigabit Ethernet (1000BASE-T) uses all four pairs simultaneously, with each pair carrying data in both directions at once through a technique called **hybrid circuit cancellation**.
+
+The wiring pattern at the RJ-45 connector follows one of two standards:
+
+- **TIA-568A** — used historically in government installations
+- **TIA-568B** — the de facto standard in most commercial deployments
+
+Both standards work identically electrically. What matters is that both ends of a cable use the **same** standard for a straight-through cable, or **opposite** standards for a crossover cable.
+
+---
+
+## Straight-Through vs Crossover
+
+When two devices of the **same type** (switch-to-switch, PC-to-PC) communicate, the transmit pins of one device must connect to the receive pins of the other. If both ends use the same wiring standard, transmit connects to transmit — which does not work. A **crossover cable** solves this by swapping pairs 2 and 3 at one end, so that the transmit pair on one side connects to the receive pair on the other.
+
+| Cable Type     | End A Standard | End B Standard | Use Case                          |
+|----------------|----------------|----------------|-----------------------------------|
+| Straight-through | TIA-568B     | TIA-568B       | PC to switch, switch to router    |
+| Crossover      | TIA-568A       | TIA-568B       | Switch to switch, PC to PC        |
+
+In practice, most modern equipment supports **Auto MDI-X** — the device detects which type of cable is connected and automatically configures its pins accordingly. This means a straight-through cable works in nearly any scenario on modern hardware. However, if you are dealing with older equipment, passive patch panels, or infrastructure that does not support Auto MDI-X, understanding which cable type is required becomes essential.
+
+---
+
+## Cable Categories
+
+The category rating of a cable reflects the manufacturing quality of the conductors, insulation, and jacket, which in turn determines how well the cable controls crosstalk and signal attenuation at higher frequencies. Higher categories support faster speeds, longer distances, and stricter electrical performance guarantees.
+
+| Category | Max Speed | Max Distance | Frequency | Common Use              |
+|----------|-----------|--------------|-----------|-------------------------|
+| Cat5e    | 1 Gbps    | 100 m        | 100 MHz   | General enterprise LAN  |
+| Cat6     | 1 Gbps (10 Gbps up to 55 m) | 100 m | 250 MHz | High-density environments |
+| Cat6a    | 10 Gbps   | 100 m        | 500 MHz   | Data centers, uplinks   |
+| Cat7     | 10 Gbps   | 100 m        | 600 MHz   | Rarely used in practice |
+| Cat8     | 25/40 Gbps| 30 m         | 2000 MHz  | Short data center runs  |
+
+### Cat5e — The Baseline
+
+Cat5e ("e" for enhanced) is the minimum standard for any new installation that expects to carry Gigabit Ethernet. It superseded plain Cat5 with tighter crosstalk specifications and support for full-duplex Gigabit. The majority of existing enterprise cabling is Cat5e and it remains a perfectly adequate choice for 1 Gbps deployments. If your infrastructure is Cat5e and you are running 1 Gbps to the desktop, there is no electrical reason to replace it.
+
+### Cat6 — The Practical Sweet Spot
+
+Cat6 improves on Cat5e with tighter twist rates and a physical separator (a plastic spline) running through the center of the cable that keeps the four pairs separated and reduces crosstalk. This allows Cat6 to support 10 Gbps — but only up to 55 meters. Beyond that, crosstalk accumulates to a level where 10 Gbps is not reliable, and the cable effectively becomes a very well-made Cat5e. For new installations where 10 Gbps to the desktop is a near-term possibility but not a current requirement, Cat6 is a reasonable choice.
+
+### Cat6a — The 10 Gbps Standard
+
+Cat6a ("a" for augmented) is built to support 10 Gbps across the full 100-meter run. The cable achieves this with a significantly larger outer diameter, more aggressive shielding options, and tighter manufacturing tolerances. Cat6a cables are noticeably stiffer and heavier than Cat6, which makes them harder to route through conduit and around tight bends. The tradeoff is guaranteed 10 Gbps performance over the full standard distance. Cat6a is the correct choice for new data center horizontal cabling and any installation where 10GBASE-T is a current or near-term requirement.
+
+---
+
+## The 100-Meter Rule
+
+The maximum specified distance for Ethernet over twisted pair is **100 meters** from the network device to the endpoint. This limit comes from the combination of signal attenuation (the signal weakens as it travels) and the round-trip propagation delay required by Ethernet's collision detection mechanism — though on full-duplex links, the collision concern is eliminated and the limit is purely electrical.
+
+Breaking this limit has predictable consequences: at first, speeds degrade and retransmissions increase as the signal-to-noise ratio drops below what the PHY can reliably decode. Further beyond the limit, the link fails entirely. In practice, infrastructure installers include a safety margin and target a maximum horizontal run of around 90 meters, leaving 10 meters for patch cables at each end.
+
+If you need to extend beyond 100 meters, the correct solution is to add an active device — a switch — at the 100-meter mark. The switch regenerates the signal completely. Passive signal boosters or cable extenders do not solve the fundamental problem and are not part of the Ethernet standard.
+
+---
+
+## Ethernet Standards on Copper
+
+The physical layer and the data rates it supports have evolved significantly since Ethernet first appeared. Each generation brought new requirements on the cable infrastructure:
+
+| Standard      | Speed     | Cable Required | Pairs Used | Notes                              |
+|---------------|-----------|----------------|------------|------------------------------------|
+| 10BASE-T      | 10 Mbps   | Cat3 or better | 2 of 4     | First widespread twisted-pair standard |
+| 100BASE-TX    | 100 Mbps  | Cat5e          | 2 of 4     | Fast Ethernet                      |
+| 1000BASE-T    | 1 Gbps    | Cat5e          | 4 of 4     | Gigabit Ethernet, all pairs used   |
+| 2.5GBASE-T    | 2.5 Gbps  | Cat5e          | 4 of 4     | Used in Wi-Fi 6 access points      |
+| 5GBASE-T      | 5 Gbps    | Cat6           | 4 of 4     | Emerging in enterprise edge        |
+| 10GBASE-T     | 10 Gbps   | Cat6a          | 4 of 4     | Data center horizontal cabling     |
+
+The jump from 100BASE-TX (which used only 2 pairs) to 1000BASE-T (which uses all 4 pairs simultaneously) was architecturally significant. Using pairs bidirectionally at the same time required sophisticated digital signal processing in the PHY to cancel the echo of the device's own transmission from the received signal — a technique called **hybrid circuit** or **echo cancellation**.
+
+---
+
+## Connectors — RJ-45
+
+The connector used for copper Ethernet is universally referred to as RJ-45, though technically the Registered Jack specification covers a broader range of connectors and the 8P8C (8 Position, 8 Contact) modular plug used in Ethernet is a specific variant. In practice, "RJ-45" and "8P8C" are used interchangeably in networking.
+
+The connector itself is a transparent plastic plug with eight gold-plated contacts. Termination is done with a crimping tool that simultaneously seats all eight conductors into their contact positions and locks the plug onto the cable jacket. A poorly crimped connector — conductors in the wrong order, jacket not clamped properly, conductors not seated fully into the contacts — is one of the most common sources of physical layer failures and one of the hardest to diagnose visually.
+
+Keystone jacks (the female connectors found in wall outlets and patch panels) are terminated by punching the conductors into IDC (Insulation Displacement Contact) slots using a punch-down tool. The IDC contacts cut through the wire insulation as the wire is pushed down, making electrical contact without stripping the wire. Patch panels aggregate these individual terminations and connect to switches via short patch cables.
+
+---
+
+## Key Concepts
+
+### Signal integrity is everything at Layer 1
+
+Unlike higher layers where errors can be detected, reported, and retransmitted, Layer 1 has no error recovery mechanism. If the electrical signal degrades to the point where the receiving PHY cannot reliably interpret it, the link either runs at a lower negotiated speed or drops entirely. Problems at this layer manifest as CRC errors, late collisions, intermittent link flaps, or speed mismatches — symptoms that are easy to misdiagnose at higher layers if you are not thinking physically first.
+
+### Category is a specification, not a brand
+
+A cable's category rating is a set of electrical performance specifications, not a quality of manufacture from a specific vendor. A Cat6a cable from a reputable manufacturer will meet the Cat6a specification. A cheaply made cable claiming Cat6a may not. This matters most in high-density, high-speed installations — the difference between genuine Cat6a and a cable that merely claims the rating is not visible with a simple cable tester. A full certification test with a Fluke DSX or equivalent is the only way to verify that a cable plant actually meets the specification it claims.
+
+### Bend radius matters
+
+Copper twisted pair has a minimum bend radius — typically four times the cable's outer diameter for non-plenum Cat6, and eight times for Cat6a. Bending the cable tighter than this limit compresses the pairs, changes the geometry of the twists, and degrades the electrical performance. Cable bundles run under floor tiles or through conduit that makes tight bends are a common source of marginal performance in otherwise well-designed installations.
+
+---
+
+## References
+
+- [TIA-568.2-D — Balanced Twisted-Pair Telecommunications Cabling Standard](https://www.tiaonline.org)
+- [IEEE 802.3 — Ethernet Standard](https://standards.ieee.org/ieee/802.3)
+- [RFC 894 — A Standard for the Transmission of IP Datagrams over Ethernet Networks](https://www.rfc-editor.org/rfc/rfc894)

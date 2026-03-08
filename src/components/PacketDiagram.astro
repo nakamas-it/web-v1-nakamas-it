@@ -2,6 +2,7 @@
 interface Field {
   name: string;
   bytes: number | string;
+  value?: string;
   highlight?: boolean;
 }
 
@@ -33,6 +34,9 @@ function grow(bytes: number | string): number {
           <div class="font-mono text-[10px] text-slate-500 mt-1 whitespace-nowrap">
             {typeof field.bytes === 'number' ? `${field.bytes}B` : field.bytes}
           </div>
+          {field.value && (
+            <div class="font-mono text-[10px] text-cyan-400 mt-0.5 whitespace-nowrap">{field.value}</div>
+          )}
         </div>
       ))}
     </div>

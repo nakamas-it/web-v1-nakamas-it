@@ -1,0 +1,186 @@
+---
+title: "Ethernet Frames — The Layer 2 Unit of Delivery"
+layer: "layer2"
+protocol: "ethernet"
+summary: "How data is packaged into Ethernet frames, what every field in the frame means, and how switches use frames to make forwarding decisions."
+tags: ["layer2", "ethernet", "mac", "frame", "switching", "ieee802.3"]
+order: 1
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+At Layer 1, data is a pattern of electrical voltages, light pulses, or radio waves — raw signal with no inherent structure. Layer 2 imposes structure on that signal by defining the **frame**: a self-contained, delimited unit of data that has a beginning, an end, source and destination identifiers, a payload, and an integrity check.
+
+The Ethernet frame is the dominant Layer 2 frame format in use today. Defined by the IEEE 802.3 standard and originally specified by Xerox, Intel, and Digital Equipment Corporation in the early 1980s, Ethernet has proven remarkably durable. The frame format you will find on a modern 100 Gbps fiber backbone is, at its core, the same format that ran on the 10 Mbps coaxial cable networks of 1980. The header fields, the addressing scheme, the integrity check — all fundamentally unchanged. What changed is the physical layer underneath it.
+
+Understanding Ethernet frames is foundational to everything that happens at Layer 2: switching, VLANs, STP, ARP, and everything that builds on top of them. Before a switch can decide where to send a frame, before ARP can resolve a MAC address, before a VLAN tag can be applied — the frame must exist and be correctly structured.
+
+---
+
+## The Frame Structure
+
+An Ethernet II frame (the variant in universal use today, technically defined by the DIX Ethernet standard rather than IEEE 802.3, though the two have converged) looks like this on the wire:
+
+<PacketDiagram
+  label="Ethernet II Frame — complete on-wire structure"
+  fields={[
+    { name: "Preamble", bytes: 7, value: "sync" },
+    { name: "SFD", bytes: 1, value: "0xAB" },
+    { name: "Dst MAC", bytes: 6, value: "FF:FF:FF:FF:FF:FF" },
+    { name: "Src MAC", bytes: 6, value: "AA:BB:CC:DD:EE:FF" },
+    { name: "EtherType", bytes: 2, value: "0x0800" },
+    { name: "Payload", bytes: "46–1500" },
+    { name: "FCS", bytes: 4 },
+  ]}
+/>
+
+| Field       | Size     | Notes                                                                        |
+|-------------|----------|------------------------------------------------------------------------------|
+| Preamble    | 7 bytes  | Alternating 1/0 bits (`10101010...`) used by the receiver to sync its clock |
+| SFD         | 1 byte   | Start Frame Delimiter (`10101011`) — the last bit signals frame start         |
+| Dst MAC     | 6 bytes  | Hardware address of the intended recipient                                    |
+| Src MAC     | 6 bytes  | Hardware address of the sender                                                |
+| EtherType   | 2 bytes  | Identifies the Layer 3 protocol carried in the payload                        |
+| Payload     | 46–1500  | The actual data being transported                                             |
+| FCS         | 4 bytes  | Frame Check Sequence — CRC-32 integrity check                                 |
+
+The Preamble and SFD are not usually visible in protocol analyzers like Wireshark because the network interface card strips them before handing the frame to software. From a software perspective, a frame begins at the Destination MAC and ends at the FCS.
+
+---
+
+## The Preamble and Start Frame Delimiter
+
+Before the frame's actual content arrives, the sender transmits a 7-byte preamble of alternating 1s and 0s (`10101010 10101010 ... 10101010`). This is not data — it is a clock synchronization signal. Ethernet uses a self-clocking encoding scheme where the receiver derives its bit timing from the incoming signal itself. The preamble gives the receiver time to lock onto the sender's bit rate before the real frame content starts.
+
+The **Start Frame Delimiter (SFD)** immediately follows the preamble. It is the byte `10101011` — identical to the preamble except the last two bits are `11` instead of `10`. This pattern breaks the regularity of the preamble and signals: *"the next bit is the first bit of the destination MAC address."*
+
+---
+
+## MAC Addresses
+
+MAC addresses are the Layer 2 identifiers for network interfaces. Every network interface card that ships from a factory is assigned a globally unique MAC address — a 48-bit (6-byte) number typically written in hexadecimal with colons or hyphens separating each byte: `AA:BB:CC:DD:EE:FF`.
+
+The 48 bits are divided into two sections:
+
+<PacketDiagram
+  label="MAC Address — internal structure"
+  fields={[
+    { name: "OUI", bytes: 3, value: "vendor ID" },
+    { name: "NIC Specific", bytes: 3, value: "device ID" },
+  ]}
+/>
+
+- **Organizationally Unique Identifier (OUI)** — the first 3 bytes. Assigned by the IEEE to vendors. When you see `00:1A:2B`, those 3 bytes identify the manufacturer: Apple, Cisco, Dell, etc. Tools like Wireshark will resolve OUIs to vendor names automatically.
+- **Device-specific portion** — the last 3 bytes. Assigned by the manufacturer to each individual device. Combined with the OUI, these 3 bytes make the address globally unique.
+
+Within the OUI, two individual bits have special meaning:
+
+| Bit (in first byte) | Name              | Meaning                                                   |
+|---------------------|-------------------|-----------------------------------------------------------|
+| Bit 0 (LSB)         | I/G bit           | `0` = Individual (unicast), `1` = Group (multicast)       |
+| Bit 1               | U/L bit           | `0` = Universally administered, `1` = Locally administered |
+
+### Address Types
+
+Not all MAC addresses identify a single device:
+
+- **Unicast** — I/G bit = 0. Addresses one specific device. Normal frame delivery.
+- **Multicast** — I/G bit = 1, not all-ones. Addresses a group of devices that have joined a multicast group. Used by protocols like IGMP and IPv6 Neighbor Discovery.
+- **Broadcast** — all 48 bits set to 1 (`FF:FF:FF:FF:FF:FF`). Every device on the segment receives and processes this frame. Used by ARP, DHCP, and other discovery protocols.
+
+---
+
+## EtherType — Identifying the Payload
+
+The 2-byte EtherType field tells the receiving device what protocol is encapsulated in the payload so it knows which higher-layer handler to pass the frame to. This is the critical link between Layer 2 and Layer 3.
+
+| EtherType | Protocol           | When you see it                                  |
+|-----------|--------------------|--------------------------------------------------|
+| `0x0800`  | IPv4               | Most unicast and broadcast Ethernet traffic      |
+| `0x86DD`  | IPv6               | IPv6 traffic on dual-stack or IPv6-only networks |
+| `0x0806`  | ARP                | Address Resolution Protocol requests and replies |
+| `0x8100`  | 802.1Q VLAN tag    | Tagged frames on trunk links                     |
+| `0x8847`  | MPLS unicast       | MPLS label switching                             |
+| `0x88CC`  | LLDP               | Link Layer Discovery Protocol                    |
+
+The value `0x0800` is by far the most common in a typical network. Any time you see a Wireshark capture full of frames with EtherType `0x0800`, those are IPv4 packets — DNS queries, HTTP traffic, DHCP exchanges, everything built on top of IP.
+
+When a VLAN tag is present (EtherType `0x8100`), it inserts an additional 4-byte 802.1Q header between the Source MAC and the original EtherType field. The 802.1Q header contains the VLAN ID and priority. This is covered in detail in the VLANs article.
+
+---
+
+## The Payload — MTU and Minimum Frame Size
+
+The payload field carries the Layer 3 packet (or Layer 3 header plus Layer 4 header plus application data). The rules governing its size are:
+
+**Minimum payload: 46 bytes.** Ethernet requires a minimum frame size of 64 bytes from Dst MAC to FCS. The header (Dst MAC + Src MAC + EtherType) is 14 bytes and the FCS is 4 bytes, leaving a minimum of 46 bytes for the payload. If the actual data is smaller than 46 bytes, the sender **pads** the payload with zeros to reach the minimum. Without a minimum frame size, very short frames could travel so fast on the wire that collision detection would fail on half-duplex segments.
+
+**Maximum payload: 1500 bytes.** This is the Ethernet **MTU** — Maximum Transmission Unit. Any IP packet larger than 1500 bytes must be fragmented before it can be encapsulated in an Ethernet frame. This limit is the reason IP fragmentation exists. When you encounter path MTU discovery issues or applications that break with large packets, this 1500-byte boundary is almost always at the root.
+
+**Jumbo frames** extend the maximum to 9000 bytes (or other vendor-defined limits). They are commonly used inside data centers on iSCSI or NFS storage networks where throughput efficiency matters. Jumbo frames are not part of the base 802.3 standard — they require explicit configuration and must be supported end-to-end across every device and interface in the path.
+
+---
+
+## Frame Check Sequence — Detecting Corruption
+
+The last 4 bytes of every Ethernet frame are the **Frame Check Sequence (FCS)**, a CRC-32 (Cyclic Redundancy Check) calculated over all fields from the Destination MAC through to the end of the payload.
+
+Before transmitting, the sender runs the CRC-32 algorithm over the frame content and appends the 4-byte result as the FCS. The receiver runs the same algorithm over the received frame and compares the result to the FCS. If they match, the frame is assumed to have arrived intact. If they do not match, the frame is silently discarded — Ethernet has no mechanism to request retransmission of a corrupt frame. That is left to higher-layer protocols like TCP.
+
+**FCS errors in a capture indicate a physical layer problem** — cable damage, a bad connector, excessive cable length, or interference. A high rate of FCS errors on an interface is always worth investigating at the physical layer first.
+
+---
+
+## How a Switch Processes Frames
+
+A switch is a Layer 2 forwarding device. It operates entirely on Ethernet frames — it reads the destination and source MAC addresses and makes forwarding decisions based solely on those addresses. It does not look at IP addresses, ports, or any higher-layer information (unless it is a Layer 3 switch operating in routing mode).
+
+Every switch maintains a **MAC address table** (also called the CAM table or forwarding table) that maps MAC addresses to the port they were last seen on.
+
+### Learning
+
+When a frame arrives on a port, the switch records the **source MAC address** and the **incoming port** in its MAC table. Over time, the switch builds a complete map of which MAC addresses are reachable through which ports.
+
+### Forwarding
+
+When the switch needs to forward a frame, it looks up the **destination MAC address** in its table:
+
+| Destination MAC lookup result | Switch action                                  |
+|-------------------------------|------------------------------------------------|
+| Found — known port            | Forward frame out that specific port only      |
+| Not found — unknown unicast   | **Flood** the frame out all ports except the incoming port |
+| Broadcast (`FF:FF:FF:FF:FF:FF`) | Flood out all ports except the incoming port  |
+| Multicast                     | Flood by default (or use IGMP snooping to limit scope) |
+
+Flooding unknown unicast is the mechanism that allows a new device to be discovered. After the first exchange, both the sender and the recipient's MAC addresses are learned, and subsequent frames are forwarded directly without flooding.
+
+### Aging
+
+MAC table entries expire after a period of inactivity (typically 300 seconds by default). If a device stops sending traffic and its entry ages out, the next frame addressed to it will be flooded again until it responds and the address is re-learned. This prevents the table from filling with stale entries for devices that have been disconnected.
+
+---
+
+## Key Concepts
+
+### Ethernet is connectionless at Layer 2
+
+There is no handshake, no session establishment, no acknowledgement at the Ethernet layer. Frames are simply sent and either arrive or they do not. Reliability, ordering, and retransmission are the responsibility of higher-layer protocols. Ethernet's job is to deliver frames on the local segment as efficiently as possible.
+
+### The switch never touches the IP header
+
+A switch operating at Layer 2 only reads the Ethernet header — destination MAC, source MAC, EtherType, and FCS. The IP packet inside the payload is completely opaque to it. This is what allows switches to forward traffic across different IP subnets without knowing anything about routing, and it is what allows them to forward non-IP traffic (like ARP) correctly.
+
+### Broadcast domains and collision domains are different things
+
+Every device connected to the same switch (or chain of switches without VLANs) shares a broadcast domain — a broadcast frame from any device reaches all devices. Collision domains, on the other hand, are eliminated by modern full-duplex links: each link between a device and a switch port is its own independent segment where collisions cannot occur. Understanding this distinction is important when sizing networks and deciding when VLANs are needed to segment broadcast traffic.
+
+---
+
+## References
+
+- [IEEE 802.3 — Ethernet Standard](https://standards.ieee.org/ieee/802.3)
+- [IEEE 802.1Q — Virtual Bridged Local Area Networks](https://standards.ieee.org/ieee/802.1Q)
+- [RFC 894 — A Standard for the Transmission of IP Datagrams over Ethernet Networks](https://www.rfc-editor.org/rfc/rfc894)

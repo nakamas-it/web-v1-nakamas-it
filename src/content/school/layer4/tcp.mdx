@@ -1,0 +1,248 @@
+---
+title: "TCP — Reliable Delivery at the Transport Layer"
+layer: "layer4"
+protocol: "tcp"
+summary: "How TCP establishes connections, guarantees delivery order, controls flow, and tears down sessions — and what all of that looks like on the wire."
+tags: ["layer4", "tcp", "transport", "handshake", "reliability", "rfc9293"]
+order: 1
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+IP delivers packets. It does so on a best-effort basis — it will try to get a packet from source to destination, but it makes no promises about whether it arrives, how long it takes, or what order multiple packets arrive in. Two packets sent back to back from the same source may take completely different paths through the network and arrive out of order, or one may be dropped entirely due to congestion at a router.
+
+For many applications this uncertainty is intolerable. A file transfer where segments arrive in random order and with unpredictable gaps is useless. A web request that partially loads is broken. SSH sessions that drop keystrokes are infuriating. These applications need something on top of IP that provides guarantees: the data will arrive, it will arrive in the right order, and the two parties will know when delivery has completed.
+
+That is what TCP provides. The Transmission Control Protocol — defined originally in RFC 793 and comprehensively updated by [RFC 9293](https://www.rfc-editor.org/rfc/rfc9293) — is a connection-oriented, reliable, ordered, byte-stream protocol. It is the foundation of HTTP, HTTPS, SSH, SMTP, FTP, and virtually every protocol where correctness matters more than raw speed. Understanding TCP is understanding how the majority of internet communication actually works.
+
+---
+
+## What TCP Provides
+
+Before diving into the mechanics, it is worth being precise about what TCP actually guarantees and what it does not.
+
+**What TCP guarantees:**
+- **Reliability** — every byte sent will be received, or the sender will be notified that delivery failed. Lost segments are retransmitted automatically.
+- **Ordering** — bytes arrive at the application in the same order they were sent, even if the underlying IP packets arrived out of order.
+- **Error detection** — a checksum covers the header and payload. Corrupt segments are discarded and retransmitted.
+- **Flow control** — the receiver tells the sender how much data it can accept, preventing the sender from overwhelming a slow receiver.
+- **Congestion control** — TCP adapts its sending rate based on network conditions, reducing transmission speed when the network is congested.
+
+**What TCP does not guarantee:**
+- **Speed** — the overhead of establishing a connection, waiting for acknowledgements, and retransmitting lost data adds latency compared to raw IP.
+- **Timing** — TCP has no mechanism to ensure data arrives within a specific time window. For real-time applications like voice or gaming, UDP is a better fit.
+- **Message boundaries** — TCP is a byte stream, not a message protocol. It does not preserve boundaries between sends. The application layer must define its own framing.
+
+---
+
+## The TCP Header
+
+Every TCP segment begins with a 20-byte header (assuming no options):
+
+<PacketDiagram
+  label="TCP Header — minimum 20 bytes"
+  fields={[
+    { name: "Src Port", bytes: 2, value: "49152" },
+    { name: "Dst Port", bytes: 2, value: "443" },
+    { name: "Seq Num", bytes: 4, value: "ISN+offset" },
+    { name: "Ack Num", bytes: 4, value: "next expected" },
+    { name: "Offset+Flags", bytes: 2, value: "SYN/ACK/FIN..." },
+    { name: "Window", bytes: 2, value: "65535" },
+    { name: "Checksum", bytes: 2 },
+    { name: "Urgent Ptr", bytes: 2 },
+  ]}
+/>
+
+| Field            | Size    | Notes                                                                          |
+|------------------|---------|--------------------------------------------------------------------------------|
+| Source Port      | 2 bytes | Port number of the sending application                                          |
+| Destination Port | 2 bytes | Port number of the receiving application                                        |
+| Sequence Number  | 4 bytes | Position of this segment's first byte in the byte stream                       |
+| Acknowledgement  | 4 bytes | Next sequence number the receiver expects (confirms everything up to this − 1) |
+| Data Offset      | 4 bits  | Header length in 32-bit words. Minimum 5 (= 20 bytes, no options)             |
+| Reserved         | 3 bits  | Must be zero                                                                   |
+| Flags            | 9 bits  | Control bits: SYN, ACK, FIN, RST, PSH, URG, ECE, CWR, NS                     |
+| Window Size      | 2 bytes | Number of bytes the receiver can accept beyond the last acknowledged byte      |
+| Checksum         | 2 bytes | Error detection over header, payload, and a pseudo-header from the IP layer   |
+| Urgent Pointer   | 2 bytes | Only relevant when URG flag is set (rarely used in modern applications)        |
+| Options          | 0–40 B  | MSS, window scaling, timestamps, SACK, and others                              |
+
+### The Control Flags
+
+The 9 control flags determine what a segment means and what action the receiver should take:
+
+| Flag | Name              | Purpose                                                             |
+|------|-------------------|---------------------------------------------------------------------|
+| SYN  | Synchronize       | Initiates a connection; carries the Initial Sequence Number (ISN)   |
+| ACK  | Acknowledge       | Confirms receipt; the Acknowledgement Number field is valid         |
+| FIN  | Finish            | Sender has no more data to send; begins graceful connection close   |
+| RST  | Reset             | Abruptly terminates the connection; no further data will be sent    |
+| PSH  | Push              | Tell the receiver to pass buffered data to the application immediately |
+| URG  | Urgent            | The Urgent Pointer field is valid (rarely used)                     |
+| ECE  | ECN Echo          | Used in Explicit Congestion Notification                            |
+| CWR  | Congestion Window Reduced | Sender acknowledges a congestion notification             |
+
+The SYN, ACK, FIN, and RST flags are the ones that matter most day-to-day. Every normal TCP connection opens with SYN, runs with ACK on nearly every segment, and closes with FIN.
+
+---
+
+## Ports and Sockets
+
+TCP uses **port numbers** to multiplex multiple concurrent connections on a single IP address. A port is a 16-bit number (0–65535) that identifies a specific communication endpoint at a device.
+
+**Well-known ports (0–1023)** are reserved for standardized services and require administrative privileges to bind on most operating systems:
+
+| Port | Protocol | Service                    |
+|------|----------|----------------------------|
+| 22   | TCP      | SSH                        |
+| 25   | TCP      | SMTP                       |
+| 80   | TCP      | HTTP                       |
+| 443  | TCP      | HTTPS                      |
+| 3389 | TCP      | RDP (Remote Desktop)       |
+
+**Ephemeral ports (1024–65535)** are used by client applications. When your browser connects to a web server on port 443, the server listens on 443, but your browser uses a randomly assigned ephemeral port (say, 52341) as its source. This allows the same machine to have thousands of simultaneous connections to the same server — each combination of (src IP, src port, dst IP, dst port) is a unique socket that identifies a specific connection.
+
+A **socket** is the pair of IP address and port: `192.168.1.100:52341`. A **connection** is uniquely identified by the 4-tuple: `(src IP, src port, dst IP, dst port)`. This is why a server can handle thousands of simultaneous clients — each client uses a different source port, making each connection unique even though they all connect to the same destination port.
+
+---
+
+## Establishing a Connection — The Three-Way Handshake
+
+TCP connections do not just start — they are negotiated. Before any application data can be exchanged, the two parties must agree on initial sequence numbers and confirm that both can send and receive. This negotiation is called the **three-way handshake**.
+
+The handshake serves three purposes simultaneously: it establishes the connection, synchronizes the sequence numbers both sides will use, and confirms bidirectional communication (both send and receive paths are working).
+
+<FlowDiagram
+  parties={["Client", "Server"]}
+  steps={[
+    { from: "Client", to: "Server", label: "SYN", sub: "seq=1000, ctl=SYN" },
+    { from: "Server", to: "Client", label: "SYN-ACK", sub: "seq=5000, ack=1001, ctl=SYN+ACK" },
+    { from: "Client", to: "Server", label: "ACK", sub: "seq=1001, ack=5001, ctl=ACK" },
+  ]}
+/>
+
+### Step 1 — SYN
+
+The client sends a segment with the **SYN** flag set. It contains the client's **Initial Sequence Number (ISN)** — a randomly chosen 32-bit number. The ISN is random (not zero) by design: using predictable sequence numbers would allow an attacker to inject data into an existing connection by guessing the sequence number in use.
+
+In the example above, the client's ISN is `1000`. The SYN segment itself consumes one sequence number, so the client's next sequence number after the SYN will be `1001`.
+
+### Step 2 — SYN-ACK
+
+The server receives the SYN, allocates resources for the connection, chooses its own random ISN (`5000` in the example), and sends back a segment with both **SYN** and **ACK** set.
+
+The **ACK** field contains `1001` — the next sequence number the server expects from the client. This acknowledges the client's SYN (which occupied sequence number `1000`) and tells the client that everything up to and including sequence number `1000` was received successfully.
+
+### Step 3 — ACK
+
+The client sends a final **ACK** to acknowledge the server's SYN-ACK. The ACK number is `5001` — the server's ISN (`5000`) plus one, because the server's SYN also occupies one sequence number.
+
+After this three-way exchange, both sides have each other's starting sequence numbers and the connection is established. Application data can now flow.
+
+---
+
+## Sequence Numbers and Acknowledgements
+
+The sequence number and acknowledgement mechanism is the heart of TCP's reliability guarantee. Every byte of data has a position in the byte stream, identified by its sequence number.
+
+When the sender transmits a segment:
+- The **Sequence Number** field contains the position of the segment's first byte in the byte stream
+- The sender starts a **retransmission timer** for that segment
+
+When the receiver gets a segment:
+- It buffers out-of-order segments
+- It sends an **ACK** with the Acknowledgement Number set to the sequence number of the **next byte it expects**
+- An ACK number of `5001` means "I have received everything through byte `5000`; please send byte `5001` next"
+
+If the sender's timer expires before an ACK arrives, the sender retransmits the segment. This continues with exponential backoff until the segment is acknowledged or a maximum retry count is reached.
+
+**Cumulative acknowledgement** means a single ACK can acknowledge many segments at once. If the sender transmits segments at sequence numbers 1001, 1501, and 2001 in rapid succession, a single ACK of `2501` acknowledges all three.
+
+**Selective Acknowledgement (SACK)** is a TCP option that allows the receiver to acknowledge non-contiguous ranges: "I have received bytes 1–500 and 1001–1500, but I am missing 501–1000." Without SACK, a single lost packet would cause retransmission of everything after the loss point. SACK allows the sender to retransmit only what is actually missing.
+
+---
+
+## Flow Control — Respecting the Receiver
+
+TCP's flow control mechanism prevents the sender from transmitting data faster than the receiver can consume it. Without it, a fast sender could overwhelm a slow receiver's buffer, causing data to be dropped and requiring retransmission — which wastes bandwidth and increases latency.
+
+Flow control is implemented through the **Window Size** field in the TCP header. The receiver advertises how many bytes of buffer space it currently has available. The sender must not have more than Window Size bytes of unacknowledged data in flight at any time.
+
+```
+Sender:   [---- sent and ACKed ----][---- sent, awaiting ACK ----][---- can send ----][-- must wait --]
+                                     |<-------- window size ------->|
+```
+
+As the receiver processes buffered data and frees buffer space, it advertises a larger window. If the receiver's buffer fills completely, it advertises a window of zero — a **zero window** — and the sender stops transmitting entirely (except for periodic zero-window probes to check when space becomes available again).
+
+Modern TCP stacks implement **window scaling** (a TCP option negotiated during the handshake) that allows windows larger than 65,535 bytes — necessary for high-throughput connections over high-latency links where the round-trip time is long enough that a small window would underutilize the available bandwidth.
+
+---
+
+## Congestion Control — Respecting the Network
+
+Flow control protects the receiver. Congestion control protects the network. Without it, every sender would transmit at maximum rate regardless of network conditions, leading to widespread packet drops and a collapse of usable throughput.
+
+TCP infers network congestion from packet loss: if a retransmission timer expires, the network between sender and receiver is probably overloaded. TCP responds by dramatically reducing its sending rate and then gradually increasing it again.
+
+The core algorithm has four phases:
+
+| Phase               | Behavior                                                                     |
+|---------------------|------------------------------------------------------------------------------|
+| Slow Start          | Begin with a small congestion window; double it each RTT                     |
+| Congestion Avoidance | After reaching the slow-start threshold, increase linearly (one MSS per RTT) |
+| Fast Retransmit     | Three duplicate ACKs indicate loss; retransmit immediately without waiting for timeout |
+| Fast Recovery       | After fast retransmit, reduce window by half and enter congestion avoidance  |
+
+The congestion window (cwnd) — the sender's own estimate of how much data the network can handle — is the other constraint on how much the sender can have in flight, alongside the receiver's advertised window.
+
+---
+
+## Closing a Connection — The Four-Way Teardown
+
+Because TCP is full-duplex, each direction of communication must be closed independently. A single FIN from one side closes that side's data stream, but the other side may still have data to send.
+
+<FlowDiagram
+  parties={["Client", "Server"]}
+  steps={[
+    { from: "Client", to: "Server", label: "FIN", sub: "client has no more data" },
+    { from: "Server", to: "Client", label: "ACK", sub: "acknowledged — server may still send" },
+    { from: "Server", to: "Client", label: "FIN", sub: "server also done" },
+    { from: "Client", to: "Server", label: "ACK", sub: "connection fully closed" },
+  ]}
+/>
+
+After the client sends its FIN, the connection enters a **half-closed** state. The server can still send data to the client (the client will ACK it), but the client cannot send any more data to the server. Once the server also sends a FIN, both sides are done.
+
+The client enters the **TIME_WAIT** state after sending the final ACK. It waits for a period of 2×MSL (Maximum Segment Lifetime, typically 60 seconds) before fully closing. This ensures that if the server's FIN or the client's final ACK was lost, there is time for retransmission before the port is recycled. Servers handling many short-lived connections can accumulate large numbers of TIME_WAIT sockets — this is normal behavior.
+
+**RST (Reset)** provides an alternative, immediate close. If one side sends RST, the connection is aborted immediately with no further data exchange. RST is used when a connection arrives for a port that is not listening, when a connection needs to be aborted due to an application error, or when a firewall rejects a connection.
+
+---
+
+## Key Concepts
+
+### TCP is a byte stream, not a message protocol
+
+The application writes data to a TCP socket in chunks, but TCP has no concept of message boundaries. It may combine multiple small writes into one segment (Nagle's algorithm) or split a large write across multiple segments. The receiver's application reads a stream of bytes with no inherent segmentation. This is why application protocols like HTTP define their own framing — the Content-Length header or chunked transfer encoding tells the receiver where one response ends and the next begins.
+
+### Connection state lives in both endpoints
+
+A TCP connection is not maintained by the network — it is maintained by the two endpoints. Routers in the middle know nothing about TCP connections (unless they are doing stateful inspection). If a client crashes and reboots mid-connection, the server still has the connection open in ESTABLISHED state. The server will only discover the client is gone when it tries to send data and the retransmission timer expires, or when a RST arrives from the rebooted client.
+
+### Three duplicate ACKs signal a specific loss
+
+When the receiver gets an out-of-order segment (a gap in the sequence space), it sends an ACK for the last in-order byte it received. If the receiver continues getting segments filling in after the gap but the gap itself remains missing, it sends the same ACK repeatedly — duplicate ACKs. Three duplicate ACKs tell the sender that one specific segment was lost while subsequent ones arrived. This triggers fast retransmit without waiting for a timeout, recovering from the loss much faster.
+
+---
+
+## References
+
+- [RFC 9293 — Transmission Control Protocol (updated specification)](https://www.rfc-editor.org/rfc/rfc9293)
+- [RFC 793 — Transmission Control Protocol (original specification)](https://www.rfc-editor.org/rfc/rfc793)
+- [RFC 2018 — TCP Selective Acknowledgement Options (SACK)](https://www.rfc-editor.org/rfc/rfc2018)
+- [RFC 7414 — A Roadmap for TCP Specification Documents](https://www.rfc-editor.org/rfc/rfc7414)
