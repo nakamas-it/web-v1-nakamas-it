@@ -1,0 +1,171 @@
+---
+title: "CDP & LLDP — Network Discovery at Layer 2"
+layer: "layer2"
+protocol: "cdp-lldp"
+summary: "How network devices advertise their identity, capabilities, and neighbors using CDP and LLDP, what information these protocols exchange, and why they are essential for network visibility and troubleshooting."
+tags: ["layer2", "cdp", "lldp", "discovery", "tlv", "neighbor", "ieee802.1ab"]
+order: 7
+draft: false
+---
+
+## Overview
+
+When you connect a cable between two network devices, both sides know that a physical link exists — the link lights up. What neither side knows automatically is what kind of device is on the other end, what its management address is, what its hostname is, which of its interfaces is connected, or what capabilities it has. This information is critical for troubleshooting, network documentation, and automated network management.
+
+**CDP (Cisco Discovery Protocol)** and **LLDP (Link Layer Discovery Protocol)** solve this problem. Both protocols run at Layer 2 and periodically multicast discovery frames out every active interface. When a neighbor receives these frames, it learns everything the sender has chosen to advertise about itself. Each device builds a neighbor table: a list of directly connected devices with their associated properties.
+
+CDP is Cisco's proprietary protocol and is found on virtually all Cisco equipment. LLDP (IEEE 802.1AB) is the vendor-neutral standard that does essentially the same job and is supported by equipment from all major vendors. In a multi-vendor environment, LLDP is the common language that allows a Cisco switch to discover an HP server or a Juniper switch.
+
+---
+
+## CDP — Cisco Discovery Protocol
+
+CDP was introduced by Cisco in the early 1990s and remains enabled by default on almost all Cisco switches, routers, and IP phones. It operates at Layer 2 and sends CDP frames every **60 seconds** by default. Neighbor entries expire after **180 seconds** (three missed hellos). CDP frames are addressed to a Cisco-specific multicast address (`01:00:0C:CC:CC:CC`).
+
+### What CDP Advertises
+
+Each CDP frame is a collection of Type-Length-Value (TLV) fields. Each TLV contains:
+- A 2-byte type identifier
+- A 2-byte length field
+- A variable-length value
+
+The core information CDP exchanges:
+
+| TLV | Information Shared |
+|-----|--------------------|
+| Device ID | Hostname of the sending device |
+| Address | Management IP address(es) of the sending device |
+| Port ID | The local interface name from which the CDP frame was sent (e.g., `GigabitEthernet0/1`) |
+| Capabilities | What the device can do: Router, Switch, Bridge, etc. |
+| Version | Software version string (IOS version, for example) |
+| Platform | Hardware model (e.g., "Cisco 3750X") |
+| Native VLAN | The native VLAN on the sending port (extremely useful for detecting native VLAN mismatches) |
+| Duplex | Full or half duplex on the sending interface |
+| VoIP VLAN | The voice VLAN configured on the port (used for IP phone provisioning) |
+| Power over Ethernet | PoE capability and power consumption (for IP phones and APs) |
+
+### Reading the CDP Neighbor Table
+
+On a Cisco device:
+
+```
+show cdp neighbors
+
+Capability Codes: R - Router, T - Trans Bridge, B - Source Route Bridge
+                  S - Switch, H - Host, I - IGMP, r - Repeater, P - Phone
+
+Device ID    Local Intrfce  Holdtme  Capability  Platform      Port ID
+SW-CORE      Gig 0/1        160        S I       WS-C3750X   Gig 1/0/24
+SW-ACCESS2   Gig 0/2        148        S I       WS-C2960X   Gig 0/1
+ROUTER-01    Gig 0/24       135        R         ISR4331     Gig 0/0/0
+```
+
+This output tells you the hostname, which interface you are using locally, the device type, the hardware model, and which interface on the neighbor connects to you — all without consulting any documentation.
+
+`show cdp neighbors detail` adds IP addresses, IOS version, and native VLAN information.
+
+### CDP Security Considerations
+
+CDP is unauthenticated and unencrypted. Every CDP advertisement reveals significant information about the device: its hostname, software version, hardware model, and management IP address. An attacker on the same Layer 2 segment can collect this information and use it to identify vulnerabilities specific to the software version or platform.
+
+Best practice: Disable CDP on interfaces that connect to untrusted networks — particularly edge ports facing the internet, guest Wi-Fi, and customer-facing interfaces. CDP should be enabled only on interfaces connecting to trusted infrastructure devices.
+
+```
+! Disable CDP globally:
+no cdp run
+
+! Disable CDP on a specific interface:
+interface GigabitEthernet0/1
+  no cdp enable
+```
+
+---
+
+## LLDP — Link Layer Discovery Protocol
+
+**LLDP** (IEEE 802.1AB, published 2005) is the open standard equivalent of CDP. It was designed to be vendor-neutral so that a network built from equipment by different manufacturers could still achieve neighbor discovery. Any device that supports IEEE 802.1AB can discover and be discovered by any other LLDP-capable device.
+
+LLDP sends frames every **30 seconds** by default (configurable). Neighbor entries expire after **120 seconds** (configurable TTL carried in the LLDP frame itself). LLDP frames are sent to the IEEE-reserved multicast address `01:80:C2:00:00:0E`, which is not forwarded by bridges — LLDP frames stay on the local segment.
+
+### LLDP TLVs
+
+Like CDP, LLDP uses Type-Length-Value encoding. LLDP defines mandatory TLVs and optional TLVs:
+
+**Mandatory TLVs** (must be present in every LLDPDU):
+- **Chassis ID**: The identifier for the sending device — typically its MAC address or system name
+- **Port ID**: The identifier for the sending interface — typically the MAC address or interface name
+- **Time to Live (TTL)**: How long the receiver should retain this information before expiring it (in seconds)
+- **End of LLDPDU**: Marks the end of the TLV list
+
+**Optional TLVs** (commonly included):
+- **System Name**: The configured hostname
+- **System Description**: Software version, platform description
+- **System Capabilities**: What the device can do (Bridge, Router, Access Point, etc.)
+- **Management Address**: The IP address to use for management communication
+- **Port Description**: A human-readable name for the sending interface
+
+### LLDP-MED — Media Endpoint Discovery
+
+**LLDP-MED** (LLDP for Media Endpoint Devices, defined in ANSI/TIA-1057) extends LLDP with TLVs specifically for VoIP deployments:
+
+- **Network Policy TLV**: Tells an IP phone which VLAN to use for voice traffic and what QoS markings to apply
+- **Location Identification TLV**: Provides location information (for E911)
+- **Extended Power via MDI TLV**: Enables PoE negotiation (power class, actual power consumption)
+- **Capabilities TLV**: Indicates LLDP-MED capabilities of the device
+
+LLDP-MED is what enables a phone to plug into any LLDP-MED-enabled switch port and automatically learn "put voice traffic in VLAN 150 with DSCP 46" without any manual configuration on the phone.
+
+---
+
+## CDP vs LLDP
+
+| Feature | CDP | LLDP |
+|---------|-----|------|
+| Standard | Cisco proprietary | IEEE 802.1AB (open standard) |
+| Vendor support | Cisco only | All major vendors |
+| Hello interval | 60 seconds | 30 seconds |
+| Hold time | 180 seconds | TTL in frame (configurable) |
+| VoIP extension | Inline | LLDP-MED |
+| Power negotiation | CDP PoE TLV | LLDP-MED Extended Power |
+| Security | No authentication | No authentication |
+
+In a pure Cisco environment, CDP provides more Cisco-specific detail (IOS version, native VLAN). In a multi-vendor environment, LLDP is the only option that works across all devices. Many deployments run both simultaneously — CDP for Cisco-to-Cisco links and LLDP for everything else.
+
+---
+
+## Practical Uses
+
+### Verifying physical topology
+
+CDP and LLDP are the fastest way to verify that a cable is connected to the right port. After connecting a cable, `show cdp neighbors` or `show lldp neighbors` confirms the neighbor's hostname and the exact port name on both ends.
+
+### Detecting native VLAN mismatches
+
+CDP advertises the native VLAN configured on each trunk port. If the native VLANs don't match between two switches, the CDP output will show different native VLANs on each side — a clear indicator that misconfiguration exists.
+
+### IP phone VLAN provisioning
+
+LLDP-MED and CDP allow a switch to push VLAN information to an IP phone as soon as it powers on. The phone advertises itself as a phone, the switch recognizes it and responds with the configured voice VLAN number, and the phone automatically joins the voice VLAN. Without this mechanism, each phone would require manual VLAN configuration.
+
+### Network management and documentation
+
+Automated network management systems use SNMP to query the CDP/LLDP neighbor tables of every managed switch, building a complete topology map of the network. This is how tools like Cisco Prime, SolarWinds, and open-source tools like LibreNMS automatically discover and map network topology.
+
+---
+
+## Key Concepts
+
+### CDP and LLDP operate strictly at Layer 2
+
+Both protocols send frames with TTL set to 1 at the Ethernet frame level (using reserved multicast addresses that bridges do not forward). They are local-link only — they reveal information about directly connected neighbors, never about devices multiple hops away.
+
+### Running both CDP and LLDP simultaneously is harmless
+
+A device can send both CDP and LLDP frames on the same interface without conflict. Cisco switches do this by default when LLDP is enabled — CDP continues running alongside LLDP. A Cisco switch will appear in both the CDP neighbor table of Cisco neighbors and the LLDP neighbor table of all LLDP-capable neighbors.
+
+---
+
+## References
+
+- [IEEE 802.1AB — Station and Media Access Control Connectivity Discovery (LLDP)](https://standards.ieee.org/ieee/802.1AB)
+- [ANSI/TIA-1057 — LLDP for Media Endpoint Devices (LLDP-MED)](https://tiaonline.org)

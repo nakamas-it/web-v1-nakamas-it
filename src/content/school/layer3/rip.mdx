@@ -1,0 +1,166 @@
+---
+title: "RIP — Routing Information Protocol"
+layer: "layer3"
+protocol: "rip"
+summary: "How RIP uses distance-vector routing to share routes through hop count, why its simplicity comes with fundamental limitations, and how RIPv2 improved on the original with CIDR support and authentication."
+tags: ["layer3", "rip", "ripv2", "distance-vector", "routing-protocol", "hop-count", "bellman-ford", "rfc2453"]
+order: 7
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+When a network has multiple routers, each router needs to know how to reach every destination in the network. Configuring static routes on each router works for small networks, but quickly becomes unmanageable as the network grows and changes. What is needed is a way for routers to automatically share their routing knowledge with each other — to learn about destinations they cannot directly see.
+
+**RIP (Routing Information Protocol)** was one of the first dynamic routing protocols, and for decades it was the standard for small network routing automation. Its operation is simple: every router periodically broadcasts its entire routing table to its neighbors. Neighbors incorporate that information into their own tables and pass it along. Within a few iterations, every router in the network has learned routes to every destination — even destinations many hops away.
+
+RIP is a **distance-vector** protocol. Each router knows the direction to send traffic (the vector) and the distance (measured in hop count). It does not know the topology of the network beyond what its neighbors tell it. This simplicity is both RIP's strength and its fundamental limitation.
+
+RIP is defined in RFC 1058 (RIPv1, 1988) and RFC 2453 (RIPv2, 1998). It remains supported in modern equipment but is rarely deployed in new networks — OSPF and EIGRP offer far superior convergence characteristics and scalability.
+
+---
+
+## Distance-Vector Routing
+
+In distance-vector routing, each router maintains a routing table that says "to reach network X, go in direction D, and it is Z hops away." Routers share this table with their directly connected neighbors. Each neighbor then updates its own table, incrementing hop counts and incorporating new destinations.
+
+This is the **Bellman-Ford algorithm** applied to routing. The key insight is that if a router knows the shortest path to a destination, it can tell its neighbors, and those neighbors can compute their own shortest paths by adding one hop.
+
+Consider a simple network: Router A connects to Router B, which connects to Router C. Router C has network `10.3.0.0/24` directly connected.
+
+1. C advertises `10.3.0.0/24` with metric 1 (directly connected = 0, but RIP starts at 1 for the first hop).
+2. B receives the advertisement and installs `10.3.0.0/24` via C, metric 1. B then advertises `10.3.0.0/24` to A with metric 2.
+3. A receives the advertisement and installs `10.3.0.0/24` via B, metric 2.
+
+Every router has learned a route to `10.3.0.0/24` through the automatic exchange, without any manual configuration.
+
+---
+
+## RIP Operation
+
+RIP routers send their complete routing table to all neighbors every **30 seconds** (the update timer). These updates are sent as UDP broadcasts (RIPv1) or multicasts (RIPv2, using `224.0.0.9`) on port 520.
+
+Each route in a RIP update has a destination, a subnet mask (RIPv2), and a metric. The metric is the hop count — the number of routers a packet must traverse to reach the destination.
+
+**Maximum hop count: 15**. RIP uses a hop count of **16 as infinity** — a destination with metric 16 is considered unreachable. This limits RIP networks to a maximum diameter of 15 hops. Any network larger than 15 routers in a straight line cannot be managed by RIP.
+
+The 15-hop limit is not a bug — it is a deliberate choice to prevent counting to infinity (explained below). But it does severely limit RIP's applicability in larger networks.
+
+<FlowDiagram
+  parties={["Router A", "Router B"]}
+  steps={[
+    { from: "Router A", to: "Router B", label: "RIP Update (every 30s)", sub: "10.1.0.0/24 metric 1, 10.2.0.0/24 metric 1" },
+    { from: "Router B", to: "Router A", label: "RIP Update (every 30s)", sub: "10.3.0.0/24 metric 1, 10.4.0.0/24 metric 2" },
+  ]}
+/>
+
+---
+
+## RIP Timers
+
+RIP uses four timers to manage route state:
+
+| Timer | Default | Description |
+|-------|---------|-------------|
+| Update | 30 seconds | How often to send the full routing table |
+| Invalid (Expiry) | 180 seconds | If no update received for a route in 180s, mark as possibly down (metric 16) |
+| Holddown | 180 seconds | After a route goes invalid, ignore updates that advertise a higher metric for that route (prevents premature route reinstatement) |
+| Flush | 240 seconds | Remove the route from the table entirely |
+
+These relatively long timers mean RIP convergence is slow. If a link fails, it can take up to 3 minutes for all routers to learn about the failure. During this convergence period, routing loops are possible.
+
+---
+
+## The Count-to-Infinity Problem
+
+Distance-vector protocols are vulnerable to routing loops when a route goes down. Consider the three-router chain: A — B — C, where `10.3.0.0/24` is behind C.
+
+1. The link between B and C fails. C's network `10.3.0.0/24` becomes unreachable.
+2. B marks the route to `10.3.0.0/24` as unreachable (metric 16).
+3. Before B can advertise the bad news, A sends its update to B, advertising `10.3.0.0/24` via metric 2 (because A still thinks it can reach `10.3.0.0/24` via B → C, which was working when A last heard from B).
+4. B sees A advertising `10.3.0.0/24` at metric 2 and thinks: "A can reach it! I can reach it via A at metric 3!" B updates its routing table.
+5. B advertises `10.3.0.0/24` via metric 3 to A.
+6. A now sees metric 3 from B and increments to 4. It advertises 4 back to B.
+7. This continues — B and A count upward, incrementing the metric, until both reach 16, at which point the route is finally declared unreachable.
+
+This is the **count-to-infinity** problem. It is why RIP uses 16 as infinity rather than a larger number — the lower the maximum, the shorter the counting process takes.
+
+### RIP Loop Prevention Mechanisms
+
+**Split horizon**: Do not advertise a route back out the interface from which it was learned. B learned about `10.3.0.0/24` from C (via the B-C interface), so B will not advertise that route back out the B-C interface. But split horizon does not fully solve the problem in more complex topologies.
+
+**Poison reverse**: Instead of not advertising the route back, actively advertise it with metric 16 (poisoned). This explicitly tells the neighbor the route is unreachable through this path, which is faster than waiting for the route to expire.
+
+**Triggered updates**: When a route changes (especially when it goes down), immediately send an update rather than waiting for the next 30-second cycle. This accelerates convergence significantly.
+
+**Holddown timers**: After a route is declared unreachable, ignore advertisements of that route at a worse or equal metric for a holddown period. This prevents a stale route from being reinstated too quickly.
+
+None of these mechanisms fully solve the count-to-infinity problem in all topologies, which is one of the reasons distance-vector protocols fell out of favor in large networks.
+
+---
+
+## RIPv1 vs RIPv2
+
+| Feature | RIPv1 | RIPv2 |
+|---------|-------|-------|
+| Standard | RFC 1058 (1988) | RFC 2453 (1998) |
+| Subnet mask in updates | No (classful only) | Yes (CIDR/VLSM support) |
+| Update destination | Broadcast (255.255.255.255) | Multicast (224.0.0.9) |
+| Authentication | None | Plain text or MD5 |
+| Next hop field | No | Yes (supports route redistribution optimization) |
+| Route tag | No | Yes (can tag routes from other protocols) |
+
+**RIPv1 is classful**: It does not include the subnet mask in routing updates, so it cannot support VLSM or CIDR. All subnets of the same classful network must be the same length. This makes RIPv1 completely unsuitable for modern networks.
+
+**RIPv2 is classless**: It includes the subnet mask in every route advertisement, supporting VLSM and CIDR. RIPv2 is backward compatible with RIPv1 (can run in compatibility mode). RIPv2's multicast updates are more efficient than RIPv1's broadcasts.
+
+**MD5 authentication in RIPv2** prevents a rogue device from injecting fake routes. Without authentication, any device on a RIP-speaking segment can send forged RIP updates and pollute routing tables.
+
+---
+
+## RIPng — RIP for IPv6
+
+**RIPng (RIP next generation)**, defined in RFC 2080, is the IPv6 adaptation of RIP. It operates on the same distance-vector principles with hop count as the metric. Key differences:
+
+- Carries IPv6 prefixes (128-bit addresses) instead of IPv4
+- Uses UDP port 521 (vs 520 for RIP)
+- Sends updates to the multicast group `FF02::9` (all RIP routers)
+- IPv6 link-local addresses serve as next-hop addresses
+
+The same limitations apply: 15-hop maximum, slow convergence, count-to-infinity susceptibility.
+
+---
+
+## When RIP Is Appropriate
+
+RIP's limitations make it unsuitable for most production networks today. The cases where RIP is still reasonable:
+
+**Very small, simple networks**: A network with 5–6 routers and stable topology benefits from RIP's simplicity. There is no complex configuration, no area design, no metric tuning.
+
+**Legacy environments**: Networks built around older equipment that does not support OSPF or EIGRP.
+
+**Learning and labs**: RIP is an excellent teaching protocol. Its behavior is simple enough to observe and understand without deep background knowledge.
+
+For any network with more than a handful of routers, or any network where fast convergence matters, OSPF or (in Cisco environments) EIGRP is the appropriate choice.
+
+---
+
+## Key Concepts
+
+### RIP shares the routing table, not the topology
+
+Each RIP router only knows what its neighbors tell it, which is a summary of what their neighbors told them. No RIP router has a complete view of the network topology. This is what makes distance-vector protocols inherently susceptible to routing loops when topology changes occur.
+
+### Convergence is the critical weakness
+
+A routing protocol's convergence time is how long it takes for all routers in the network to agree on the new topology after a change. RIP's convergence is slow — on the order of minutes — because of its 30-second update timer, holddown timers, and the count-to-infinity process. Modern networks demand sub-second convergence, which RIP cannot provide.
+
+---
+
+## References
+
+- [RFC 1058 — Routing Information Protocol](https://www.rfc-editor.org/rfc/rfc1058)
+- [RFC 2453 — RIP Version 2](https://www.rfc-editor.org/rfc/rfc2453)
+- [RFC 2080 — RIPng for IPv6](https://www.rfc-editor.org/rfc/rfc2080)

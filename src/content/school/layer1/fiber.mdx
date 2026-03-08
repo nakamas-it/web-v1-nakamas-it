@@ -1,0 +1,166 @@
+---
+title: "Fiber Optic Cabling — Light as the Medium"
+layer: "layer1"
+protocol: "fiber"
+summary: "How fiber optic cables carry data as light, the difference between single-mode and multimode, and the transceiver modules that sit between glass and electronics."
+tags: ["layer1", "fiber", "single-mode", "multimode", "sfp", "optical", "physical"]
+order: 2
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Copper twisted pair carries data as varying electrical voltages on metal conductors. Fiber optic cable carries data as pulses of light through a strand of glass or plastic thinner than a human hair. This fundamental difference in the physical medium gives fiber properties that copper cannot match: immune to electromagnetic interference, capable of spanning kilometers without a repeater, and able to carry far higher bandwidth over those distances.
+
+Fiber is not a replacement for copper in every scenario — it is more expensive to procure, harder to terminate in the field, and the electronics at each end cost more. But for anything requiring distance beyond 100 meters, for backbone links in data centers, for connections between buildings, or for environments with severe electromagnetic interference, fiber is the correct choice and copper is simply not an option.
+
+Understanding fiber optics at Layer 1 is essential for anyone working in enterprise or data center networking. Even if you never terminate a fiber cable yourself, you will configure transceivers, troubleshoot degraded links, interpret dBm power readings, and deal with the consequences of dirty connectors and bent fiber — and all of that requires understanding what fiber is and how light moves through it.
+
+---
+
+## How Light Carries Data
+
+In electrical signaling, data is encoded as voltage levels on a conductor. In fiber optic signaling, data is encoded as the presence or absence of light — or as variations in light intensity or phase, depending on the modulation scheme. A laser or LED at the transmitter end generates a light signal; a photodetector at the receiver end converts it back to an electrical signal.
+
+The core of the cable — the part that carries the light — is made of ultra-pure silica glass. It is surrounded by a cladding layer of glass with a slightly lower refractive index. Light traveling through the core hits the cladding at a shallow angle and is reflected back into the core — a phenomenon called **total internal reflection**. This keeps the light inside the core and prevents it from escaping sideways into the cladding as it travels down the length of the cable.
+
+**Attenuation** (signal loss) still occurs in fiber, but at much lower rates than copper. A well-installed single-mode fiber link can span 80 kilometers or more before the signal becomes too weak to reliably detect. Attenuation is measured in decibels per kilometer (dB/km) and depends heavily on the wavelength of light being used.
+
+---
+
+## Single-Mode Fiber
+
+Single-mode fiber (SMF) has a very small core — typically 9 micrometers in diameter. This narrow core allows only a single ray (mode) of light to propagate down the fiber. Because all the light travels in essentially the same path, there is no **modal dispersion**: the signal arrives sharp and intact even after very long distances.
+
+Single-mode fiber uses laser light sources operating at longer wavelengths (typically 1310 nm or 1550 nm), which have lower attenuation than shorter wavelengths. The combination of a single propagation path and a laser source means single-mode links can span tens of kilometers without amplification.
+
+| Property         | Typical Value            |
+|------------------|--------------------------|
+| Core diameter    | 9 µm                     |
+| Cladding diameter| 125 µm                   |
+| Wavelength       | 1310 nm / 1550 nm        |
+| Max distance     | 10–80+ km (application dependent) |
+| Light source     | Laser (LD)               |
+| Color code       | Yellow jacket            |
+
+Single-mode is the choice for:
+- Campus and metro area connections
+- Data center interconnects spanning multiple buildings
+- WAN and ISP backbone fiber
+- Any link where distance is a primary requirement
+
+---
+
+## Multimode Fiber
+
+Multimode fiber (MMF) has a larger core — 50 or 62.5 micrometers — that allows multiple rays (modes) of light to travel simultaneously, each at a slightly different angle. This creates **modal dispersion**: different modes arrive at the receiver at slightly different times, which causes the signal to spread out over distance. At short distances this is negligible, but it limits multimode links to a few hundred meters for high-speed standards.
+
+Multimode fiber uses LED or VCSEL (Vertical-Cavity Surface-Emitting Laser) light sources operating at shorter wavelengths (850 nm or 1300 nm), which are less expensive than the lasers required for single-mode.
+
+There are several multimode grades, distinguished by their bandwidth-distance product:
+
+| Grade  | Core   | Bandwidth (850nm) | Max Distance at 10G | Color Code  |
+|--------|--------|-------------------|---------------------|-------------|
+| OM1    | 62.5 µm | 200 MHz·km        | 33 m                | Orange      |
+| OM2    | 50 µm  | 500 MHz·km        | 82 m                | Orange      |
+| OM3    | 50 µm  | 2000 MHz·km       | 300 m               | Aqua        |
+| OM4    | 50 µm  | 4700 MHz·km       | 400 m               | Aqua/Violet |
+| OM5    | 50 µm  | 28000 MHz·km      | 400 m (per wavelength, SWDM) | Lime green |
+
+OM1 and OM2 are effectively legacy grades — they cannot support modern 10G or 40G applications over useful distances. OM3 is the practical minimum for new data center installations requiring 10G. OM4 is the current standard for 10G and 40G multimode deployments. OM5 enables short-wavelength division multiplexing (SWDM), which runs multiple wavelengths simultaneously to multiply throughput.
+
+Multimode is the choice for:
+- Short data center runs (top-of-rack to aggregation)
+- Intra-building backbone
+- Any application where distance is less than 300–400 meters and cost of optics matters
+
+---
+
+## Connectors
+
+Fiber connectors are different from copper connectors in one critical respect: the fiber core that must align at the connection point is measured in micrometers. Even a small amount of misalignment, dirt, or damage causes significant signal loss. Fiber connectors must be kept clean and protected when not connected.
+
+| Connector | Form Factor | Common Use                              |
+|-----------|-------------|-----------------------------------------|
+| LC        | Small form, 1.25mm ferrule | Data center and enterprise; SFP modules |
+| SC        | Larger, push-pull; 2.5mm ferrule | Older enterprise, some ISP CPE |
+| ST        | Bayonet-style; 2.5mm ferrule | Legacy enterprise and industrial         |
+| FC        | Screw-on; 2.5mm ferrule    | Telecom, test equipment                  |
+| MTP/MPO   | Multi-fiber (12 or 24)     | High-density data center trunk cables    |
+
+**LC connectors** are the dominant standard in modern enterprise and data center networking. SFP, SFP+, and SFP28 transceivers almost universally use LC duplex connectors (two fibers — one for transmit, one for receive — in a single housing).
+
+**MTP/MPO connectors** terminate an entire ribbon of 12 or 24 fibers in a single connector. They are used for high-density trunk cables in data centers, where running individual LC cables between patch panels would be unmanageable. A single MTP cable can carry up to 24 fibers, each carrying a full-duplex link.
+
+**Connector polish** — the finish on the end of the fiber — also matters. UPC (Ultra Physical Contact) connectors have a slightly curved, polished end face that ensures tight contact. APC (Angled Physical Contact) connectors have an 8-degree angled polish that reflects any light that does not couple into the fiber at an angle that prevents it from traveling back down the source fiber. APC connectors are used in applications where back-reflection causes problems (DWDM, CATV distribution). APC connectors are always green; UPC connectors are typically blue or beige.
+
+---
+
+## Transceivers — Bridging Glass and Electronics
+
+Network equipment (switches, routers) operates electrically. The conversion between electrical signals and optical signals is handled by **transceivers** — pluggable modules that contain the laser (or LED) transmitter and the photodetector receiver, along with the electronics to drive them.
+
+Transceivers follow standardized form factors so that a single switch port can accept different modules for different distances, speeds, and fiber types simply by swapping the transceiver:
+
+| Form Factor | Common Speeds         | Notes                                             |
+|-------------|----------------------|---------------------------------------------------|
+| SFP         | 100 Mbps – 1 Gbps    | Small Form-factor Pluggable; ubiquitous in enterprise |
+| SFP+        | 10 Gbps              | Enhanced SFP; same physical form factor as SFP     |
+| SFP28       | 25 Gbps              | Used in 25G server connections in data centers     |
+| QSFP+       | 40 Gbps (4×10G)      | Quad SFP; larger module for 40G uplinks            |
+| QSFP28      | 100 Gbps (4×25G)     | Dominant standard for 100G data center links       |
+| QSFP-DD     | 400 Gbps (8×50G)     | Double-density QSFP for 400G spines               |
+
+A typical SFP+ slot in a switch accepts any SFP+ module — you choose the module based on the required distance and fiber type: a `SFP-10G-SR` module for short-range multimode, `SFP-10G-LR` for long-range single-mode, `SFP-10G-ZR` for extended range single-mode. The `S`, `L`, `E`, and `Z` suffixes broadly indicate short, long, extended, and ultra-long reach.
+
+**Direct Attach Copper (DAC)** cables are SFP+ or QSFP28 connectors wired directly to short copper cables (up to about 7 meters). They are cheaper than optical transceivers and used for rack-to-rack connections within a data center row.
+
+**Active Optical Cables (AOC)** are SFP+ or QSFP connectors wired to a short optical fiber assembly with transceivers built into each end and not removable. They bridge the gap between DAC (low cost, short range) and separate transceivers (any range, higher cost).
+
+---
+
+## Optical Power and Loss Budgets
+
+Fiber links have a **loss budget**: the maximum amount of signal attenuation the link can tolerate while still maintaining reliable operation. Every component in the path introduces loss:
+
+| Component             | Typical Loss         |
+|-----------------------|---------------------|
+| Fiber (single-mode)   | 0.35 dB/km at 1310 nm |
+| Fiber (single-mode)   | 0.20 dB/km at 1550 nm |
+| Fiber (multimode OM4) | 3.5 dB/km at 850 nm  |
+| LC connector          | 0.3–0.75 dB each     |
+| Fusion splice         | 0.02–0.1 dB          |
+| Mechanical splice     | 0.3–0.5 dB           |
+
+Optical power is measured in **dBm** (decibels relative to one milliwatt). A transceiver's specification sheet lists the transmit power (TX dBm) and the receiver sensitivity (minimum RX dBm). The difference between transmit power and receiver sensitivity is the **link budget** — how much total loss the link can sustain.
+
+If the received power is too high (a very short link with a powerful laser), the photodetector saturates and the link also fails. For very short links, optical attenuators are used to reduce the signal to a level the receiver can handle.
+
+In practice, when a fiber link is marginal or failing, the first diagnostic step is to measure the received optical power with an optical power meter (or read it from the transceiver's DDM/DOM — Digital Diagnostics Monitoring — data via the switch CLI). A low RX power indicates fiber loss; the cause is usually a dirty connector, a broken fiber, or a bend radius violation.
+
+---
+
+## Key Concepts
+
+### Clean connectors are not optional
+
+The fiber core in an LC connector is 50 or 62.5 micrometers in diameter for multimode, and 9 micrometers for single-mode. A speck of dust or oil on the connector end face covering even a few micrometers causes significant signal loss. Every fiber connection should be inspected with a fiber scope and cleaned before insertion. Never touch the end face of a fiber connector. Always cap unused connectors. "It's probably dirty" is the correct first hypothesis for any new fiber link that does not come up.
+
+### Single-mode and multimode transceivers are not interchangeable
+
+Plugging a single-mode transceiver (laser source at 1310 nm) into multimode fiber will often appear to work over short distances but the signal integrity degrades rapidly beyond a few meters because the laser's small beam does not fill the multimode core correctly, and back-reflection from the connector into the laser cavity causes noise. Conversely, plugging a multimode transceiver into single-mode fiber simply will not work — the LED cannot couple efficiently into the 9-µm core. Always verify that the transceiver type matches the fiber type.
+
+### Bend radius violations are invisible but destructive
+
+Fiber has a minimum bend radius — typically 10× the cable diameter for standard cable. Bending the fiber tighter causes the light to exceed the angle of total internal reflection and escape through the cladding, increasing attenuation. A fiber crushed under a heavy object, kinked at a sharp corner, or routed with insufficient slack through a raceway is degraded in a way that is not visible externally but shows up immediately on optical power measurements.
+
+---
+
+## References
+
+- [TIA-568.3-D — Optical Fiber Cabling Components Standard](https://www.tiaonline.org)
+- [IEEE 802.3 — Ethernet Standard (optical clauses)](https://standards.ieee.org/ieee/802.3)
+- [ITU-T G.652 — Single-mode Optical Fiber Characteristics](https://www.itu.int)
+- [ISO/IEC 11801 — Generic Cabling for Customer Premises](https://www.iso.org)

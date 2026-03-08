@@ -1,0 +1,173 @@
+---
+title: "ICMP — Control Messages for IP Networks"
+layer: "layer3"
+protocol: "icmp"
+summary: "What ICMP is, how it carries error reports and network diagnostics, the most important message types including Destination Unreachable and Time Exceeded, and how ping and traceroute are built on top of ICMP."
+tags: ["layer3", "icmp", "ping", "traceroute", "unreachable", "ttl", "error", "rfc792"]
+order: 5
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+IP is a best-effort, connectionless protocol. When an IP packet cannot be delivered — because the destination is unreachable, because a router's buffer is full, because the packet is too large for a link in the path — IP has no built-in mechanism to report this failure back to the sender. The sender's packet simply disappears.
+
+**ICMP (Internet Control Message Protocol)** fills this gap. ICMP is a companion protocol to IP, defined in RFC 792, that carries control and error messages between IP devices. When a router cannot forward a packet, it generates an ICMP message and sends it back to the packet's original source, explaining what went wrong. When a host receives a packet too large for it to handle, it sends an ICMP message telling the sender to use smaller packets.
+
+ICMP is also the foundation of the two most commonly used network diagnostic tools: **ping** (using ICMP Echo Request and Echo Reply) and **traceroute** (using ICMP Time Exceeded messages).
+
+Despite being a separate protocol, ICMP is considered part of the IP layer — it is not a Layer 4 protocol. ICMP messages are carried inside IP packets with protocol number **1**.
+
+---
+
+## ICMP Message Format
+
+Every ICMP message starts with the same 4-byte header:
+
+<PacketDiagram
+  label="ICMP Message Header"
+  fields={[
+    { name: "Type", bytes: 1, highlight: true },
+    { name: "Code", bytes: 1, highlight: true },
+    { name: "Checksum", bytes: 2 },
+    { name: "Rest of Header (type-specific)", bytes: 4 },
+    { name: "Data (varies by type)", bytes: 4 },
+  ]}
+/>
+
+| Field | Description |
+|-------|-------------|
+| Type | The category of ICMP message (0 = Echo Reply, 3 = Destination Unreachable, 8 = Echo Request, 11 = Time Exceeded, etc.) |
+| Code | A sub-type within the Type category (Type 3, Code 3 = Port Unreachable; Type 3, Code 0 = Network Unreachable) |
+| Checksum | 16-bit ones-complement checksum over the ICMP message |
+| Rest of Header | Type-specific: for Echo it carries the identifier and sequence number; for errors it is unused (zero) |
+
+For error messages (Type 3, 11, 12, etc.), the ICMP **Data** field contains the **IP header plus the first 8 bytes of the payload** of the original packet that triggered the error. This is what allows the receiving application to identify which packet or connection caused the error, since the original IP header contains the source/destination addresses and the first 8 bytes contain the Layer 4 ports.
+
+---
+
+## Key ICMP Message Types
+
+### Type 8 — Echo Request / Type 0 — Echo Reply
+
+The foundation of **ping**. A sender transmits an ICMP Echo Request with an arbitrary payload, a 2-byte identifier (typically the process ID), and a 2-byte sequence number. The destination, if it is reachable and configured to respond, sends back an ICMP Echo Reply with identical payload, identifier, and sequence number.
+
+The sender uses the sequence number and timing information to measure:
+- **Round-trip time (RTT)**: Time from sending the request to receiving the reply
+- **Packet loss**: Missing sequence numbers in the replies indicate dropped packets
+
+Ping is the simplest possible reachability test. If a ping succeeds, you know:
+1. A route exists from you to the destination
+2. The destination is up and responding to ICMP
+3. A route exists from the destination back to you
+
+Ping failure does not necessarily mean the destination is unreachable — many hosts and firewalls block ICMP Echo Requests for security reasons.
+
+### Type 3 — Destination Unreachable
+
+When a router or host cannot deliver an IP packet and needs to tell the sender why, it generates a Destination Unreachable message. The code field identifies the specific reason:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Network Unreachable — the router has no route to the destination network |
+| 1 | Host Unreachable — the destination network is known but the host is not responding (ARP failed, typically) |
+| 2 | Protocol Unreachable — the host does not support the Layer 4 protocol in the IP packet |
+| 3 | Port Unreachable — the host received the packet but no application is listening on the destination port |
+| 4 | Fragmentation Needed and DF Bit Set — the packet is too large and the Don't Fragment bit is set; used for Path MTU Discovery |
+| 9 | Network Administratively Prohibited — a firewall or access list blocked the packet |
+| 10 | Host Administratively Prohibited — same as 9, but specifically a host ACL |
+| 13 | Communication Administratively Prohibited — generic firewall block |
+
+**Port Unreachable (Type 3, Code 3)** is the mechanism that tells a UDP application that no service is listening on the destination port. Unlike TCP (which uses a RST flag), UDP relies on ICMP Port Unreachable for this feedback.
+
+### Type 11 — Time Exceeded
+
+When an IP packet's TTL reaches 0, the router that decrements it to 0 discards the packet and sends a Time Exceeded message back to the original source. This is how **traceroute** works.
+
+Traceroute sends packets with TTL=1, then TTL=2, then TTL=3, and so on. Each router in the path receives a packet with TTL=1, decrements it to 0, discards the packet, and sends back an ICMP Time Exceeded message. The source of the Time Exceeded message is the router's own IP address — which is how traceroute discovers each hop in the path.
+
+<FlowDiagram
+  parties={["Source", "Router (hop 1)"]}
+  steps={[
+    { from: "Source", to: "Router (hop 1)", label: "Packet with TTL=1", sub: "Destination: 8.8.8.8" },
+    { from: "Router (hop 1)", to: "Source", label: "ICMP Time Exceeded", sub: "Type 11, Code 0 — from router's own IP" },
+    { from: "Source", to: "Router (hop 1)", label: "Packet with TTL=2", sub: "Forwarded onward by hop 1, then expires at hop 2" },
+  ]}
+/>
+
+By collecting the source IP addresses of Time Exceeded messages across successive TTL values, traceroute builds a hop-by-hop map of the path to the destination.
+
+**Code values for Type 11**:
+- Code 0: TTL exceeded in transit (the standard case above)
+- Code 1: Fragment reassembly time exceeded (all fragments of a fragmented packet did not arrive within the reassembly timeout)
+
+### Type 5 — Redirect
+
+When a router receives a packet from a host and determines that a better next-hop exists on the same local subnet (meaning the host could reach that better next-hop directly), it sends an ICMP Redirect to the host. The Redirect carries the IP address of the better next-hop.
+
+For example: a host with default gateway `192.168.1.1` sends traffic destined for `10.0.0.5` to the default gateway. The default gateway knows that `10.0.0.5` is better reached via `192.168.1.254`, which is also on the same subnet as the host. The gateway forwards the packet to `192.168.1.254` and sends an ICMP Redirect to the host saying "for traffic to `10.0.0.5`, use `192.168.1.254` as the next hop."
+
+ICMP Redirects are often disabled on routers for security reasons — they can be used to redirect a host's traffic to an attacker's machine.
+
+### Type 12 — Parameter Problem
+
+Generated when a router or host receives a packet with an invalid or unrecognized field in the IP header (excluding TTL expiry). The Pointer field in the ICMP message identifies the byte offset of the problematic field.
+
+---
+
+## Path MTU Discovery
+
+**Path MTU Discovery (PMTUD)** uses ICMP to determine the maximum packet size that can traverse an entire path without fragmentation.
+
+The sender sets the **Don't Fragment (DF) bit** in the IP header and sends packets at the largest MTU it wants to test. If any router in the path has a link with a smaller MTU, it cannot fragment the packet (DF bit is set) and instead sends back an ICMP **Destination Unreachable, Code 4** (Fragmentation Needed) message. This message includes the MTU of the offending link. The sender reduces its packet size accordingly and retries.
+
+Through this process, the sender discovers the smallest MTU along the entire path — the **Path MTU** — and limits all packets to this size, avoiding fragmentation throughout the path.
+
+PMTUD failure — a common problem — occurs when firewalls block ICMP or specifically block Fragmentation Needed messages. The sender never learns about the MTU restriction and continues sending oversized packets with DF set. Those packets are silently dropped, causing TCP connections to stall after the initial handshake (which uses small packets) — a phenomenon called the **black hole effect**.
+
+---
+
+## ICMPv6
+
+IPv6 does not have a separate ARP protocol. Instead, ICMPv6 (defined in RFC 4443) extends ICMP to handle functions that were previously handled by separate protocols:
+
+- **Neighbor Discovery (ND)**: Replaces ARP. Uses ICMPv6 Neighbor Solicitation and Neighbor Advertisement messages to resolve IPv6 addresses to MAC addresses.
+- **Router Discovery**: Replaces the need for a separate router advertisement protocol. Routers send ICMPv6 Router Advertisements; hosts send Router Solicitations.
+- **Stateless Address Autoconfiguration (SLAAC)**: Hosts can configure their own IPv6 addresses using information from Router Advertisements.
+- **Path MTU Discovery**: ICMPv6 Packet Too Big (Type 2) replaces the IPv4 Fragmentation Needed message.
+
+ICMPv6 is deeply integrated into IPv6 — filtering it at a firewall breaks fundamental IPv6 functions (unlike IPv4, where ICMP is more optional). ICMPv6 uses protocol number 58.
+
+---
+
+## ICMP and Firewalls
+
+Many firewalls block ICMP entirely, based on the incorrect assumption that blocking ICMP improves security by hiding the network. In practice:
+
+- **Blocking all ICMP is harmful.** PMTUD breaks (Fragmentation Needed messages are dropped), causing TCP black holes. ICMPv6 filtering breaks IPv6 entirely. Time Exceeded blocks traceroute-based diagnostics.
+- **Selectively blocking ICMP is reasonable.** Blocking ICMP Echo Request at the network perimeter prevents pinging infrastructure addresses from outside. This is a minor security measure but not a meaningful one — attackers do not rely on ping to identify hosts.
+
+Best practice: Allow ICMP error types (Destination Unreachable, Time Exceeded, Fragmentation Needed) through the firewall. Optionally block Echo Request from untrusted networks. Never block ICMP inside the network.
+
+---
+
+## Key Concepts
+
+### ICMP is diagnostic infrastructure, not application traffic
+
+ICMP messages are generated by routers and hosts in response to conditions in the network. They are not application traffic. Treating ICMP as if it were a threat that needs to be blocked conflates the diagnostic layer with the application layer and is a common source of self-inflicted network problems.
+
+### Ping is a minimum viability test
+
+A successful ping proves basic IP connectivity. A failed ping proves nothing — the destination may be up but filtering ICMP, or a firewall may be blocking it, or the return path may be broken. Traceroute provides much more diagnostic information than ping, but even traceroute can be misleading when intermediate routers rate-limit or block ICMP.
+
+---
+
+## References
+
+- [RFC 792 — Internet Control Message Protocol](https://www.rfc-editor.org/rfc/rfc792)
+- [RFC 1191 — Path MTU Discovery](https://www.rfc-editor.org/rfc/rfc1191)
+- [RFC 4443 — Internet Control Message Protocol (ICMPv6) for the IPv6 Specification](https://www.rfc-editor.org/rfc/rfc4443)

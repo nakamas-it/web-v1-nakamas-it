@@ -1,0 +1,112 @@
+---
+title: "Coaxial Cable — From Ethernet's Origins to ISP Last-Mile"
+layer: "layer1"
+protocol: "coaxial"
+summary: "The cable that built the first Ethernet networks, why it lost to twisted pair, and why it still carries millions of broadband connections today."
+tags: ["layer1", "coaxial", "cable", "docsis", "10base2", "physical"]
+order: 4
+draft: false
+---
+
+## Overview
+
+Before twisted pair dominated enterprise wiring closets, before fiber lit up the data center, the first Ethernet networks ran on coaxial cable. Coaxial — "coax" — is a cable where a central copper conductor is surrounded by insulating material, then a braided or foil outer conductor (the shield), and finally an outer jacket. The two conductors share the same geometric axis — hence "co-axial" — and this structure gives the cable excellent electrical properties, particularly its resistance to electromagnetic interference.
+
+Coaxial cable is effectively absent from modern enterprise LAN infrastructure. Twisted pair and fiber replaced it in the 1990s, and there is no reason to use it in a new wired installation. But coax is far from obsolete: it is the physical medium that carries broadband internet into tens of millions of homes and businesses worldwide through the cable TV infrastructure, and understanding it explains the architecture of a significant portion of the internet's last-mile connectivity.
+
+---
+
+## Physical Structure
+
+The coaxial cable's structure is what defines its electrical properties:
+
+| Layer | Material | Purpose |
+|-------|----------|---------|
+| Center conductor | Solid or stranded copper | Signal carrier |
+| Dielectric | Polyethylene or PTFE | Insulates center from shield; controls impedance |
+| Shield | Braided copper or aluminum foil (or both) | Return path; blocks external interference |
+| Outer jacket | PVC or plenum-rated material | Physical protection |
+
+The ratio of the shield diameter to the center conductor diameter, along with the dielectric material's properties, determines the cable's **characteristic impedance** — the most important electrical specification. Ethernet coaxial cables used 50-ohm impedance. Cable TV (CATV) uses 75-ohm impedance. These are not interchangeable — connecting 50-ohm equipment to 75-ohm cable (or vice versa) causes impedance mismatches that reflect signals back toward the source, degrading performance.
+
+---
+
+## Coax in Early Ethernet
+
+Coaxial cable was the original Ethernet physical medium. The original 1970s Ethernet ran on thick coaxial cable (RG-8 or equivalent) in what became known as **10BASE5** (Thicknet): 10 Mbps, baseband signaling, 500-meter segment length. Devices connected to the cable via a vampire tap — a clamp that pierced the cable jacket without cutting the cable, allowing devices to be added anywhere along the run without breaking the cable. The thick cable acted as a shared bus; every device on the segment received every transmission.
+
+**10BASE2** (Thinnet, using RG-58 coax) followed in the 1980s as a cheaper, more flexible alternative. Devices connected via BNC T-connectors and the cable ran from device to device in a daisy-chain. The segment limit was 185 meters (nominally 200, hence the "2"). Both ends of the cable required a 50-ohm terminator to prevent signal reflections. If any device or terminator failed or was removed, the entire segment went down — a design limitation that made troubleshooting difficult and the medium fragile in practice.
+
+Both 10BASE5 and 10BASE2 operated as **shared half-duplex bus networks**: any device transmitting blocked all other devices from transmitting, and all devices received all traffic. This is the environment CSMA/CD was designed for. Collisions were frequent and constrained real-world throughput well below the theoretical 10 Mbps.
+
+The shift to twisted pair (10BASE-T, 1990) eliminated the shared bus topology in favor of point-to-point links to a central hub or switch, eliminated the terminator requirement, and made individual device connections independent. By the mid-1990s, coax was being ripped out of offices worldwide and replaced with Cat3 or Cat5 twisted pair.
+
+---
+
+## CATV and DOCSIS — Coax in ISP Infrastructure
+
+While coax disappeared from enterprise LAN wiring, it survived — and thrived — in a completely different role: the cable television (CATV) infrastructure.
+
+Cable TV operators built extensive coaxial networks to distribute television signals to homes starting in the 1960s and 1970s. These networks use a different type of coax (75-ohm, larger diameter, better shielded) and tree-and-branch topology: a headend distributes signals through trunk cables, then feeder cables, then drop cables to individual subscribers. Amplifiers are placed every few hundred meters to compensate for cable attenuation.
+
+In the 1990s, cable operators recognized that this existing coaxial infrastructure could be repurposed to carry internet traffic. The result was **DOCSIS** — Data Over Cable Service Interface Specification — a standard defining how to transmit IP data over cable TV plant.
+
+DOCSIS divides the cable spectrum into:
+- **Downstream** (headend to subscriber): high-frequency channels carrying large amounts of data to the subscriber
+- **Upstream** (subscriber to headend): lower-frequency channels carrying the subscriber's requests and uploads back to the headend
+
+| DOCSIS Version | Year | Max Downstream | Max Upstream | Notes |
+|----------------|------|----------------|--------------|-------|
+| 1.0            | 1997 | 40 Mbps        | 10 Mbps      | First standard |
+| 2.0            | 2001 | 40 Mbps        | 30 Mbps      | Improved upstream |
+| 3.0            | 2006 | 1 Gbps         | 200 Mbps     | Channel bonding |
+| 3.1            | 2013 | 10 Gbps        | 1–2 Gbps     | OFDM/OFDMA, wider channels |
+| 4.0            | 2017 | 10 Gbps        | 6 Gbps       | Full duplex on same cable |
+
+Modern DOCSIS 3.1 deployments can deliver gigabit downstream service over the same coaxial drop cable that was carrying cable TV channels in the 1980s — an extraordinary demonstration of how much more can be extracted from existing physical infrastructure with better signal processing.
+
+The **cable modem** at the subscriber premises connects to the coaxial drop cable on one side and provides an Ethernet port on the other. The **Cable Modem Termination System (CMTS)** at the cable operator's headend terminates all the subscriber connections and connects to the IP network.
+
+---
+
+## HFC — Hybrid Fiber-Coaxial
+
+Modern cable TV networks are not pure coax end-to-end. They are **HFC (Hybrid Fiber-Coaxial)** architectures: the high-capacity backbone from the headend to distribution nodes uses fiber optic cable, and the final connection from the distribution node to individual homes uses the existing coaxial plant.
+
+This architecture lets cable operators leverage the superior capacity and distance properties of fiber for the trunk portion of the network, while avoiding the cost of running fiber all the way to every home. The fiber portion carries the signal as light; at the distribution node, it is converted back to an RF signal on coax for the last few hundred meters to the subscriber.
+
+**FTTC (Fiber to the Curb)** and **FTTN (Fiber to the Node)** describe variations of this approach with the fiber/coax boundary at different points. **FTTH (Fiber to the Home)** eliminates coax entirely, running fiber directly to the subscriber premises — but requires much more fiber deployment investment.
+
+---
+
+## Common Coaxial Cable Types
+
+| Designation | Impedance | Common Use |
+|-------------|-----------|------------|
+| RG-6        | 75 Ω      | CATV subscriber drop, satellite TV |
+| RG-11       | 75 Ω      | CATV long runs, lower attenuation than RG-6 |
+| RG-58       | 50 Ω      | Legacy 10BASE2 (Thinnet Ethernet) |
+| RG-8 / RG-213 | 50 Ω   | Legacy 10BASE5 (Thicknet Ethernet) |
+| LMR-400     | 50 Ω      | Wireless antenna runs, high-frequency |
+
+**RG-6** is the standard for residential cable TV and broadband connections. It uses quad-shielding (two layers of foil and two layers of braid) to reduce signal leakage, which is important in the cable TV infrastructure where any signal leaking from subscriber drops into the return path spectrum causes ingress noise for all other subscribers in the node.
+
+---
+
+## Key Concepts
+
+### Why coax lost to twisted pair in the LAN
+
+Coax's bus topology was its fatal flaw in enterprise LANs. A single cable failure — a cut, a missing terminator, a defective T-connector — brought down the entire segment. Twisted pair to a central hub or switch created separate, independent point-to-point links: one device's failure affected only that device. The manageability, reliability, and lower installation cost of twisted pair infrastructure made the transition in the 1990s essentially universal.
+
+### Coax infrastructure is a liability for cable operators
+
+The coaxial last-mile is increasingly a competitive disadvantage for cable operators as the industry shifts to fiber-to-the-home deployments. Coax physics limits upstream bandwidth (the spectrum is inherently asymmetric) and the amplifier cascade in the distribution plant adds noise and maintenance burden. DOCSIS 4.0 attempts to squeeze more upstream capacity from existing coax, but fiber-to-the-home architectures have no such constraint. The cable industry's ongoing capital expenditure is heavily weighted toward gradually replacing the coaxial last-mile with fiber.
+
+---
+
+## References
+
+- [DOCSIS 3.1 Physical Layer Specification — CableLabs](https://www.cablelabs.com)
+- [IEEE 802.3 — Ethernet Standard (historical coax clauses)](https://standards.ieee.org/ieee/802.3)
+- [ITU-T J Series — Cable Networks](https://www.itu.int)

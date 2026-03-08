@@ -1,0 +1,180 @@
+---
+title: "TCP vs UDP — Choosing the Right Transport"
+layer: "layer4"
+protocol: "tcp-vs-udp"
+summary: "A direct comparison of TCP and UDP across reliability, latency, overhead, and real-world application fit — and when the right answer is neither, and you should build on UDP with a custom protocol like QUIC."
+tags: ["layer4", "tcp", "udp", "comparison", "transport", "quic", "latency", "reliability"]
+order: 3
+draft: false
+---
+
+## Overview
+
+Every application that sends data over an IP network must choose a transport protocol. In practice, that choice is almost always TCP or UDP. The choice is not about which protocol is better — it is about which protocol's trade-offs match the application's requirements.
+
+TCP provides reliability, ordering, and flow control at the cost of connection overhead, latency, and head-of-line blocking. UDP provides none of that structure, but delivers datagrams with the absolute minimum overhead and delay. Neither is universally correct. A protocol designed for file transfer would be foolish to use UDP; a protocol designed for live audio would be foolish to use TCP.
+
+This article examines the trade-offs side by side, looks at the real-world consequences of each property, and explains why a third path — custom transport built on UDP — is increasingly common for performance-critical modern applications.
+
+---
+
+## Side-by-Side Comparison
+
+| Property | TCP | UDP |
+|----------|-----|-----|
+| Connection | Required (3-way handshake) | None |
+| Reliability | Guaranteed (retransmission) | Best-effort (no retransmission) |
+| Ordering | Guaranteed (sequenced delivery) | Not guaranteed |
+| Flow control | Yes (receive window) | No |
+| Congestion control | Yes (Reno, CUBIC, BBR, etc.) | No |
+| Error detection | Mandatory checksum | Optional checksum (IPv4); mandatory (IPv6) |
+| Message framing | Byte stream (no boundaries) | Datagram (boundaries preserved) |
+| Header size | 20–60 bytes | 8 bytes |
+| Connection setup latency | 1 RTT minimum | None |
+| Multiplexing streams | No (one stream per connection) | Application-defined |
+| Broadcast/multicast | No | Yes |
+
+---
+
+## Reliability: When It Matters and When It Doesn't
+
+**TCP retransmission** ensures that every byte sent by the application is eventually received by the peer. The mechanism: every segment is acknowledged. Unacknowledged segments are retransmitted after a timeout (RTO). The application sees a continuous, gapless byte stream.
+
+This is essential for:
+- **File transfers**: A single missing byte corrupts the entire file
+- **Web pages**: A missing image chunk is visible and wrong
+- **Database queries**: A missing row in a result set silently corrupts the answer
+- **Email**: Missing content is unacceptable
+
+**UDP provides no retransmission**. Lost datagrams are gone. The application does not learn that a datagram was lost.
+
+This is acceptable (or even preferred) for:
+- **Live audio/video**: A late packet is worthless. The decoder interpolates missing frames. TCP retransmission would deliver the data too late to use.
+- **Real-time game state**: "Where was the player 200ms ago?" is not useful. The current state matters.
+- **DNS queries**: If the response is lost, the application retries the query (at the application layer). This is simpler and faster than waiting for TCP to retransmit.
+
+---
+
+## Head-of-Line Blocking
+
+This is one of TCP's most significant limitations for real-time applications.
+
+TCP delivers data to the application **in order**. If segment N is lost, segments N+1, N+2, N+3 (which may have arrived successfully) are held in the TCP receive buffer until segment N is retransmitted and received. The application is blocked waiting.
+
+For applications with independent data streams, this is catastrophic. If you have video, audio, and control messages all multiplexed over a single TCP connection (as HTTP/1.1 and HTTP/2 do), a single lost packet can block all three streams while waiting for the retransmission.
+
+**UDP has no head-of-line blocking**. Each datagram is independent. A lost datagram does not block the delivery of subsequent datagrams. If you receive datagrams 1, 2, 4, 5 (with 3 missing), all of 1, 2, 4, 5 are immediately delivered to the application. The application decides what to do about the missing 3.
+
+This is why QUIC (which runs over UDP) can multiplex multiple independent streams over a single connection without head-of-line blocking between streams. A lost packet in one stream does not block other streams.
+
+---
+
+## Connection Overhead and Latency
+
+**TCP requires a 3-way handshake** before any application data can flow:
+1. Client → Server: SYN
+2. Server → Client: SYN-ACK
+3. Client → Server: ACK + (optionally) first data
+
+This is a minimum of **1 round trip** of latency before data can be sent. For short-lived interactions (a DNS query, a game state update), this 1 RTT overhead is significant.
+
+With TLS (which nearly all web traffic uses), the overhead is even higher:
+- TLS 1.2: 2 RTTs after the TCP handshake → 3 RTTs total before data
+- TLS 1.3: 1 RTT after the TCP handshake → 2 RTTs total, with 0-RTT resumption for known servers
+
+**UDP has zero connection overhead**. The application sends data immediately. For protocols where the total round trip must be minimized — DNS, game updates, IoT telemetry — this matters enormously.
+
+---
+
+## Flow Control and Congestion Control
+
+TCP's **flow control** (via the receive window) prevents the sender from overwhelming a slow receiver. TCP's **congestion control** (CUBIC, BBR, Reno) prevents the sender from overwhelming the network.
+
+These mechanisms are why TCP is a "good citizen" on the internet. TCP connections compete fairly with each other, back off when there is congestion, and do not indefinitely saturate network links.
+
+**UDP has no built-in flow control or congestion control**. An application that sends 1 Gbps of UDP can saturate a 100 Mbps link, causing packet loss that affects everyone else on that link. This is a real concern:
+
+- **Media streaming applications** using UDP typically implement **application-level rate control** — monitoring network conditions and adjusting bitrate accordingly
+- **QUIC** implements full congestion control (BBR by default) despite running over UDP
+- **RTP** (the real-time transport protocol for VoIP) is paired with RTCP (the control protocol) which provides feedback that applications use to adjust sending rate
+
+Uncontrolled UDP flooding is the basis of **UDP flood DDoS attacks** — an attacker sends maximum-rate UDP traffic from many sources to exhaust the target's bandwidth. This is UDP's lack of congestion control weaponized.
+
+---
+
+## Message Framing
+
+**TCP is a byte stream**. There are no message boundaries. If an application calls `send(data, 1000)` and `send(data, 500)`, the receiver may receive `1500` bytes in one `recv()` call, or `600` and `900`, or `1500` bytes in three separate calls. The application must implement its own framing (e.g., length-prefixed messages, delimiter-based parsing) to reconstruct application-level messages from the byte stream.
+
+**UDP preserves message boundaries**. One `sendto(data, 1000)` on the sender produces exactly one `recvfrom(data, 1000)` on the receiver (assuming the datagram is not fragmented). The application does not need to implement framing — each send is one atomic message.
+
+For protocols with natural message boundaries (DNS requests, SNMP polls, game state updates), UDP's datagram model is a better fit. For protocols with continuous data streams (file transfer, HTTP response bodies), TCP's byte stream is a better fit.
+
+---
+
+## Broadcast and Multicast
+
+**TCP requires a unicast connection** between exactly two endpoints. You cannot TCP-broadcast to a subnet or TCP-multicast to a group — TCP has no concept of multiple receivers.
+
+**UDP supports broadcast and multicast**. A single UDP send to a broadcast or multicast address delivers the datagram to all interested receivers simultaneously. This is essential for:
+- **DHCP**: Client sends UDP broadcast; DHCP servers respond
+- **mDNS / Bonjour**: Devices discover services via UDP multicast
+- **IPTV**: A single stream delivered to thousands of subscribers via multicast
+- **OSPF / RIP**: Routing protocol updates sent to multicast addresses
+
+---
+
+## The Third Way: Custom Transport on UDP
+
+Some applications need something more sophisticated than either raw TCP or raw UDP — but the standard TCP behavior doesn't fit:
+
+- **QUIC** (RFC 9000): Implements multiplexed streams, reliable delivery, TLS 1.3 encryption, connection migration (changing IP address without dropping the connection), and 0-RTT connection resumption. All on top of UDP. QUIC is the transport protocol for HTTP/3.
+
+- **WebRTC**: Real-time browser-to-browser communication (video calls). Uses DTLS (Datagram TLS) for encryption and SRTP over UDP for media, with ICE for NAT traversal.
+
+- **Custom game protocols**: Game engines like Unreal and Unity implement UDP-based transport with selective reliability (some messages reliable, some not), custom congestion control, and delta compression.
+
+The pattern: **when TCP's one-size-fits-all reliability model doesn't match the application, implement a tailored reliability model on UDP** rather than fighting TCP's behavior.
+
+---
+
+## Decision Framework
+
+Use **TCP** when:
+- Data must arrive complete and in order (files, database queries, web content, email)
+- The application benefits from standard congestion control without implementing its own
+- Message boundaries are not important (or the application handles framing already)
+- Connection setup latency is acceptable (long-lived sessions, large transfers)
+
+Use **UDP** when:
+- Low latency matters more than guaranteed delivery (VoIP, live video, gaming)
+- The application implements its own reliability tailored to its needs
+- Broadcast or multicast delivery is required
+- Messages are short, self-contained, and the cost of retransmitting the whole thing is low (DNS, DHCP, SNMP)
+- Connection setup overhead per query would be significant relative to the query itself
+
+Consider **UDP with custom transport** (QUIC, etc.) when:
+- You need multiplexed streams without head-of-line blocking
+- You need 0-RTT connection resumption
+- You need connection migration (mobile networks where the IP changes)
+- You need selective reliability — some messages reliable, others not
+
+---
+
+## Key Concepts
+
+### The wrong transport creates unfixable problems
+
+If you use TCP for live audio, you will inevitably have audio glitches when retransmissions cause jitter. If you use raw UDP for file transfer, you will eventually have corrupted transfers. The transport choice is architectural — it is very difficult to change later. Match the transport to the application's fundamental requirements.
+
+### Modern "TCP replacement" protocols are UDP underneath
+
+QUIC, WebRTC, and custom game protocols are all built on UDP at the IP level. This is not because UDP is fundamentally better than TCP — it is because UDP gives application developers a blank canvas to implement exactly the transport semantics they need, without the kernel's TCP implementation getting in the way.
+
+---
+
+## References
+
+- [RFC 768 — User Datagram Protocol](https://www.rfc-editor.org/rfc/rfc768)
+- [RFC 9293 — Transmission Control Protocol](https://www.rfc-editor.org/rfc/rfc9293)
+- [RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport](https://www.rfc-editor.org/rfc/rfc9000)

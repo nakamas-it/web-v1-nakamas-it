@@ -1,0 +1,154 @@
+---
+title: "Cables & Connectors — The Physical Interface Reference"
+layer: "layer1"
+protocol: "connectors"
+summary: "Every connector and cable type you will encounter in a real network — RJ-45, LC, SC, SFP modules, DAC and AOC cables — and when to use each."
+tags: ["layer1", "rj45", "lc", "sc", "sfp", "connectors", "cables", "physical"]
+order: 7
+draft: false
+---
+
+## Overview
+
+Every physical network link involves two connectors and a cable between them. Get the connector type wrong, use the wrong cable for the distance, or install a transceiver that does not match the fiber type, and the link will not come up — or worse, it will come up marginally and fail intermittently under load in a way that is frustrating to diagnose.
+
+This article is a reference for the connector and cable types encountered in real network deployments: what they look like, what they connect to, what distinguishes similar-looking variants from each other, and the practical rules for choosing between them.
+
+---
+
+## RJ-45 — Copper Twisted Pair Connector
+
+The RJ-45 (technically 8P8C — 8 Position, 8 Contact) plug is the universal connector for Ethernet over twisted pair. It is a transparent plastic plug with eight gold-plated contacts arranged in a single row. The cable's conductors are inserted and then crimped in place with a crimping tool that simultaneously seats the conductors into the contacts and locks the plug onto the cable jacket.
+
+**Key variants:**
+- **Standard RJ-45**: for solid-core or stranded cable (different contact designs for each — using the wrong type causes intermittent connection)
+- **Pass-through RJ-45**: conductors extend through the front of the plug during crimping, making it easier to verify conductor order visually before crimping
+- **Shielded RJ-45 (STP)**: adds a metal housing around the plug body that grounds to the cable shield — required for shielded Cat6a or Cat7 deployments
+
+**Termination standards:**
+- **TIA-568B** (most common): White-Orange, Orange, White-Green, Blue, White-Blue, Green, White-Brown, Brown
+- **TIA-568A**: White-Green, Green, White-Orange, Blue, White-Blue, Orange, White-Brown, Brown (pairs 2 and 3 swapped)
+
+Both ends of a patch cable must use the same standard. A crossover cable uses 568A on one end and 568B on the other — swapping pairs 2 and 3, which swaps the transmit and receive pairs. Modern devices with Auto MDI-X do not require crossover cables.
+
+**Keystone jacks** are the female counterparts found in wall outlets and patch panels. They use IDC (Insulation Displacement Contact) termination: the conductor is pushed into a slot that cuts through the insulation and makes electrical contact without stripping. A punch-down tool is used to seat the conductor fully and trim the excess wire.
+
+---
+
+## LC — Small Form-Factor Fiber Connector
+
+The LC (Lucent Connector) is the dominant fiber connector in modern enterprise and data center networking. It has a 1.25mm ceramic ferrule — half the diameter of the older SC connector — which allows higher-density patch panels and transceiver modules.
+
+LC connectors use a push-pull latch mechanism. They are almost always used in **duplex** configuration: two LC connectors in a side-by-side housing, one for transmit and one for receive. The housing has a notch or color-coding that identifies transmit from receive (though in practice, most equipment will link regardless of polarity for multimode — single-mode can be more sensitive).
+
+**Polish types:**
+- **UPC (Ultra Physical Contact)**: flat-polished, slightly domed end face ensures physical contact between mating connectors. Typically blue housings. Return loss ≥ 55 dB. Used for most enterprise and data center applications.
+- **APC (Angled Physical Contact)**: 8-degree angled polish reflects back-reflections at an angle outside the fiber acceptance cone. Always green housings. Return loss ≥ 65 dB. Used in DWDM, CATV distribution, and applications sensitive to back-reflection. **APC and UPC connectors must never be mated with each other** — the angled and flat end faces will damage each other.
+
+LC connectors are used with SFP, SFP+, SFP28, and QSFP28 transceivers. Most short-range multimode optics (SR, SW) and long-range single-mode optics (LR, ER, ZR) use LC duplex connectors.
+
+---
+
+## SC — Standard Connector
+
+The SC (Subscriber Connector or Square Connector) connector has a 2.5mm ceramic ferrule and a push-pull coupling mechanism. It is larger than LC and therefore allows lower patch panel density. SC was the dominant fiber connector through the 1990s and is still widely deployed in legacy enterprise infrastructure, ISP CPE, and some industrial environments.
+
+SC connectors are more forgiving to terminate and mate than LC connectors because of the larger ferrule diameter. They are available in both UPC and APC variants (APC is green).
+
+SC duplex connectors clip two SC housings together side by side. SC simplex connectors carry a single fiber and are used for some special-purpose applications.
+
+---
+
+## ST — Bayonet Connector
+
+The ST (Straight Tip) connector uses a 2.5mm ferrule like SC but has a bayonet-style coupling mechanism rather than the push-pull latch. The connector is inserted and twisted to lock. ST connectors are predominantly found in legacy enterprise installations from the 1990s and in some industrial and government network environments. They are rarely used in new deployments.
+
+---
+
+## MTP/MPO — Multi-Fiber Connectors
+
+MTP (a trade name of US Conec; MPO is the generic term per IEC 61754-7) connectors terminate an entire ribbon of 12 or 24 fibers in a single connector. Two alignment pins and a latch clip ensure precise alignment of all fibers simultaneously.
+
+MTP/MPO connectors are the backbone of high-density data center cabling:
+
+- **Trunk cables**: pre-terminated MTP-to-MTP cables run between patch panels or between switch ports and panels, carrying 12 or 24 fibers in a single cable run
+- **Breakout cables**: MTP to multiple LC or SC connectors, used to connect a 12-fiber trunk to individual switch ports
+- **Multi-fiber transceivers**: QSFP+ (40G), QSFP28 (100G), and QSFP-DD (400G) transceivers that use parallel optics (multiple lanes) terminate directly to MTP/MPO
+
+Polarity is critically important with MTP/MPO. There are three standard polarity methods (A, B, C defined by TIA-568) that determine how the fibers within a connector map to the fibers at the other end. The wrong polarity method in a trunk link results in transmit fibers connecting to transmit fibers (no link). This is a common source of confusion during data center initial cabling.
+
+---
+
+## SFP, SFP+, SFP28 — Small Form-Factor Pluggable Transceivers
+
+SFP (Small Form-factor Pluggable) transceivers are hot-pluggable modules that insert into SFP slots on switches, routers, and other network equipment. They contain the laser (or LED) transmitter, photodetector receiver, and supporting electronics, converting between the equipment's electrical interface and the optical or copper physical medium.
+
+| Module    | Data Rate   | Electrical Interface | Notes                        |
+|-----------|-------------|---------------------|------------------------------|
+| SFP       | Up to 1G    | SGMII / 1000BASE-X  | Fiber (multimode or single-mode) or 1G copper |
+| SFP+      | 10G         | 10GBASE-R            | Most common in enterprise edge and data center |
+| SFP28     | 25G         | 25GBASE-R            | Server uplinks in modern data centers |
+| SFP56     | 50G         | 50GBASE-R (PAM4)     | Emerging; used in some spine switches |
+
+SFP and SFP+ share the same physical form factor — an SFP+ slot accepts SFP modules (running at 1G) but not vice versa. Always verify the host equipment's supported speeds before ordering transceivers.
+
+**Common SFP+ optical variants:**
+
+| Part      | Wavelength | Fiber     | Max Distance |
+|-----------|-----------|-----------|--------------|
+| SFP-10G-SR | 850nm    | OM3 MMF   | 300m         |
+| SFP-10G-LR | 1310nm   | SMF       | 10 km        |
+| SFP-10G-ER | 1310nm   | SMF       | 40 km        |
+| SFP-10G-ZR | 1550nm   | SMF       | 80 km        |
+
+**SFP copper**: RJ-45 SFP modules convert the SFP+ electrical interface to 1000BASE-T or 10GBASE-T copper, allowing a fiber switch port to connect to a copper-based device. Useful for connecting servers or management interfaces without a separate switch port.
+
+---
+
+## QSFP+, QSFP28, QSFP-DD — High-Density Transceivers
+
+QSFP (Quad Small Form-factor Pluggable) modules are physically larger than SFP and carry four electrical lanes internally, allowing much higher aggregate throughput.
+
+| Module    | Data Rate   | Lanes    | Per-Lane | Connector   |
+|-----------|-------------|----------|----------|-------------|
+| QSFP+     | 40G         | 4 × 10G  | 10G      | MTP/MPO or LC (4× LC) |
+| QSFP28    | 100G        | 4 × 25G  | 25G      | MTP/MPO or LC (4× LC) |
+| QSFP56    | 200G        | 4 × 50G PAM4 | 50G  | MTP/MPO     |
+| QSFP-DD   | 400G        | 8 × 50G PAM4 | 50G  | MTP/MPO     |
+| OSFP      | 400G / 800G | 8 × 50G or 100G | 50–100G | MTP/MPO |
+
+**Breakout**: A single QSFP28 (100G) port can be broken out into four independent 25G ports using a **breakout cable** (QSFP28 to 4× SFP28 LC) or a **fanout cable** (QSFP28 MTP to 4× LC duplex). This is commonly used to connect four servers each needing 25G to a single 100G switch port, maximizing port density on high-radix spine switches.
+
+---
+
+## DAC and AOC Cables
+
+**DAC (Direct Attach Copper)** cables consist of SFP+, SFP28, QSFP28, or QSFP-DD connectors wired directly to a short, fixed-length copper cable (twinaxial cable — a coaxial-like structure with improved high-frequency characteristics). No optical transceivers are involved; the signal travels electrically.
+
+| Type     | Max Length | Relative Cost | Latency |
+|----------|-----------|---------------|---------|
+| DAC      | 5–7m      | Lowest        | Lowest  |
+| AOC      | 1–100m    | Medium        | Low     |
+| Optical  | 100m–80km | Higher        | Low     |
+
+DAC cables are the cheapest option for rack-to-rack connections within the same row. They require no transceivers, consume minimal power, and add negligible latency. The practical limit of about 7 meters constrains them to intra-row and very short inter-row connections.
+
+**AOC (Active Optical Cable)** integrates optical transceivers into fixed connectors at each end of a fiber cable. The optics are built in and cannot be replaced separately. AOC cables bridge the gap between the 7-meter DAC limit and the more expensive pluggable optical transceiver option for distances up to about 100 meters. The fixed transceiver integration simplifies ordering (one SKU instead of two transceivers plus a cable) but means the entire assembly must be replaced if either end fails.
+
+---
+
+## Connector Cleaning — The Non-Negotiable Rule
+
+Fiber connectors must be clean to work reliably. A contaminated fiber connector end face is the most common cause of optical link failures and degraded power levels. The contamination does not have to be visible to the naked eye to be destructive — a fingerprint, a speck of dust, or residue from a previous dirty connector can cause 3–10 dB of additional insertion loss.
+
+Every fiber connector should be inspected with a fiber inspection microscope (or probe-type scope that fits into the adapter) before connection. Clean with a dry click-cleaner (lint-free cleaning mechanism in a pen format) or a fiber optic cleaning cloth with IPA. Never blow on a connector — mouth moisture introduces contamination far worse than the dust you were trying to remove.
+
+Unused connectors and ports should always be capped. Connector caps are not decorative — they keep the end faces clean when not connected.
+
+---
+
+## References
+
+- [TIA-568.3-D — Optical Fiber Cabling Components Standard](https://www.tiaonline.org)
+- [IEC 61754-7 — MPO Connector Standard](https://www.iec.ch)
+- [SFF Committee — SFP and QSFP MSA Specifications](https://www.snia.org/sff)

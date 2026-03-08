@@ -1,0 +1,164 @@
+---
+title: "IGMP — Managing Multicast Group Membership"
+layer: "layer3"
+protocol: "igmp"
+summary: "How IGMP allows hosts to join and leave IP multicast groups, how routers use IGMP to track group membership and avoid flooding multicast traffic to devices that don't want it, and how IGMP snooping brings that efficiency to the switch level."
+tags: ["layer3", "igmp", "multicast", "group-membership", "224", "igmp-snooping", "rfc3376"]
+order: 11
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Unicast traffic goes from one source to one destination. Broadcast traffic goes from one source to every device on a segment. But many applications need something in between: sending data from one source to a specific group of interested receivers — and only those receivers.
+
+Video streaming, financial data feeds, live event broadcasts, online gaming state synchronization, IPTV — all of these benefit from **multicast**: one packet sent by the source, replicated only as many times as necessary to reach every interested receiver, without flooding devices that have no interest in the stream.
+
+IP multicast uses addresses in the `224.0.0.0/4` range (Class D). A source sends packets to a multicast group address. Routers forward those packets only to networks where at least one host has expressed interest in the group. But for routers to know which networks have interested hosts, they need a signaling mechanism. That mechanism is **IGMP (Internet Group Management Protocol)**.
+
+IGMP is the protocol by which hosts tell their local router which multicast groups they want to receive. The router uses this information to populate its multicast routing table. Without IGMP, routers have no way to know where to deliver multicast traffic, and would either flood it everywhere (wasteful) or not deliver it at all.
+
+IGMP is defined in three versions: IGMPv1 (RFC 1112, 1989), IGMPv2 (RFC 2236, 1997), and IGMPv3 (RFC 3376, 2002). The current deployed version is IGMPv3, which adds source-specific multicast support.
+
+---
+
+## IP Multicast Addresses
+
+Multicast group addresses are in the `224.0.0.0/4` range — the first four bits are `1110`, identifying them as multicast. Within this range, different sub-ranges serve different purposes:
+
+| Range | Description |
+|-------|-------------|
+| `224.0.0.0/24` | Link-local (not forwarded by routers) — used by routing protocols |
+| `224.0.0.1` | All hosts on the local subnet |
+| `224.0.0.2` | All routers on the local subnet |
+| `224.0.0.5` | All OSPF routers |
+| `224.0.0.9` | All RIP routers |
+| `224.0.1.0–238.255.255.255` | Globally routable multicast (assigned by IANA) |
+| `239.0.0.0/8` | Administratively scoped — private multicast, like RFC 1918 |
+
+A host joins a multicast group by issuing an IGMP membership report for the group address. The router then knows to deliver packets addressed to that group to the host's network segment.
+
+---
+
+## IGMP Message Types
+
+<PacketDiagram
+  label="IGMP Message — 8 bytes minimum"
+  fields={[
+    { name: "Type", bytes: 1, highlight: true },
+    { name: "Max Resp Time", bytes: 1 },
+    { name: "Checksum", bytes: 2 },
+    { name: "Group Address", bytes: 4, highlight: true },
+  ]}
+/>
+
+IGMP messages are carried inside IP packets with protocol number **2**, TTL **1** (link-local — not forwarded by routers), and addressed to specific multicast group addresses.
+
+The key message types:
+
+| Type | Name | Sent By | Purpose |
+|------|------|---------|---------|
+| `0x11` | Membership Query | Router | "Who is listening to which groups?" |
+| `0x16` | Membership Report (v2) | Host | "I want to receive group G" |
+| `0x17` | Leave Group (v2) | Host | "I no longer want group G" |
+| `0x22` | Membership Report (v3) | Host | "I want groups with optional source filtering" |
+
+---
+
+## IGMPv2 Operation
+
+IGMPv2 defines the basic join/leave mechanism that most networks still rely on:
+
+<FlowDiagram
+  parties={["Host", "Multicast Router"]}
+  steps={[
+    { from: "Host", to: "Multicast Router", label: "Membership Report", sub: "Group: 239.1.2.3 — I want this stream" },
+    { from: "Multicast Router", to: "Host", label: "Membership Query (General)", sub: "Sent every Query Interval (125s) — who is still listening?" },
+    { from: "Host", to: "Multicast Router", label: "Membership Report", sub: "Still here — suppressed if another host replied first" },
+    { from: "Host", to: "Multicast Router", label: "Leave Group", sub: "No longer interested in 239.1.2.3" },
+    { from: "Multicast Router", to: "Host", label: "Group-Specific Query", sub: "Is anyone else still listening to 239.1.2.3?" },
+  ]}
+/>
+
+### Joining a Group
+
+When a host wants to receive multicast traffic for group `239.1.2.3`, it sends an IGMP Membership Report to the group address `239.1.2.3`. The router receives this and adds the group to its multicast routing state for this interface — future packets addressed to `239.1.2.3` will be forwarded onto this segment.
+
+The host also listens for Membership Reports from other hosts on the same segment. If it hears another host report the same group, it suppresses its own report (report suppression). This reduces IGMP traffic when many hosts are listening to the same group.
+
+### Querying
+
+The multicast router sends a **General Query** addressed to `224.0.0.1` (all hosts) every **Query Interval** (default 125 seconds). This query asks all hosts to report their current group memberships. Hosts respond with Membership Reports for each group they belong to, with a random delay (up to the Max Response Time in the query, default 10 seconds) to spread out the responses.
+
+If a router's query receives no responses for a group within a given timeout, it concludes no hosts on the segment are interested in that group and stops forwarding multicast traffic for it.
+
+### Leaving a Group
+
+When the last (or only) host on a segment wants to leave a group, it sends a **Leave Group** message addressed to `224.0.0.2` (all routers). The router responds with a **Group-Specific Query** addressed to the group address, asking if any other hosts still want the group. If no Membership Report is received within the Last Member Query Interval (default 1 second, sent up to 2 times), the router removes the group from the interface.
+
+The Group-Specific Query mechanism is what allows fast leave — the router doesn't wait for the full Query Interval to determine that a group has no more listeners.
+
+---
+
+## IGMPv3 — Source-Specific Multicast
+
+IGMPv2 allows a host to say "I want traffic addressed to group G." It cannot say "I want traffic addressed to group G **from source S**."
+
+**IGMPv3** (RFC 3376) adds source filtering:
+
+- **INCLUDE mode**: Receive multicast traffic for group G only from specific source addresses (source-specific multicast)
+- **EXCLUDE mode**: Receive multicast traffic for group G from any source **except** specific excluded sources
+
+This enables **Source-Specific Multicast (SSM)** — a highly scalable multicast model where a receiver can directly subscribe to a (source, group) pair, bypassing the need for multicast routing protocols to build shared trees. SSM uses the `232.0.0.0/8` address range.
+
+With SSM, a receiver can say: "I want the stream from source `203.0.113.5` delivered to group `232.1.2.3`." The network delivers exactly that stream and nothing else.
+
+IGMPv3 Membership Reports are sent to `224.0.0.22` (IGMPv3-capable routers). Each report can carry multiple Group Records, each specifying a group address, the filter mode (INCLUDE/EXCLUDE), and a list of source addresses.
+
+---
+
+## IGMP Snooping
+
+IGMP operates at Layer 3 — routers use it to build multicast routing state. But on a switched network, there is a Layer 2 problem: switches flood multicast traffic out all ports (because multicast destination MAC addresses are not learned in the MAC table). Without any mechanism to control this, every switch port receives every multicast stream, whether the connected device wants it or not.
+
+**IGMP Snooping** solves this at Layer 2. An IGMP-snooping switch listens to (snoops) IGMP traffic without participating in it. When the switch sees a Membership Report for group G arriving on port 3, it creates an entry: "deliver multicast group G to port 3." When it sees a Leave message from port 3 and no other ports are listening, it removes port 3 from the group.
+
+The switch now forwards multicast traffic only to ports with interested listeners, rather than flooding it everywhere. In an IPTV environment with hundreds of multicast streams, IGMP snooping is the difference between manageable bandwidth use and switch port saturation.
+
+**The Querier**: IGMP snooping needs to see IGMP Queries to trigger host reports. If no multicast router is present, the switch itself acts as an **IGMP Querier** — it sends General Queries to prompt hosts to report their memberships, ensuring the snooping tables stay current.
+
+---
+
+## Multicast Routing Protocols
+
+IGMP handles the last hop: telling the local router which groups have interested hosts. Multicast routing protocols handle distributing this information across the network and building the multicast distribution trees:
+
+**PIM-SM (Protocol Independent Multicast — Sparse Mode)**: The dominant multicast routing protocol. Uses a Rendezvous Point (RP) as a meeting point for sources and receivers. Sources register with the RP; receivers join a shared tree rooted at the RP. Once traffic is flowing, PIM-SM can switch to a source-specific shortest-path tree for efficiency.
+
+**PIM-SSM (Source-Specific Multicast)**: Works directly with IGMPv3 source filtering. No RP is needed — receivers specify the source directly, and PIM builds shortest-path trees from source to receiver.
+
+**PIM-DM (Dense Mode)**: Floods multicast traffic everywhere initially, then prunes branches with no interested receivers. Simple but wasteful; rarely used in modern networks.
+
+---
+
+## Key Concepts
+
+### IGMP is local — PIM is the network-wide protocol
+
+IGMP operates between hosts and their directly connected router. It answers the question "does this network segment have any interested receivers?" Multicast routing protocols (PIM) operate between routers and answer the question "how does traffic get from the source to every interested segment?" Both are needed for end-to-end multicast delivery.
+
+### IGMP snooping is critical on switched networks
+
+Without IGMP snooping, multicast in a switched environment behaves like broadcast — flooding all ports. In environments with high-bandwidth multicast streams (video, financial data), this can saturate switch ports and degrade overall network performance. IGMP snooping is enabled by default on most enterprise switches.
+
+---
+
+## References
+
+- [RFC 1112 — Host Extensions for IP Multicasting (IGMPv1)](https://www.rfc-editor.org/rfc/rfc1112)
+- [RFC 2236 — Internet Group Management Protocol, Version 2](https://www.rfc-editor.org/rfc/rfc2236)
+- [RFC 3376 — Internet Group Management Protocol, Version 3](https://www.rfc-editor.org/rfc/rfc3376)
+- [RFC 4607 — Source-Specific Multicast for IP](https://www.rfc-editor.org/rfc/rfc4607)

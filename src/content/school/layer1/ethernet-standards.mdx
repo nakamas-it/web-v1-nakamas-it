@@ -1,0 +1,139 @@
+---
+title: "Ethernet Standards — From 10 Mbps to 400 Gbps"
+layer: "layer1"
+protocol: "ethernet-standards"
+summary: "The complete evolution of Ethernet speed standards, what the naming convention means, and how each generation changed the cabling and signaling requirements."
+tags: ["layer1", "ethernet", "10gbase-t", "1000base-t", "ieee802.3", "physical"]
+order: 6
+draft: false
+---
+
+## Overview
+
+Ethernet has been the dominant wired networking technology for over four decades, and in that time it has scaled from 10 Mbps over thick coaxial cable to 400 Gbps over fiber, with each generation maintaining backward compatibility with the core framing format while completely replacing the physical layer underneath.
+
+This scalability was not accidental. The IEEE 802.3 working group made a deliberate architectural decision early on to separate the MAC layer (framing, addressing, collision handling) from the physical layer. As long as the MAC sublayer interface stayed consistent, the physical medium and signaling could be redesigned freely. The result is that an Ethernet frame from 1990 and an Ethernet frame from 2024 are structurally identical — only the physical encoding and the wire underneath them differ.
+
+Understanding the standard naming scheme, the key milestones in Ethernet's evolution, and what each generation requires from cabling infrastructure is essential for making correct equipment selection decisions and for reading datasheets and port labels accurately.
+
+---
+
+## The Naming Convention
+
+IEEE 802.3 Ethernet standards follow a naming convention that encodes key information:
+
+```
+1000 BASE - T
+ |     |    |
+ |     |    └─ Physical medium: T=twisted pair, F=fiber, SR=short-range, LR=long-range, etc.
+ |     └────── BASE = baseband signaling (the whole channel carries one signal)
+ └──────────── Data rate in Mbps or Gbps
+```
+
+The original names followed this pattern rigidly. Modern names sometimes abbreviate or depart from strict convention for readability, but the structure remains recognizable.
+
+**Baseband** signaling means the entire channel is used for a single signal — the full bandwidth of the medium carries the Ethernet signal. This contrasts with **broadband** signaling (as in cable TV / DOCSIS) where the spectrum is divided into many channels for different services.
+
+The physical medium suffix has evolved significantly:
+
+| Suffix | Medium              | Examples                     |
+|--------|---------------------|------------------------------|
+| T      | Twisted pair copper | 10BASE-T, 100BASE-TX, 1000BASE-T |
+| F      | Fiber (generic)     | 10BASE-F (legacy)            |
+| SR     | Short Range fiber   | 10GBASE-SR, 100GBASE-SR4     |
+| LR     | Long Range fiber    | 10GBASE-LR, 100GBASE-LR4     |
+| ER     | Extended Range      | 10GBASE-ER                   |
+| ZR     | Ultra Long Range    | 100GBASE-ZR                  |
+| CR     | Copper, direct-attach| 10GBASE-CR (DAC cable)      |
+| DR     | Datacenter Range    | 100GBASE-DR (single-mode, 500m)|
+| KR     | Backplane           | 10GBASE-KR                   |
+
+---
+
+## The Copper Standards — Desktop to Server
+
+### 10BASE-T — 1990
+
+10 Mbps over two pairs of Category 3 (or better) unshielded twisted pair, maximum 100 meters. Used Manchester encoding. Replaced 10BASE5 (Thicknet) and 10BASE2 (Thinnet) as the dominant desktop standard throughout the 1990s. The shift to a star topology with hubs eliminated the single-point-of-failure vulnerability of the coaxial bus topology.
+
+### 100BASE-TX — 1995
+
+100 Mbps over two pairs of Category 5 twisted pair, maximum 100 meters. Used 4B/5B encoding with MLT-3 signaling. Required better cable quality than 10BASE-T (Cat5 vs Cat3) but the same RJ-45 connector and 100-meter distance limit. Fast Ethernet — as 100BASE-TX was marketed — delivered a 10× speed increase that transformed enterprise networking in the late 1990s. Auto-negotiation (defined in IEEE 802.3u) allowed devices to automatically select the highest mutually supported speed.
+
+### 1000BASE-T — 1999
+
+1 Gbps (Gigabit Ethernet) over four pairs of Category 5e (or better) twisted pair, maximum 100 meters. The key architectural change was using all four pairs simultaneously, with each pair carrying data in both directions using echo cancellation to separate the transmitted signal from the received signal on the same pair. This required significantly more complex PHY silicon than earlier standards.
+
+1000BASE-T remains the dominant standard for server NICs and switched desktop access in enterprise environments. The installed base of Cat5e cabling makes it the practical default for anything not requiring 10G.
+
+### 2.5GBASE-T and 5GBASE-T — 2016
+
+2.5 Gbps and 5 Gbps over existing Category 5e and Category 6 cable at 100 meters. These intermediate speeds were driven by the Wi-Fi industry: 802.11ac and 802.11ax access points can sustain more than 1 Gbps of aggregate wireless throughput, but the wired uplink to the switch was limited to 1 Gbps. Running 10GBASE-T to every access point would have required Cat6a cabling replacement throughout the building.
+
+2.5GBASE-T and 5GBASE-T were designed to run on the existing Cat5e and Cat6 cabling that was already installed, providing 2.5× or 5× the throughput of 1000BASE-T without a cabling infrastructure upgrade. These standards are now common on higher-end access points, NAS devices, and gaming-oriented network equipment.
+
+### 10GBASE-T — 2006
+
+10 Gbps over Category 6a (100m) or Category 6 (55m) twisted pair. 10GBASE-T uses PAM-16 signaling (16 voltage levels on each of four pairs simultaneously), DSP-intensive echo cancellation, and 64B/65B encoding with scrambling.
+
+The original silicon required significantly more power than optical 10G transceivers, limiting adoption in power-constrained environments. Successive process generations have reduced 10GBASE-T power to acceptable levels, and it is now common for server connections in environments where Cat6a is already installed.
+
+---
+
+## The Fiber Standards — Speed and Distance
+
+### 1000BASE-SX and 1000BASE-LX — 1998
+
+The first Gigabit Ethernet fiber standards, defined alongside 1000BASE-T but using optical rather than copper physical layers.
+
+**1000BASE-SX**: 1 Gbps over multimode fiber using 850nm laser. 550 meters on OM2, 300 meters on OM1. Used in early data center intra-rack and row cabling.
+
+**1000BASE-LX**: 1 Gbps over single-mode fiber using 1310nm laser. Up to 5 km. Also works on multimode fiber (requiring a mode conditioning patch cable to reduce modal noise) up to 550 meters.
+
+### 10GBASE-SR and 10GBASE-LR — 2002
+
+**10GBASE-SR**: 10 Gbps over multimode fiber at 850nm. 300 meters on OM3, 400 meters on OM4. The dominant standard for server-to-switch connections in data centers using multimode fiber.
+
+**10GBASE-LR**: 10 Gbps over single-mode fiber at 1310nm. Up to 10 km. Used for building-to-building connections and longer data center campus links.
+
+### 40G and 100G — Parallel Lanes
+
+At 40 Gbps and 100 Gbps, a single-lane approach becomes technically challenging. The industry moved to **parallel lane** architectures: 40GBASE-SR4 uses four 10G lanes simultaneously (each at 10 Gbps over its own fiber pair); 100GBASE-SR4 uses four 25G lanes. MTP/MPO connectors carry the multiple fiber pairs in a single connector.
+
+| Standard        | Speed  | Lanes | Per-Lane Rate | Fiber     | Max Distance |
+|-----------------|--------|-------|---------------|-----------|--------------|
+| 40GBASE-SR4     | 40G    | 4     | 10G           | OM3/OM4   | 100/150m     |
+| 40GBASE-LR4     | 40G    | 4 WDM | 10G          | Single-mode | 10 km      |
+| 100GBASE-SR4    | 100G   | 4     | 25G           | OM3/OM4   | 70/100m      |
+| 100GBASE-LR4    | 100G   | 4 WDM | 25G          | Single-mode | 10 km      |
+| 100GBASE-DR     | 100G   | 1     | 100G PAM4     | Single-mode | 500m       |
+| 400GBASE-SR8    | 400G   | 8     | 50G           | OM4       | 100m         |
+| 400GBASE-DR4    | 400G   | 4     | 100G PAM4     | Single-mode | 500m       |
+
+**WDM (Wavelength Division Multiplexing)** standards like 100GBASE-LR4 carry multiple lanes over a single fiber pair by using different wavelengths for each lane — the optical equivalent of frequency-division multiplexing. This allows high-speed long-distance links without requiring multiple parallel fiber strands.
+
+---
+
+## Auto-Negotiation
+
+Auto-negotiation (IEEE 802.3 Clause 28) is the mechanism by which two devices connecting on a twisted pair link automatically determine the highest mutually supported speed and duplex mode. Each device advertises its capabilities as a bitmask; the two sides select the highest common option.
+
+If auto-negotiation fails or is disabled on only one side, the results are problematic. A device configured for 100 Mbps full-duplex connected to a device using auto-negotiation will result in the auto-negotiating side detecting the speed as 100 Mbps but defaulting to half-duplex (because no auto-negotiation handshake occurred). This **duplex mismatch** produces a link that works at low loads but generates massive collision errors as utilization increases — one of the more confusing intermittent failures in networking.
+
+The correct approach is: always leave auto-negotiation enabled unless there is a specific reason to force speed and duplex, and if you do force speed/duplex on one side, force it on both.
+
+---
+
+## Energy Efficient Ethernet
+
+IEEE 802.3az — **Energy Efficient Ethernet (EEE)** — defines a Low Power Idle (LPI) mode for twisted pair interfaces. When the link has no data to send, the PHY enters LPI mode, reducing power consumption by 50–80% compared to active operation. The link wakes up within microseconds when data arrives.
+
+EEE is now supported by virtually all modern Gigabit and 10GBASE-T PHYs. In large enterprise deployments with thousands of ports, EEE produces meaningful power savings during off-peak hours.
+
+---
+
+## References
+
+- [IEEE 802.3 — Ethernet Standard (full specification)](https://standards.ieee.org/ieee/802.3)
+- [IEEE 802.3az — Energy Efficient Ethernet](https://standards.ieee.org/ieee/802.3az)
+- [Ethernet Alliance Speed Roadmap](https://ethernetalliance.org)

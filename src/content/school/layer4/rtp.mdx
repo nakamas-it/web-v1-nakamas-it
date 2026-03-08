@@ -1,0 +1,214 @@
+---
+title: "RTP — Real-Time Transport Protocol"
+layer: "layer4"
+protocol: "rtp"
+summary: "How RTP carries real-time audio and video over UDP, what the RTP header provides for jitter compensation and payload identification, and how RTCP provides feedback and synchronization between media streams."
+tags: ["layer4", "rtp", "rtcp", "voip", "streaming", "jitter", "timestamp", "rfc3550"]
+order: 5
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Audio and video data have unique transport requirements that neither TCP nor raw UDP satisfies well. TCP's retransmission causes jitter — a late-arriving retransmission disrupts real-time playback. Raw UDP provides no mechanism for the receiver to detect lost packets, measure jitter, or synchronize audio and video streams.
+
+**RTP (Real-Time Transport Protocol)** fills this gap. RTP is an application-layer protocol that runs on top of UDP and provides the minimum additional structure needed for real-time media delivery:
+
+- A **sequence number** so the receiver can detect packet loss and reorder out-of-order packets
+- A **timestamp** so the receiver can schedule playback at the correct rate and compensate for network jitter
+- A **payload type** field identifying what codec the media uses (PCMU, Opus, H.264, VP9, etc.)
+- A **synchronization source (SSRC)** identifier distinguishing multiple streams from different sources
+
+RTP is paired with **RTCP (RTP Control Protocol)**, which runs alongside RTP and carries statistics and control information: packet loss rates, jitter measurements, round-trip time, and synchronization between audio and video streams.
+
+RTP is defined in RFC 3550. It is the transport protocol behind every VoIP call (SIP+RTP), every video conferencing session (WebRTC uses SRTP, the secure version of RTP), most IPTV systems, and countless streaming applications.
+
+---
+
+## Why RTP Exists on Top of UDP
+
+Raw UDP gives you port numbers (to identify which application receives the datagrams) and optional error detection (checksum). It does not give you:
+
+- **Loss detection**: The receiver has no way to know whether a datagram was lost or simply has not arrived yet
+- **Jitter buffer management**: Network jitter causes packets to arrive irregularly; the receiver needs information to smooth out playback
+- **Codec identification**: Which audio or video format is being transmitted?
+- **Multi-stream synchronization**: Audio and video often travel as separate RTP streams; the receiver must synchronize them to avoid lip-sync drift
+- **Sender/receiver reporting**: How is the stream quality? Is the receiver dropping packets?
+
+RTP adds all of this with a compact 12-byte header (plus optional extensions). Unlike TCP, RTP does not retransmit lost packets — real-time media cannot wait for retransmissions. Instead, codecs are designed to gracefully handle missing packets through interpolation, frame concealment, and error correction.
+
+---
+
+## RTP Header
+
+<PacketDiagram
+  label="RTP Header — 12 bytes minimum"
+  fields={[
+    { name: "V=2", bytes: "2b", value: "version" },
+    { name: "P", bytes: "1b" },
+    { name: "X", bytes: "1b" },
+    { name: "CC", bytes: "4b" },
+    { name: "M", bytes: "1b", value: "marker" },
+    { name: "Payload Type", bytes: "7b", highlight: true },
+    { name: "Sequence Number", bytes: 2, highlight: true },
+    { name: "Timestamp", bytes: 4, highlight: true },
+    { name: "SSRC", bytes: 4, highlight: true },
+  ]}
+/>
+
+| Field | Size | Description |
+|-------|------|-------------|
+| V (Version) | 2 bits | Always 2 for current RTP |
+| P (Padding) | 1 bit | If set, the packet ends with padding bytes (for alignment requirements of some encryption methods) |
+| X (Extension) | 1 bit | If set, a fixed header extension follows (for extra fields needed by specific applications) |
+| CC (CSRC Count) | 4 bits | Number of Contributing Source (CSRC) identifiers following the fixed header — used in conferencing mixers |
+| M (Marker) | 1 bit | Application-defined; for video, typically marks the last packet of a frame; for audio, marks talk spurts |
+| Payload Type | 7 bits | Identifies the codec — what format the media payload uses |
+| Sequence Number | 16 bits | Increments by 1 for each RTP packet sent. Used to detect loss and reorder out-of-sequence packets. |
+| Timestamp | 32 bits | The sampling instant of the first byte of the payload. The clock rate depends on the codec (8000 Hz for PCMU/G.711, 90000 Hz for video). Used to schedule playback and measure jitter. |
+| SSRC | 32 bits | Synchronization Source — a random 32-bit identifier unique to each stream. Distinguishes multiple streams in the same RTP session. |
+
+---
+
+## Sequence Numbers and Loss Detection
+
+The RTP sequence number starts at a random value (to prevent replay attacks) and increments by 1 for every packet sent. The receiver tracks received sequence numbers and can immediately determine:
+
+- **Loss**: If sequence numbers 100, 101, 103 arrive (102 missing), one packet was lost
+- **Reordering**: If 100, 103, 101, 102 arrive, the packets are out of order
+
+**What the receiver does with loss**:
+- Audio: The codec's concealment algorithm interpolates — it guesses what the missing audio sounded like based on surrounding audio. G.711 has basic concealment; Opus has sophisticated packet loss concealment (PLC) that sounds natural even at 10–20% loss.
+- Video: The decoder conceals missing frames using the previous frame, partial frame rendering, or by displaying an artifact until the next keyframe (I-frame) arrives.
+
+**What the receiver does NOT do**: Retransmit lost packets or pause playback to wait for them. Real-time media cannot tolerate retransmission latency.
+
+---
+
+## Timestamps and Jitter Compensation
+
+Network jitter is the variation in delay between packets. Even though RTP packets are sent at regular intervals (e.g., every 20ms for voice), they may arrive irregularly — 20ms, 25ms, 15ms, 30ms gaps between arrivals.
+
+If the receiver played audio immediately upon receipt, the playback would sound choppy and irregular. Instead, the receiver maintains a **jitter buffer** — a small buffer that absorbs jitter and plays audio at a constant rate.
+
+The RTP timestamp is the key to jitter buffer operation:
+
+1. The sender encodes audio samples and timestamps each packet based on when the samples were captured, not when the packet was sent. For G.711 at 8000 Hz with 20ms packets: each packet advances the timestamp by `8000 × 0.020 = 160` samples.
+
+2. The receiver plots received packets on a timeline using their timestamps. Regardless of when they arrived, the timestamps tell the receiver the correct playback order and spacing.
+
+3. The receiver plays audio from the jitter buffer at the correct timestamp rate, adding a configurable delay (the **playout delay** or buffer depth) to absorb jitter. A 100ms playout delay means the receiver buffers 100ms of audio before starting playback, smoothing out jitter up to 100ms.
+
+**Jitter buffer tradeoff**: A larger buffer absorbs more jitter but adds more latency. For interactive voice, the total one-way latency must be under ~150ms to feel conversational. Too much jitter buffering makes the call feel like talking through a satellite link.
+
+---
+
+## SSRC — Synchronization Source
+
+Each RTP stream has a randomly chosen 32-bit SSRC identifier. In a simple point-to-point call, there are typically two RTP sessions: one for each direction of audio. Each direction has its own SSRC.
+
+In a conference call with a **mixing server** (where multiple audio streams are combined into one), the mixer generates its own SSRC for the mixed stream. The CSRC (Contributing Source) list in the RTP header identifies the original participant SSRCs that contributed to each mixed packet.
+
+The SSRC is also what RTCP reports reference — when a receiver reports statistics, it identifies the stream it is reporting about by SSRC.
+
+---
+
+## Payload Types
+
+The 7-bit Payload Type (PT) field identifies the codec used to encode the media. IANA maintains a registry of statically assigned payload types:
+
+| PT | Codec | Clock Rate | Channels |
+|----|-------|-----------|----------|
+| 0 | PCMU (G.711 µ-law) | 8000 Hz | 1 |
+| 8 | PCMA (G.711 A-law) | 8000 Hz | 1 |
+| 9 | G.722 | 8000 Hz (payload; actual 16 kHz) | 1 |
+| 18 | G.729 | 8000 Hz | 1 |
+| 26 | JPEG video | 90000 Hz | — |
+| 31 | H.261 | 90000 Hz | — |
+| 34 | H.263 | 90000 Hz | — |
+| 96–127 | Dynamic | Negotiated via SDP | — |
+
+Payload types 96–127 are **dynamic** — their meaning is negotiated out-of-band (typically via SDP in a SIP or WebRTC signaling exchange). This is how modern codecs like Opus (audio), H.264, VP8, VP9, and AV1 (video) are identified. The codec is announced in the SDP offer/answer exchange, and both sides agree on which payload type number corresponds to which codec for the duration of the session.
+
+---
+
+## RTCP — RTP Control Protocol
+
+RTCP runs alongside RTP on the next higher port (if RTP uses port 16384, RTCP uses port 16385). RTCP carries control and statistics information and uses approximately 5% of the session bandwidth.
+
+RTCP packet types:
+
+**SR (Sender Report)**: Sent by active senders. Contains:
+- NTP timestamp (wall-clock time) + RTP timestamp — this is how audio and video streams are synchronized. The NTP-to-RTP timestamp mapping allows the receiver to align two streams with different clocks.
+- Packet count and octet count sent
+- Reception report blocks (same as RR, for received streams)
+
+**RR (Receiver Report)**: Sent by receivers. Contains for each SSRC being received:
+- Fraction of packets lost since last report
+- Cumulative packet loss count
+- Highest sequence number received
+- Interarrival jitter (in timestamp units)
+- Last SR timestamp and delay since last SR (used to compute round-trip time)
+
+**SDES (Source Description)**: Carries descriptive information about participants: CNAME (canonical name — a persistent identifier for a participant), NAME, EMAIL.
+
+**BYE**: Signals that a participant is leaving the session.
+
+<FlowDiagram
+  parties={["Sender", "Receiver"]}
+  steps={[
+    { from: "Sender", to: "Receiver", label: "RTP packets (continuous)", sub: "Audio/video media — UDP" },
+    { from: "Sender", to: "Receiver", label: "RTCP SR (every ~5s)", sub: "Sent packet stats + NTP/RTP timestamp mapping" },
+    { from: "Receiver", to: "Sender", label: "RTCP RR (every ~5s)", sub: "Loss fraction: 2%, jitter: 12ms, RTT feedback" },
+  ]}
+/>
+
+---
+
+## SRTP — Secure RTP
+
+Plain RTP provides no encryption or authentication. Media content is transmitted in plaintext. On a shared network or over the internet, this means anyone in the path can listen to voice calls.
+
+**SRTP (Secure Real-time Transport Protocol)**, defined in RFC 3711, adds:
+- **Encryption**: AES in counter mode or f8 mode encrypts the RTP payload (the actual audio/video data). The header remains unencrypted so the receiver can still read sequence numbers and timestamps without decrypting.
+- **Message authentication**: An HMAC-SHA1 tag authenticates each packet, preventing tampering and replay attacks.
+
+SRTP requires keys to be established out-of-band. The two common mechanisms:
+- **DTLS-SRTP** (WebRTC): DTLS (Datagram TLS) is used to negotiate SRTP keys. This is the mechanism used by all WebRTC implementations.
+- **SDES (SDP Security Descriptions)**: Keys are embedded in the SDP offer/answer. Requires the signaling (SIP) to be encrypted (TLS) to protect the keys.
+
+---
+
+## RTP in WebRTC
+
+WebRTC — the technology enabling real-time audio and video in web browsers — uses SRTP for media transport. A WebRTC session involves:
+
+1. **ICE** for NAT traversal and finding a usable network path
+2. **DTLS** for key negotiation
+3. **SRTP** for encrypted media
+4. **RTCP** (also encrypted as SRTCP) for statistics and feedback
+
+The entire media stack runs in user space (in the browser or application), over UDP. WebRTC typically uses Opus for audio and H.264 or VP8/VP9 for video.
+
+---
+
+## Key Concepts
+
+### RTP timestamps are media clocks, not wall clocks
+
+The RTP timestamp represents the sampling instant of the media, not the time the packet was sent. For a 20ms G.711 packet, the timestamp advances by 160 regardless of network delay. This is what allows the receiver to reconstruct correct playback timing even after packets are buffered in the jitter buffer.
+
+### RTCP enables adaptive quality
+
+The loss fraction and jitter measurements in RTCP Receiver Reports are fed back to the sender. The sender can use this feedback to adjust the codec bitrate, change packet sizes, request keyframes, or trigger congestion control algorithms. WebRTC's media engine uses RTCP as a continuous quality feedback loop to maintain the best possible quality given current network conditions.
+
+---
+
+## References
+
+- [RFC 3550 — RTP: A Transport Protocol for Real-Time Applications](https://www.rfc-editor.org/rfc/rfc3550)
+- [RFC 3711 — The Secure Real-time Transport Protocol (SRTP)](https://www.rfc-editor.org/rfc/rfc3711)
+- [RFC 8835 — Transports for WebRTC](https://www.rfc-editor.org/rfc/rfc8835)

@@ -1,0 +1,142 @@
+---
+title: "EtherChannel — Bundling Links for Bandwidth and Redundancy"
+layer: "layer2"
+protocol: "etherchannel"
+summary: "How EtherChannel combines multiple physical links into a single logical bundle, why it solves the STP bandwidth-wasting problem, and how LACP and PAgP negotiate the bundle automatically."
+tags: ["layer2", "etherchannel", "lacp", "pagp", "link-aggregation", "lag", "bonding", "ieee802.3ad"]
+order: 6
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Spanning Tree Protocol solves the loop problem, but it does so by blocking redundant links. If you have two 1 Gbps links between two switches, STP will block one of them. You effectively paid for 2 Gbps of capacity but only get to use 1 Gbps. The blocked link sits idle until a failure — doing no useful work.
+
+**EtherChannel** (also called Link Aggregation or a LAG — Link Aggregation Group) is the solution to this waste. EtherChannel combines two or more physical links between the same two devices into a single logical link. From STP's perspective, the bundle looks like one port — so STP has nothing to block. From the user's perspective, the combined capacity of all member links is available for traffic.
+
+Two 1 Gbps links become one logical 2 Gbps link. Four 10 Gbps links become one logical 40 Gbps link. When a physical member link fails, the bundle simply loses that link's capacity but continues forwarding — no STP reconvergence, no 30-second outage.
+
+---
+
+## What EtherChannel Provides
+
+**Increased bandwidth.** The logical bundle has a combined capacity equal to the sum of its members' bandwidth. Up to 8 active member links are supported in IEEE 802.3ad LACP (some implementations support 16 with half in hot-standby).
+
+**Redundancy without STP blocking.** All member links carry traffic simultaneously. If one fails, the remaining members absorb the load with no reconvergence delay. The failover is sub-second.
+
+**Single logical interface.** STP, VLANs, IP addresses, and routing all operate on the bundle as a single entity. Configuration is simpler than managing each link individually.
+
+**Transparent to connected devices.** A server connected to an EtherChannel-enabled switch sees a single interface at its configured speed. The load balancing and redundancy happen inside the switch.
+
+---
+
+## Requirements for EtherChannel
+
+Member links in an EtherChannel must match across all of these attributes:
+
+| Attribute | Requirement |
+|-----------|-------------|
+| Speed | All members must be the same speed |
+| Duplex | All must be full duplex |
+| VLAN membership | Same VLANs configured identically |
+| Trunking mode | All access or all trunk (with identical allowed VLANs) |
+| Native VLAN | Must match (for trunk ports) |
+| Spanning Tree settings | Port cost, priority must match |
+
+Mismatched member links will either fail to join the bundle or cause the EtherChannel to be suspended. Many platforms will suspend the entire bundle if a mismatch is detected, producing a more visible failure rather than silently forwarding incorrectly.
+
+---
+
+## Negotiation Protocols — LACP and PAgP
+
+EtherChannel members can be statically configured (no negotiation) or dynamically negotiated using one of two protocols:
+
+### LACP — Link Aggregation Control Protocol (IEEE 802.3ad / 802.1AX)
+
+LACP is the open standard protocol for link aggregation. It is defined in IEEE 802.3ad (later moved to 802.1AX) and is supported by virtually all vendors. LACP is the correct choice in multi-vendor environments.
+
+LACP defines two roles for each end of the bundle:
+
+- **Active**: Initiates LACP negotiation by sending LACP PDUs. Will form a bundle if the other side is Active or Passive.
+- **Passive**: Responds to LACP PDUs but does not initiate. Will form a bundle if the other side is Active. Two passive sides will not form a bundle.
+
+For a bundle to form, at least one side must be Active.
+
+LACP exchanges **LACPDUs (LACP Protocol Data Units)** to negotiate bundle membership, verify parameters, and detect link failures. LACPDUs are sent every second in fast mode or every 30 seconds in slow mode.
+
+### PAgP — Port Aggregation Protocol (Cisco proprietary)
+
+PAgP is Cisco's proprietary protocol, available only on Cisco equipment. It operates similarly to LACP:
+
+- **Desirable**: Initiates PAgP negotiation. Will bundle with Desirable or Auto.
+- **Auto**: Responds to PAgP but does not initiate. Will bundle with Desirable.
+
+PAgP is only relevant on Cisco-to-Cisco links. On any link involving non-Cisco equipment, use LACP.
+
+### Static (On/On)
+
+Configuring the channel to **On** on both sides forms the bundle without any negotiation protocol. There is no LACP or PAgP exchange. The risk is that if one side has a misconfiguration, the other side will not detect it — traffic may flow into the bundle but not reach the other side correctly. LACP is preferred because it provides detection of misconfigurations and failures.
+
+---
+
+## Load Balancing
+
+When a switch sends a frame over an EtherChannel, it must decide which physical member link to use. Ethernet requires that frames within a single flow are delivered in order, so all frames belonging to the same flow must traverse the same physical link. If frames from the same TCP connection were split across different links, reordering could occur at the destination.
+
+The load balancing algorithm selects the member link based on a **hash of frame attributes**. Common hashing inputs include:
+
+| Hash Input | Description |
+|------------|-------------|
+| Source MAC | Same source always uses same link |
+| Destination MAC | Same destination always uses same link |
+| Source + Destination MAC | Hash combines both — most common for Layer 2 |
+| Source + Destination IP | Better distribution when MACs are few (router) |
+| Source + Destination IP + Port | Best for server environments with many TCP flows |
+| Layer 4 port numbers | Uses TCP/UDP port for finest-grained distribution |
+
+The hash value is mapped to a member link, typically using the lowest bits of the hash modulo the number of active members. With two links, only one bit matters. With four links, two bits matter.
+
+**Load imbalance is common.** If all your servers have the same destination MAC address (they all send to the same gateway MAC), a source+destination MAC hash will put all traffic on one link. IP or port-based hashing distributes more evenly when there are many different flows with different source/destination IPs.
+
+It is important to understand that EtherChannel provides **aggregate bandwidth** but not necessarily **per-flow bandwidth**. A single TCP connection can only use one physical link — it cannot exceed the bandwidth of one member link. EtherChannel helps aggregate bandwidth across many flows, not within a single flow.
+
+---
+
+## EtherChannel at Layer 2 vs Layer 3
+
+EtherChannel can operate at Layer 2 or Layer 3:
+
+**Layer 2 EtherChannel**: The bundle is a Layer 2 trunk or access interface. VLANs are configured on the bundle interface, and STP runs on the logical bundle. This is the typical configuration for switch-to-switch connections.
+
+**Layer 3 EtherChannel (Routed)**: The bundle is assigned an IP address directly. No VLANs are involved. This is used between Layer 3 switches or between a switch and a router where routing adjacency (OSPF, BGP) runs over the bundle. Layer 3 EtherChannel provides the same redundancy and load balancing but at the routing layer.
+
+---
+
+## MLAG — Multi-Chassis Link Aggregation
+
+Standard EtherChannel bundles links between one device and another. **MLAG (Multi-Chassis Link Aggregation)** — also called vPC (virtual Port Channel) on Cisco Nexus, or MC-LAG — extends the concept so that a single logical bundle can span two separate physical switches.
+
+A server or downstream switch can connect to two different upstream switches, each providing one (or more) member links, and the upstream pair presents as a single logical LACP peer. From the downstream device's perspective, it is connected to one logical switch. From the upstream perspective, the two switches coordinate link state and forwarding.
+
+MLAG eliminates the dependency on STP for upstream redundancy — both upstream switches are active simultaneously. It is the dominant design for high-availability server connectivity in modern data centers.
+
+---
+
+## Key Concepts
+
+### EtherChannel is transparent to spanning tree
+
+STP sees the EtherChannel as a single port. It calculates cost based on the logical bundle's speed (the sum of member speeds on some platforms, or the speed of a single member on others — verify platform behavior). The entire bundle goes through STP's port states as one unit.
+
+### Partial failure behavior
+
+If one member link fails, the EtherChannel continues forwarding on the remaining members. Traffic that was hashed to the failed link is redistributed. The redistribution is instantaneous at the EtherChannel layer — no STP reconvergence occurs. Some temporary traffic loss may occur during the hash redistribution, but it is measured in milliseconds.
+
+---
+
+## References
+
+- [IEEE 802.3ad — Link Aggregation](https://standards.ieee.org/ieee/802.3ad)
+- [IEEE 802.1AX — Link Aggregation (current standard)](https://standards.ieee.org/ieee/802.1AX)

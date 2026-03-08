@@ -1,0 +1,214 @@
+---
+title: "DNS — Translating Names to Addresses"
+layer: "layer3"
+protocol: "dns"
+summary: "How the Domain Name System translates human-readable hostnames into IP addresses — the hierarchy of DNS servers, the resolution process, record types, caching, and why DNS is often called the phonebook of the internet."
+tags: ["layer3", "dns", "hostname", "resolver", "nameserver", "a-record", "ptr", "ttl", "rfc1035"]
+order: 4
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Humans work with names: `www.example.com`, `mail.nakamas.it`, `api.internal.company.com`. Computers work with IP addresses: `93.184.216.34`, `10.20.5.15`, `172.16.8.100`. Something must translate between the two.
+
+The **Domain Name System (DNS)** is a globally distributed, hierarchical, highly replicated database that performs this translation. When you type `www.example.com` into a browser, before any HTTP connection can be made, your device must resolve that name to an IP address. DNS performs this resolution — and does so in milliseconds, despite the fact that the authoritative source of information for that name might be a server on the other side of the planet.
+
+DNS is one of the most critical infrastructure services in any network. It is also one of the most commonly misconfigured and misunderstood. When DNS breaks, nothing works — web browsers cannot load pages, email stops flowing, and application servers cannot reach each other. The failures are often described by users as "the internet is down" even when IP connectivity is perfectly fine.
+
+DNS is defined in RFC 1034 and RFC 1035, published in 1987. The basic design has proven remarkably durable, with extensions added over the decades (DNSSEC, DNS over HTTPS, IPv6 support) without changing the fundamental architecture.
+
+---
+
+## The DNS Hierarchy
+
+DNS is organized as a tree. The root of the tree is represented by a single dot (`.`), which is usually omitted when writing domain names. Every domain name, read right to left, is a path from a leaf of the tree to the root:
+
+```
+www.example.com.
+           └── com.          (top-level domain)
+               └── example.  (second-level domain, registered by example's owner)
+                   └── www   (subdomain, created by example's administrators)
+                       └── . (root)
+```
+
+**Root nameservers**: 13 logical nameservers (labeled A through M) that know the authoritative nameservers for every top-level domain. Despite the count, there are hundreds of physical servers globally distributed (using anycast). The root zone is administered by IANA.
+
+**Top-Level Domain (TLD) nameservers**: Authoritative for each TLD — `.com`, `.org`, `.net`, `.it`, `.uk`, etc. Operated by registry operators (Verisign for `.com`, ICANN for some generic TLDs, national authorities for country-code TLDs). TLD nameservers know which nameservers are authoritative for each registered domain under them.
+
+**Authoritative nameservers**: The servers that hold the actual DNS records for a specific domain — `example.com`, `nakamas.it`, etc. These are operated by the domain owner, or more commonly by a DNS hosting provider or the domain registrar.
+
+---
+
+## How DNS Resolution Works
+
+When your computer needs to resolve `www.example.com`, the following sequence occurs:
+
+<FlowDiagram
+  parties={["Your Device", "Recursive Resolver"]}
+  steps={[
+    { from: "Your Device", to: "Recursive Resolver", label: "Query: www.example.com A?", sub: "Is it cached? If not, begin recursion" },
+    { from: "Recursive Resolver", to: "Your Device", label: "Response: 93.184.216.34", sub: "TTL: 86400s (24 hours)" },
+  ]}
+/>
+
+The recursive resolver does most of the work internally:
+
+1. **Check cache**: If the resolver has recently resolved `www.example.com`, it returns the cached answer immediately without further queries.
+
+2. **Query root**: The resolver queries a root nameserver: "Who is authoritative for `.com`?" The root responds with the addresses of the `.com` TLD nameservers (a **referral**).
+
+3. **Query TLD**: The resolver queries a `.com` nameserver: "Who is authoritative for `example.com`?" The TLD nameserver responds with the addresses of `example.com`'s authoritative nameservers (another referral).
+
+4. **Query authoritative**: The resolver queries `example.com`'s authoritative nameserver: "What is the IP address for `www.example.com`?" The authoritative nameserver returns the answer: `93.184.216.34`.
+
+5. **Cache and return**: The resolver caches the answer (respecting the TTL) and returns it to your device.
+
+This full sequence — resolver → root → TLD → authoritative — is called **recursive resolution** or **iterative resolution** (from the resolver's perspective, it iterates through the hierarchy). In practice, the resolver caches responses aggressively, so the root and TLD servers are only queried when the cache has no relevant entries.
+
+**Who is the recursive resolver?** On most networks, this is your ISP's recursive nameserver or a public recursive DNS service (Google `8.8.8.8`, Cloudflare `1.1.1.1`). Your device is configured with the resolver's IP address — typically delivered via DHCP. When you configure a DNS server address on a device, you are configuring its recursive resolver.
+
+---
+
+## DNS Message Format
+
+DNS uses UDP port 53 for most queries (queries and responses fit in a single UDP datagram for most record types). For large responses that exceed 512 bytes (or 4096 bytes with EDNS0) or for zone transfers, DNS uses TCP port 53.
+
+A DNS message consists of a header followed by four sections:
+
+| Section | Contents |
+|---------|----------|
+| Header | Query ID, flags (QR, opcode, AA, TC, RD, RA), counts of records in each section |
+| Question | The name being queried and the record type (e.g., A, AAAA, MX) |
+| Answer | Resource records that answer the question |
+| Authority | Nameserver records pointing to authoritative servers |
+| Additional | Related records that may be useful (e.g., A records for nameservers mentioned in Authority) |
+
+The **QR bit** in the header distinguishes queries (0) from responses (1). The **RD (Recursion Desired)** bit, set by the client, requests that the resolver perform recursion. The **RA (Recursion Available)** bit, set by the server, indicates it supports recursion.
+
+---
+
+## DNS Record Types
+
+Each answer in DNS is a **Resource Record (RR)** with a type, a TTL, and a value. The most important record types:
+
+| Type | Description | Example Value |
+|------|-------------|---------------|
+| **A** | IPv4 address for a hostname | `93.184.216.34` |
+| **AAAA** | IPv6 address for a hostname | `2606:2800:220:1:248:1893:25c8:1946` |
+| **CNAME** | Canonical name (alias) — points one name to another | `www.example.com → example.com` |
+| **MX** | Mail exchanger — which server handles email for the domain | `10 mail.example.com` (priority + hostname) |
+| **NS** | Nameserver — which servers are authoritative for a zone | `ns1.example.com` |
+| **PTR** | Pointer — reverse DNS, IP address to hostname | `34.216.184.93.in-addr.arpa → www.example.com` |
+| **TXT** | Arbitrary text — used for SPF, DKIM, DMARC, domain verification | `"v=spf1 include:_spf.google.com ~all"` |
+| **SOA** | Start of Authority — administrative info about the zone | Serial, refresh, retry, expire, minimum TTL |
+| **SRV** | Service location — hostname and port for a specific service | `_https._tcp.example.com: priority weight port target` |
+| **CAA** | Certification Authority Authorization — which CAs may issue TLS certs | `0 issue "letsencrypt.org"` |
+
+### CNAME Chains
+
+A CNAME points to another name, not an IP address. The resolver follows the CNAME to get the final answer:
+
+```
+www.example.com → CNAME → example.com → A → 93.184.216.34
+```
+
+CNAME chains should be short — each additional hop adds a DNS lookup. CNAMEs cannot coexist with other record types at the same name (you cannot have both a CNAME and an MX for `example.com` — this is why CNAMEs are only used for subdomains, not the zone apex).
+
+---
+
+## TTL — Time to Live
+
+Every DNS record has a **TTL** (Time to Live), expressed in seconds. The TTL instructs resolvers how long to cache the record before discarding it and re-querying.
+
+- **Short TTL** (60–300 seconds): Changes propagate quickly. Use when you anticipate changing the record soon (e.g., before a planned migration). Higher resolver load because records are re-queried frequently.
+- **Long TTL** (3600–86400 seconds): Efficient — resolvers cache for hours or days, reducing load on authoritative servers. Changes take longer to propagate globally.
+
+A common DNS migration strategy: lower TTLs to 60 seconds well before a planned change (so caches flush quickly), make the change, then raise TTLs back to normal after confirming the change is working. This is sometimes called "TTL pre-staging."
+
+---
+
+## Zones and Zone Files
+
+A **zone** is a portion of the DNS namespace that is administered by a specific set of authoritative nameservers. Zone files contain the resource records for that zone.
+
+```
+; Zone file for example.com
+$TTL 86400
+@   IN  SOA  ns1.example.com. admin.example.com. (
+                2024010101  ; Serial
+                3600        ; Refresh
+                900         ; Retry
+                604800      ; Expire
+                86400 )     ; Minimum TTL
+
+@       IN  NS   ns1.example.com.
+@       IN  NS   ns2.example.com.
+@       IN  A    93.184.216.34
+www     IN  A    93.184.216.34
+mail    IN  A    93.184.216.100
+@       IN  MX   10 mail.example.com.
+```
+
+The `@` symbol means "the current zone" (here, `example.com`). Zone files are the traditional format for configuring BIND (Berkeley Internet Name Domain), the most widely deployed DNS server software.
+
+---
+
+## Reverse DNS
+
+Forward DNS maps names to IP addresses (A and AAAA records). **Reverse DNS** maps IP addresses back to names (PTR records).
+
+Reverse DNS records live in a special domain: `in-addr.arpa` for IPv4. The IP address is written in reverse order before the suffix. For example, the PTR record for `93.184.216.34` lives at:
+```
+34.216.184.93.in-addr.arpa.  →  PTR  www.example.com.
+```
+
+The IP is reversed because DNS delegates from left to right. The `.arpa` zone is delegated to IANA, which delegates each `/8` block to regional registries, which delegate to ISPs, which delegate to their customers. The reversal ensures that the delegation hierarchy works correctly.
+
+Reverse DNS is used for: email server reputation (mail servers check PTR records of sending IPs), logging (converting IP addresses to hostnames for readability), and some authentication mechanisms.
+
+---
+
+## Internal DNS — Split Horizon
+
+Organizations often run their own internal DNS servers to resolve internal hostnames that are not publicly accessible. A **split-horizon (split-brain) DNS** configuration provides different answers depending on where the query originates:
+
+- A query from inside the corporate network for `app.company.internal` gets the private IP address `10.20.5.15`
+- A query from the internet for the same name gets either no answer (internal names are not public) or a different, public-facing IP address
+
+This is implemented by having internal DNS servers that resolve internal names plus forward unknown names to public resolvers, while external authoritative nameservers only publish records for public-facing services.
+
+---
+
+## DNS Security
+
+DNS was designed without authentication or integrity protection — a resolver that receives a response has no way to verify that the response came from the legitimate authoritative nameserver and was not modified in transit. This enables several attacks:
+
+**DNS spoofing (cache poisoning)**: An attacker injects forged DNS responses into a resolver's cache. The next client that queries for that name receives the forged answer (malicious IP) from the cache.
+
+**DNSSEC (DNS Security Extensions)**: Adds cryptographic signatures to DNS records. Authoritative servers sign their records with a private key. Resolvers can verify the signatures using the corresponding public keys, which are chained back to the DNS root's trust anchor. DNSSEC prevents cache poisoning because forged responses will have invalid or missing signatures.
+
+**DNS over HTTPS (DoH)** and **DNS over TLS (DoT)**: Encrypt the DNS queries and responses between the client and the recursive resolver. Prevent eavesdropping (ISPs, network operators) from seeing which names a client resolves, and prevent on-path tampering with DNS responses.
+
+---
+
+## Key Concepts
+
+### DNS is the first step in almost every network connection
+
+Before your browser can connect to `www.example.com`, it must resolve the name to an IP address. Before an email server can deliver a message, it must resolve the recipient domain's MX record. DNS failures are silent from the user's perspective but catastrophically disruptive. This is why DNS infrastructure is always deployed in pairs of authoritative servers and why public resolvers operate massive redundant infrastructures.
+
+### The resolver is not the authoritative server
+
+Your DNS server address (configured on your device or delivered by DHCP) is your **recursive resolver** — the server that performs the full resolution process on your behalf. The authoritative server is owned and operated by the domain's owner and is never something you configure on client devices.
+
+---
+
+## References
+
+- [RFC 1034 — Domain Names — Concepts and Facilities](https://www.rfc-editor.org/rfc/rfc1034)
+- [RFC 1035 — Domain Names — Implementation and Specification](https://www.rfc-editor.org/rfc/rfc1035)
+- [RFC 4034 — Resource Records for the DNS Security Extensions (DNSSEC)](https://www.rfc-editor.org/rfc/rfc4034)
+- [RFC 8484 — DNS Queries over HTTPS (DoH)](https://www.rfc-editor.org/rfc/rfc8484)

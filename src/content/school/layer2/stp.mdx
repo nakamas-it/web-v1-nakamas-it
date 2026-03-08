@@ -1,0 +1,195 @@
+---
+title: "STP — Eliminating Loops in Switched Networks"
+layer: "layer2"
+protocol: "stp"
+summary: "How the Spanning Tree Protocol detects and eliminates Layer 2 loops by electing a root bridge, assigning port roles, and blocking redundant paths — and how RSTP and modern improvements addressed STP's slow convergence."
+tags: ["layer2", "stp", "rstp", "spanning-tree", "bpdu", "root-bridge", "loop", "ieee802.1d"]
+order: 5
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Redundant physical links between switches are essential for high availability. If the only path between two switches fails, every device that depends on that path loses connectivity. So real networks are built with redundant links — multiple paths between switches so that if one path fails, traffic automatically uses another.
+
+But Ethernet switching has a fundamental problem with redundant paths: **Layer 2 loops cause network meltdown**. Unlike IP routing, which uses TTL to discard looping packets, Ethernet has no mechanism to stop a frame from circulating forever. A single broadcast frame on a looped network generates a storm of traffic that grows exponentially. Within seconds, every switch port is saturated with copies of the same frame. The network becomes unusable.
+
+**Spanning Tree Protocol (STP)**, defined in IEEE 802.1D, solves this by constructing a loop-free logical topology from the physical redundant network. STP identifies one switch as the root, builds a shortest-path tree from every other switch to the root, and blocks all ports that would create loops. The blocked ports remain in standby — if an active link fails, STP detects the failure and unblocks the standby path.
+
+---
+
+## The Loop Problem
+
+Consider three switches arranged in a triangle: Switch A connects to Switch B, Switch B connects to Switch C, and Switch C connects back to Switch A. Every link is active. Now one device sends a broadcast frame:
+
+1. Switch A receives the broadcast and floods it out all ports except the one it arrived on — including the link to Switch B and the link to Switch C.
+2. Switch B receives the copy from Switch A and floods it — including back to Switch C.
+3. Switch C receives the copy from Switch A and from Switch B. It floods all copies out all ports — back to Switch A, which receives them and floods them again.
+
+Each copy generates more copies. The number of frames on the network doubles and then doubles again. Within milliseconds, all available bandwidth is consumed by the same broadcast frame bouncing around the loop. The MAC address table becomes unstable as each switch sees the same source MAC address arriving on different ports (the storm). This is called a **broadcast storm**, and it takes down the entire Layer 2 domain until the loop is broken physically.
+
+---
+
+## How STP Works
+
+STP operates through a series of elections and assignments that produce a loop-free forwarding tree:
+
+### Step 1: Root Bridge Election
+
+Every switch running STP has a **Bridge ID** — an 8-byte value consisting of a 2-byte priority (default 32768 on most platforms) and the switch's lowest MAC address.
+
+All switches start by claiming to be the root bridge and sending **Bridge Protocol Data Units (BPDUs)** out every port. When a switch receives a BPDU from another switch with a lower Bridge ID, it stops claiming to be the root and defers to the lower Bridge ID. This continues until only one switch is claiming to be root — the switch with the lowest Bridge ID. That switch is elected the **Root Bridge**.
+
+The network administrator can control which switch becomes root by setting the bridge priority to a lower value on the desired root (priority must be in increments of 4096; the lowest possible is 0). In a production network, you should always explicitly configure the root bridge — relying on the default election process means the oldest switch with the lowest MAC address becomes root, which is rarely the optimal choice for the forwarding tree.
+
+### Step 2: Root Port Selection
+
+Every non-root switch must identify the port through which it has the best path to the root bridge. This port is called the **Root Port**. "Best" is determined by **path cost** — a value inversely proportional to the link speed:
+
+| Link Speed | STP Path Cost (802.1D, short mode) |
+|------------|-------------------------------------|
+| 10 Mbps    | 100                                 |
+| 100 Mbps   | 19                                  |
+| 1 Gbps     | 4                                   |
+| 10 Gbps    | 2                                   |
+
+The root port is the port with the lowest cumulative cost to the root bridge. If two ports have equal cost, the switch uses tiebreakers: lowest upstream Bridge ID, then lowest upstream port ID.
+
+Each non-root switch has exactly one Root Port.
+
+### Step 3: Designated Port Selection
+
+For each network segment (each link between switches), one port must be responsible for forwarding traffic toward the root. That port is the **Designated Port**. The designated port on a segment is the one with the lowest path cost to the root from that switch. On the root bridge itself, every active port is a designated port.
+
+### Step 4: Blocking Non-Designated Ports
+
+Any port that is neither a Root Port nor a Designated Port is placed in the **Blocking** state. A blocking port receives BPDUs (to monitor for topology changes) but does not forward any data frames. This breaks all loops.
+
+<FlowDiagram
+  parties={["Non-Root Switch", "Root Bridge"]}
+  steps={[
+    { from: "Non-Root Switch", to: "Root Bridge", label: "BPDU (claiming root)", sub: "Bridge ID: 32768 + own MAC" },
+    { from: "Root Bridge", to: "Non-Root Switch", label: "BPDU (superior Bridge ID)", sub: "Bridge ID: 4096 + lower MAC" },
+    { from: "Non-Root Switch", to: "Root Bridge", label: "BPDU (acknowledging root)", sub: "Root ID = Root Bridge's Bridge ID" },
+  ]}
+/>
+
+---
+
+## BPDU — Bridge Protocol Data Unit
+
+BPDUs are the control messages STP uses to exchange topology information. The root bridge generates Configuration BPDUs and forwards them every **Hello Time** (default 2 seconds). Non-root switches receive and relay BPDUs toward the leaves of the tree.
+
+<PacketDiagram
+  label="STP BPDU — Key Fields"
+  fields={[
+    { name: "Protocol ID", bytes: 2, value: "0x0000" },
+    { name: "Version", bytes: 1, value: "0x00" },
+    { name: "Type", bytes: 1, value: "0x00" },
+    { name: "Flags", bytes: 1 },
+    { name: "Root Bridge ID", bytes: 8, highlight: true },
+    { name: "Root Path Cost", bytes: 4, highlight: true },
+    { name: "Sender Bridge ID", bytes: 8 },
+    { name: "Port ID", bytes: 2 },
+    { name: "Message Age", bytes: 2 },
+    { name: "Max Age", bytes: 2 },
+    { name: "Hello Time", bytes: 2 },
+    { name: "Forward Delay", bytes: 2 },
+  ]}
+/>
+
+Key BPDU fields:
+- **Root Bridge ID**: The Bridge ID of the current root bridge as seen by the sender
+- **Root Path Cost**: The accumulated cost of the path to the root
+- **Sender Bridge ID**: The Bridge ID of the switch sending this BPDU
+- **Message Age**: How many switches this BPDU has traversed (incremented each hop)
+- **Max Age** (default 20s): When Message Age exceeds Max Age, the BPDU is discarded and the port triggers a topology change
+- **Hello Time** (default 2s): How often the root sends BPDUs
+- **Forward Delay** (default 15s): How long a port stays in Listening and Learning states
+
+BPDUs are sent to the STP multicast MAC address `01:80:C2:00:00:00`, ensuring they are not forwarded by bridges (only processed by STP-aware switches).
+
+---
+
+## STP Port States
+
+A port in STP transitions through multiple states before forwarding data:
+
+| State | Receives BPDUs | Sends BPDUs | Learns MACs | Forwards Data | Duration |
+|-------|---------------|-------------|-------------|---------------|----------|
+| Blocking | Yes | No | No | No | Until topology changes |
+| Listening | Yes | Yes | No | No | Forward Delay (15s) |
+| Learning | Yes | Yes | Yes | No | Forward Delay (15s) |
+| Forwarding | Yes | Yes | Yes | Yes | Indefinitely |
+| Disabled | No | No | No | No | Admin down |
+
+The transition from Blocking to Forwarding takes at least **30 seconds** (15s Listening + 15s Learning) in classic STP. This slow convergence was the main driver for developing RSTP.
+
+---
+
+## Topology Changes
+
+When STP detects a topology change (a port that was forwarding goes down), it accelerates MAC table aging to 15 seconds (the Forward Delay value) rather than the normal 300 seconds. This ensures that stale MAC table entries are quickly flushed so that traffic takes the new path.
+
+A **Topology Change Notification (TCN) BPDU** is sent upstream toward the root bridge when a port changes state. The root bridge then sets the Topology Change flag in its BPDUs for a period, causing all switches to shorten their MAC aging timers.
+
+---
+
+## RSTP — Rapid Spanning Tree Protocol
+
+IEEE 802.1w defined **Rapid Spanning Tree Protocol (RSTP)**, later incorporated into 802.1D-2004, which dramatically improves convergence time from 30–50 seconds to typically under 1 second.
+
+Key improvements over classic STP:
+
+**Simplified port roles**: RSTP uses Root Port, Designated Port, and Alternate Port (the blocked port that would take over if the root port fails).
+
+**Edge ports**: Ports connected to end devices (not other switches) are designated as **Edge Ports** (equivalent to Cisco's PortFast). They transition immediately to Forwarding without going through Listening/Learning. If an Edge Port receives a BPDU, it immediately loses its Edge Port status, preventing misconfiguration from creating loops.
+
+**Proposal/Agreement mechanism**: When a port wants to transition to Forwarding, it uses a handshake with its neighbor rather than waiting through timer-based delays. The proposing switch sends a BPDU with the Proposal bit set. The receiving switch responds with Agreement and immediately synchronizes, then propagates downstream. This handshake replaces the 30-second wait.
+
+**Discarding state**: RSTP simplifies the Blocking, Listening, and Disabled states into a single **Discarding** state. Ports move from Discarding → Learning → Forwarding, with the Proposal/Agreement mechanism making the transitions fast.
+
+---
+
+## Per-VLAN Spanning Tree
+
+Classic STP and RSTP run a single spanning tree for the entire network. Cisco's **Per-VLAN Spanning Tree (PVST+)** runs a separate STP instance for each VLAN. This allows different VLANs to have different root bridges and therefore different active paths, enabling **load balancing across redundant links** by having VLAN 10 use one path and VLAN 20 use another.
+
+**Multiple Spanning Tree (MST)**, defined in IEEE 802.1s, groups VLANs into **MST instances** and runs one spanning tree per instance. This is a compromise between the overhead of per-VLAN spanning trees in large environments and the rigidity of a single spanning tree.
+
+---
+
+## STP Protection Features
+
+**PortFast**: Immediately transitions an access port to Forwarding, bypassing Listening and Learning. Only appropriate for ports connected to end devices, never to switches. Enabling PortFast on a switch port creates an instant loop risk if another switch is connected to it.
+
+**BPDU Guard**: If a PortFast-enabled port receives a BPDU, it immediately shuts down (err-disabled state). This protects against accidentally connecting a switch to an access port. If a user plugs in a consumer switch with STP, the port goes down rather than potentially disrupting the spanning tree.
+
+**BPDU Filter**: Suppresses BPDUs on a port. Use with caution — on a trunk port, filtering BPDUs disables STP protection entirely for that link.
+
+**Root Guard**: Prevents a port from becoming a Root Port. If a BPDU with a superior Bridge ID arrives on a Root Guard port (implying someone has connected a switch that is trying to become root), the port is placed in a root-inconsistent state and stops forwarding. This protects against rogue switches taking over as root bridge.
+
+**Loop Guard**: Protects against unidirectional link failures. If a non-designated port stops receiving BPDUs (because the upstream switch stopped sending them, possibly due to a one-way fiber failure), Loop Guard places the port in loop-inconsistent state rather than transitioning it to Designated/Forwarding. Without Loop Guard, a unidirectional failure could cause the formerly blocking port to start forwarding, creating a loop.
+
+---
+
+## Key Concepts
+
+### STP runs in the control plane, not the data plane
+
+STP does not inspect or forward user data — it only sends and receives BPDUs. The topology decisions STP makes (which ports to block) are then programmed into the switch's hardware forwarding tables. The user data flows or doesn't flow based on STP's decisions, but STP itself never touches user traffic.
+
+### Proper root bridge placement matters for performance
+
+If STP elects a switch at the edge of the network as root (because it happens to have the lowest MAC address), all traffic must flow through that edge switch, even traffic that logically should stay in the core. Explicitly set the root bridge to a core switch that is topologically central to minimize path lengths.
+
+---
+
+## References
+
+- [IEEE 802.1D — Media Access Control (MAC) Bridges](https://standards.ieee.org/ieee/802.1D)
+- [IEEE 802.1w — Rapid Reconfiguration (incorporated into 802.1D-2004)](https://standards.ieee.org/ieee/802.1w)
+- [IEEE 802.1s — Multiple Spanning Trees](https://standards.ieee.org/ieee/802.1s)

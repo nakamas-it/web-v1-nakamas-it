@@ -1,0 +1,164 @@
+---
+title: "PPP — Point-to-Point Protocol"
+layer: "layer2"
+protocol: "ppp"
+summary: "How PPP provides a complete Layer 2 framing standard for point-to-point links — including link establishment, authentication, compression, and multi-link bonding — and why it became the foundation of DSL and dial-up internet access."
+tags: ["layer2", "ppp", "lcp", "ncp", "chap", "pap", "pppoe", "wan", "rfc1661"]
+order: 8
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Ethernet defines how devices communicate on a shared local network. But Ethernet was never designed for direct connections between two devices across a wide-area link — a serial connection between two routers across a leased line, a dial-up connection from a modem to an ISP, or a DSL connection from a home router to a telephone exchange.
+
+For point-to-point links, the networking world needed a different Layer 2 protocol. The original approach on many serial WAN links was HDLC (High-Level Data Link Control), but HDLC lacked standardization across vendors. A router from one vendor could not reliably interoperate with a router from another vendor using HDLC.
+
+**PPP (Point-to-Point Protocol)**, defined in RFC 1661, became the standard solution for point-to-point links. Unlike Ethernet, which assumes a shared medium and uses MAC addresses for addressing, PPP is built for exactly two devices — one on each end of a link. There is no addressing problem (there is only one other place to send a frame), so PPP uses a much simpler frame format. What PPP does add are things Ethernet never needed: explicit link negotiation, authentication, compression negotiation, and support for multiple network layer protocols simultaneously.
+
+---
+
+## PPP Frame Format
+
+<PacketDiagram
+  label="PPP Frame"
+  fields={[
+    { name: "Flag", bytes: 1, value: "0x7E" },
+    { name: "Address", bytes: 1, value: "0xFF" },
+    { name: "Control", bytes: 1, value: "0x03" },
+    { name: "Protocol", bytes: 2, highlight: true },
+    { name: "Payload", bytes: 6 },
+    { name: "FCS", bytes: 2 },
+    { name: "Flag", bytes: 1, value: "0x7E" },
+  ]}
+/>
+
+| Field | Value | Description |
+|-------|-------|-------------|
+| Flag | `0x7E` | Frame delimiter — marks the beginning and end of every PPP frame |
+| Address | `0xFF` | Broadcast address — PPP has no addressing (there is only one peer), so this field is always `0xFF` |
+| Control | `0x03` | Indicates unnumbered information frame — always this value for standard PPP |
+| Protocol | Variable | Identifies what is inside the frame: `0x0021` = IPv4, `0x0057` = IPv6, `0xC021` = LCP, `0x8021` = IPCP |
+| Payload | Variable | The encapsulated higher-layer data |
+| FCS | 2 or 4 bytes | Frame Check Sequence (CRC) for error detection |
+| Flag | `0x7E` | End-of-frame delimiter |
+
+The Protocol field is what makes PPP so flexible. A single PPP link can carry IPv4, IPv6, and control traffic simultaneously, with the Protocol field distinguishing each type.
+
+**Byte stuffing**: Because `0x7E` is the frame delimiter, if `0x7E` appears in the data payload, PPP uses byte stuffing — it inserts an escape byte (`0x7D`) and XORs the next byte with `0x20`. The receiver reverses this process. This ensures that `0x7E` within the data is never mistaken for a frame boundary.
+
+---
+
+## PPP Link Establishment — Three Phases
+
+A PPP connection goes through three well-defined phases:
+
+<FlowDiagram
+  parties={["Caller (Client)", "Responder (Server)"]}
+  steps={[
+    { from: "Caller (Client)", to: "Responder (Server)", label: "LCP Configure-Request", sub: "Phase 1: Negotiate link parameters" },
+    { from: "Responder (Server)", to: "Caller (Client)", label: "LCP Configure-Ack", sub: "Accepted — link established" },
+    { from: "Caller (Client)", to: "Responder (Server)", label: "Authentication (CHAP/PAP)", sub: "Phase 2: Verify identity" },
+    { from: "Responder (Server)", to: "Caller (Client)", label: "Auth Success", sub: "Identity verified" },
+    { from: "Caller (Client)", to: "Responder (Server)", label: "NCP Configure-Request (IPCP)", sub: "Phase 3: Negotiate IP addresses" },
+    { from: "Responder (Server)", to: "Caller (Client)", label: "NCP Configure-Ack", sub: "IP assigned — ready for data" },
+  ]}
+/>
+
+### Phase 1: Link Control Protocol (LCP)
+
+**LCP (Link Control Protocol)** negotiates the parameters of the link itself. The two peers exchange Configure-Request messages advertising the options they want, and reach agreement through a sequence of Configure-Ack (accepted), Configure-Nak (not acceptable, here is a counterproposal), and Configure-Reject (option not recognized/supported) messages.
+
+Options negotiated by LCP include:
+- **Maximum Receive Unit (MRU)**: The maximum frame size each side can receive (analogous to MTU, default 1500)
+- **Authentication Protocol**: Whether to use PAP or CHAP authentication, and which
+- **Quality Protocol**: Link quality monitoring protocol
+- **Magic Number**: A random number used to detect loopback conditions
+- **Header Compression**: Whether to compress the address/control bytes (saves 2 bytes per frame on slow links)
+
+### Phase 2: Authentication
+
+If authentication was negotiated in LCP, it happens now. Two authentication protocols are defined:
+
+**PAP (Password Authentication Protocol)**: The client sends the username and password in cleartext. The server either accepts or rejects. PAP is simple but insecure — the password is visible to anyone who can capture the link traffic. PAP is only used when the link is already encrypted at a lower layer or when CHAP is not supported.
+
+**CHAP (Challenge Handshake Authentication Protocol)**: A three-way challenge-response mechanism that never transmits the actual password. The server sends a random challenge. The client computes a MD5 hash of the challenge, the session ID, and the shared secret (password) and sends the hash. The server performs the same computation and compares results. If they match, the client has proven it knows the shared secret without revealing it. CHAP is always preferred over PAP when possible.
+
+### Phase 3: Network Control Protocols (NCP)
+
+NCP negotiates the parameters for each network layer protocol that will run over the PPP link. A separate NCP exists for each supported protocol:
+
+- **IPCP (IP Control Protocol)**: Negotiates IPv4 parameters — IP addresses for each end of the link, compression settings
+- **IPv6CP (IPv6 Control Protocol)**: Negotiates IPv6 interface identifiers
+- **IPXCP, ATCP**: Legacy NCPs for now-obsolete protocols
+
+IPCP is particularly important for dial-up and DSL connections: the server assigns the client's IP address dynamically through IPCP negotiation. The client sends a Configure-Request with IP address `0.0.0.0` (requesting an assignment), and the server responds with a Configure-Nak containing the address to use.
+
+---
+
+## PPP Options and Extensions
+
+### Multilink PPP (MP)
+
+**Multilink PPP** (RFC 1990) allows multiple physical PPP links to be bonded into a single logical connection. Traffic is fragmented across the member links and reassembled at the receiving end. This was the predecessor to modern link aggregation for WAN connections — before DSL, businesses would bond multiple dial-up lines or fractional T1 channels for higher throughput.
+
+MP uses a 4-byte (or 2-byte) multilink header that includes a sequence number for reassembly. The receiver uses these sequence numbers to put fragments back in order even if they arrive out of order across different member links.
+
+### Compression Control Protocol (CCP)
+
+CCP negotiates data compression over the PPP link. Various compression algorithms can be negotiated (Stacker, MPPC, Deflate). On slow links, compressing the payload before transmitting it over the wire can significantly increase effective throughput for compressible data like text and HTML.
+
+---
+
+## PPPoE — PPP over Ethernet
+
+**PPPoE (PPP over Ethernet)**, defined in RFC 2516, encapsulates PPP frames inside Ethernet frames. This allows the authentication and IP address assignment mechanisms of PPP to be used over an Ethernet-like infrastructure rather than a traditional point-to-point serial link.
+
+PPPoE became ubiquitous for **DSL internet access**. The physical DSL link connects a home router to a telephone exchange. But the telephone company's network between the exchange and the ISP may use ATM (Asynchronous Transfer Mode), which is then bridged to Ethernet in the ISP's equipment. PPPoE allows the ISP to authenticate the subscriber and assign an IP address using PPP mechanisms over what ultimately looks like Ethernet to the home router.
+
+The PPPoE connection involves two phases:
+
+**Discovery Phase**: The client broadcasts a PADI (PPPoE Active Discovery Initiation) to find PPPoE servers. The server responds with a PADO (Offer). The client selects a server and sends a PADR (Request). The server creates a session and sends a PADS (Session Confirmed) with a 16-bit session ID. All subsequent PPP data uses this session ID.
+
+**Session Phase**: Standard PPP is carried inside Ethernet frames tagged with EtherType `0x8864`, along with the session ID. The PPP negotiation (LCP, authentication, IPCP) happens over these Ethernet-encapsulated PPP frames, and then data flows.
+
+PPPoE adds 8 bytes of overhead to each frame (6 bytes PPPoE header + 2 bytes PPP protocol field), reducing the effective MTU from 1500 to 1492 bytes. This is why many DSL routers configure an MTU of 1492 and need to perform TCP MSS clamping to prevent fragmentation.
+
+---
+
+## PPP in Modern Networks
+
+Direct PPP over serial WAN links is largely obsolete — Ethernet-based Metro Ethernet and MPLS circuits have replaced most serial WAN connections. However, PPP remains relevant in several contexts:
+
+**DSL access**: PPPoE is still the predominant protocol for DSL internet access in many countries (Europe, Japan, parts of Asia). Most home routers include a PPPoE client.
+
+**Mobile broadband**: PPP or its derivatives appear in some 3G/4G modem interfaces where the modem presents as a serial port to the host system.
+
+**VPN tunnels**: L2TP (Layer 2 Tunneling Protocol) uses PPP inside its tunnels, inheriting PPP's authentication and compression capabilities.
+
+**Understanding legacy infrastructure**: Many network engineers will encounter PPP configurations when maintaining legacy equipment or when working in environments that have not yet migrated to all-Ethernet WAN connectivity.
+
+---
+
+## Key Concepts
+
+### PPP is stateful — both sides must agree before data flows
+
+Unlike Ethernet, which can start sending data immediately, PPP requires a negotiation phase before any user data is sent. Both ends must successfully complete LCP negotiation, authentication (if configured), and NCP negotiation before the link is considered up. This state machine approach makes PPP more robust for WAN links where misconfiguration should be detected, not silently ignored.
+
+### The Protocol field makes PPP extensible
+
+Any new network layer protocol can be defined with a new Protocol field value, and a corresponding NCP. PPP does not need to be redesigned to support new protocols — new protocols just register a Protocol ID. This is why PPP could carry IP, IPX, and AppleTalk simultaneously over the same link without modification to the core PPP standard.
+
+---
+
+## References
+
+- [RFC 1661 — The Point-to-Point Protocol (PPP)](https://www.rfc-editor.org/rfc/rfc1661)
+- [RFC 1994 — PPP Challenge Handshake Authentication Protocol (CHAP)](https://www.rfc-editor.org/rfc/rfc1994)
+- [RFC 1332 — The PPP Internet Protocol Control Protocol (IPCP)](https://www.rfc-editor.org/rfc/rfc1332)
+- [RFC 2516 — A Method for Transmitting PPP Over Ethernet (PPPoE)](https://www.rfc-editor.org/rfc/rfc2516)
+- [RFC 1990 — The PPP Multilink Protocol (MP)](https://www.rfc-editor.org/rfc/rfc1990)

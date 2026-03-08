@@ -1,0 +1,153 @@
+---
+title: "Wireless — 802.11 and the Radio Layer"
+layer: "layer1"
+protocol: "wireless"
+summary: "How Wi-Fi transmits data over radio waves, what the frequency bands mean, how the 802.11 standards have evolved, and why channel planning matters."
+tags: ["layer1", "wireless", "wifi", "802.11", "radio", "2.4ghz", "5ghz", "6ghz"]
+order: 3
+draft: false
+---
+
+## Overview
+
+Wireless networking replaces the copper or fiber physical medium with radio waves — electromagnetic energy propagating through air, walls, and the human body at the speed of light. The tradeoff is significant in both directions. Without a physical medium, devices can move freely and connect without cabling infrastructure. But radio waves are shared, unguided, and subject to interference, reflection, attenuation, and regulatory limits that have no equivalent in wired networking.
+
+The dominant standard for wireless Ethernet is IEEE 802.11, first published in 1997 and amended continuously since. When people say "Wi-Fi," they are referring to equipment certified by the Wi-Fi Alliance as conforming to one of the 802.11 standards. Understanding what 802.11 actually specifies — and what it does not — is essential for anyone designing, deploying, or troubleshooting wireless infrastructure.
+
+---
+
+## Radio Basics
+
+A radio signal is an oscillating electromagnetic field. The frequency of oscillation determines what we call the frequency band — measured in hertz (Hz). Wi-Fi operates in the gigahertz range: 2.4 GHz, 5 GHz, and (in the newest standard) 6 GHz. These frequencies are unlicensed bands designated by the ITU and various national regulators for general use without a radio license — anyone can transmit in them, which is both an advantage (low barrier to deployment) and a problem (everyone else transmitting creates interference).
+
+**Wavelength** is inversely proportional to frequency. At 2.4 GHz the wavelength is approximately 12.5 cm; at 5 GHz it is about 6 cm; at 6 GHz about 5 cm. Shorter wavelengths are more easily blocked by physical obstacles and attenuate faster with distance. This explains why 2.4 GHz travels through walls better than 5 GHz, and why 6 GHz range is shorter still.
+
+**Transmit power** is regulated and limits how far a signal can travel. Access points in the ISM band are typically limited to 30 dBm (1 watt) EIRP (Effective Isotropic Radiated Power) in most jurisdictions, though many devices operate well below this. Antenna gain, transmit power, path loss, and receiver sensitivity together determine the usable range of a wireless link.
+
+---
+
+## The 2.4 GHz Band
+
+The 2.4 GHz band was the first band used by 802.11 and remains the most universally supported. Its advantages are range and penetration: the longer wavelength passes through walls and floors more easily, making it useful in situations where the access point and client are separated by obstacles.
+
+Its disadvantages are congestion and limited channel availability. The 2.4 GHz ISM band spans 83.5 MHz (2.400–2.4835 GHz) and is divided into channels 20 MHz wide, but they overlap significantly. Only three channels are non-overlapping in most of the world: **channels 1, 6, and 11**. Every Wi-Fi network in range that is not on one of these three channels will partially overlap with adjacent channels, creating adjacent-channel interference that is more damaging than co-channel interference.
+
+The 2.4 GHz band is also shared with Bluetooth, Zigbee, baby monitors, microwave ovens (which leak RF around 2.45 GHz), and countless other devices. In dense urban environments — apartment buildings, conference centers, office parks — the 2.4 GHz band is severely congested and often unusable for high-throughput applications.
+
+| Channel | Center Frequency | Non-overlapping |
+|---------|-----------------|-----------------|
+| 1       | 2.412 GHz       | Yes             |
+| 6       | 2.437 GHz       | Yes             |
+| 11      | 2.462 GHz       | Yes             |
+| Others  | Various         | No              |
+
+---
+
+## The 5 GHz Band
+
+The 5 GHz band offers dramatically more available spectrum than 2.4 GHz — over 500 MHz of spectrum divided into 25 non-overlapping 20 MHz channels, or 12 non-overlapping 40 MHz channels, or 6 non-overlapping 80 MHz channels. This means a dense deployment can use many more access points in the same space without them interfering with each other.
+
+The tradeoff is range and penetration. The shorter wavelength attenuates faster in free space and is more easily blocked by walls and furniture. A 5 GHz access point covering the same physical space as a 2.4 GHz access point will require higher transmit power or more access points to achieve similar coverage.
+
+The 5 GHz band also includes portions that require **Dynamic Frequency Selection (DFS)**: the access point must detect radar signals used by weather services and military installations and vacate the channel if radar is detected. DFS channels have more available spectrum but the radar detection scanning adds startup delay (up to 60 seconds) and can cause unexpected channel changes that disrupt clients.
+
+---
+
+## The 6 GHz Band — Wi-Fi 6E and Wi-Fi 7
+
+The 6 GHz band (5.925–7.125 GHz), opened in the United States in 2020 and progressively in other countries since, adds up to 1200 MHz of new spectrum — nearly triple the available 5 GHz bandwidth. This provides up to 59 non-overlapping 20 MHz channels, 29 non-overlapping 40 MHz channels, 14 non-overlapping 80 MHz channels, or 7 non-overlapping 160 MHz channels.
+
+The 6 GHz band is cleaner than 2.4 GHz and 5 GHz because there are no legacy devices: only Wi-Fi 6E (802.11ax in 6 GHz) and Wi-Fi 7 (802.11be) devices can operate there. Older smartphones, laptops, and IoT devices cannot use 6 GHz, which means the band has significantly less interference and congestion.
+
+The range limitation is more pronounced at 6 GHz than at 5 GHz, making it most suitable for high-density environments where access points are relatively close to clients: conference rooms, stadiums, lecture halls.
+
+---
+
+## 802.11 Standards — The Evolution
+
+| Generation | Amendment | Year | Max Speed    | Bands    | Key Technology               |
+|------------|-----------|------|--------------|----------|------------------------------|
+| Wi-Fi 1    | 802.11b   | 1999 | 11 Mbps      | 2.4 GHz  | DSSS                         |
+| Wi-Fi 2    | 802.11a   | 1999 | 54 Mbps      | 5 GHz    | OFDM                         |
+| Wi-Fi 3    | 802.11g   | 2003 | 54 Mbps      | 2.4 GHz  | OFDM in 2.4 GHz              |
+| Wi-Fi 4    | 802.11n   | 2009 | 600 Mbps     | 2.4/5 GHz| MIMO, 40 MHz channels        |
+| Wi-Fi 5    | 802.11ac  | 2013 | 3.46 Gbps    | 5 GHz    | MU-MIMO (DL), 80/160 MHz    |
+| Wi-Fi 6    | 802.11ax  | 2019 | 9.6 Gbps     | 2.4/5 GHz| OFDMA, MU-MIMO (UL+DL), BSS Coloring |
+| Wi-Fi 6E   | 802.11ax  | 2021 | 9.6 Gbps     | 6 GHz    | Wi-Fi 6 extended to 6 GHz   |
+| Wi-Fi 7    | 802.11be  | 2024 | 46 Gbps      | 2.4/5/6 GHz | 320 MHz, MLO, 4K-QAM       |
+
+The headline speeds are theoretical maximums under ideal conditions with a single client. Real-world throughput is a fraction of these numbers due to protocol overhead, channel conditions, interference, and the need to share the medium with other clients.
+
+### Key Technologies
+
+**OFDM (Orthogonal Frequency-Division Multiplexing)** — introduced in 802.11a and used in all modern standards. Instead of transmitting on a single carrier frequency, OFDM splits the channel into dozens of narrow subcarriers. This makes the signal robust against multipath interference (reflections arriving at slightly different times cancel out only a few subcarriers rather than the entire signal) and allows more efficient use of the available spectrum.
+
+**MIMO (Multiple-Input Multiple-Output)** — using multiple antennas to send and receive multiple spatial streams simultaneously. A 3×3 MIMO radio (three transmit, three receive antennas) can transmit three independent data streams if the physical environment supports sufficient spatial separation (multipath scattering provides the separation). Each spatial stream adds to the total throughput.
+
+**MU-MIMO (Multi-User MIMO)** — extends MIMO to serve multiple clients simultaneously in different spatial directions. Wi-Fi 5 added downlink MU-MIMO (AP to multiple clients at once). Wi-Fi 6 added uplink MU-MIMO as well.
+
+**OFDMA (Orthogonal Frequency-Division Multiple Access)** — introduced in Wi-Fi 6. Instead of one client occupying the entire channel for each transmission, OFDMA divides the channel into **Resource Units (RUs)** and assigns different subcarriers to different clients simultaneously. This dramatically improves efficiency in high-density environments where many clients have small, frequent traffic bursts.
+
+**BSS Coloring** — also introduced in Wi-Fi 6. Each Basic Service Set (BSS) is assigned a "color" (a number). When a device detects a transmission from a different BSS's color, it can treat it as interference and attempt to transmit over it rather than waiting, improving spatial reuse.
+
+---
+
+## Medium Access — CSMA/CA
+
+Wireless is a shared medium. Unlike a switched Ethernet network where each link is point-to-point and full-duplex, all devices sharing the same 802.11 channel share the same radio medium. Two devices transmitting simultaneously cause a collision that destroys both signals.
+
+Wireless uses **CSMA/CA (Carrier Sense Multiple Access with Collision Avoidance)** to manage this:
+
+1. **Listen before talk** — before transmitting, a device senses whether the channel is idle (no signal above a detection threshold). If the channel is busy, the device waits.
+2. **Random backoff** — after the channel becomes idle, the device does not transmit immediately. It waits a random backoff period (measured in time slots) to reduce the probability of two devices transmitting at exactly the same moment.
+3. **Transmit and wait for acknowledgement** — the transmitter sends the frame and waits for an explicit ACK from the receiver. If no ACK arrives, the frame is presumed lost and the backoff/retransmit cycle begins.
+
+**Collision detection** (the CD in Ethernet's CSMA/CD) is not possible in wireless because a transmitting device cannot simultaneously listen to what it is transmitting — its own signal drowns out everything else. This is why wireless uses collision *avoidance* rather than collision *detection*, and why acknowledgements are mandatory.
+
+The **hidden node problem** occurs when two clients can both reach the AP but cannot hear each other's transmissions. Client A and Client B both sense an idle medium (they cannot hear each other) and transmit simultaneously — the AP receives a collision even though neither client detected one. The **RTS/CTS (Request to Send / Clear to Send)** mechanism addresses this: before transmitting a large frame, a client sends a small RTS; the AP responds with CTS, which all devices in the AP's range can hear and use to update their backoff timers.
+
+---
+
+## BSS, SSID, and the 802.11 Architecture
+
+**Basic Service Set (BSS)** — the fundamental building block of a wireless network. A BSS consists of one access point and all the client stations associated with it. The AP is identified by its **BSSID** (its MAC address) and advertises a network name via the **SSID** (Service Set Identifier).
+
+**SSID** — the human-readable network name you see when scanning for Wi-Fi. The SSID is broadcast in **Beacon frames** transmitted by the AP approximately 10 times per second. Hidden SSIDs (where the AP does not include the SSID in beacons) provide minimal security and cause client scanning issues — they are not a meaningful security control.
+
+**Extended Service Set (ESS)** — multiple APs sharing the same SSID. From the client's perspective, roaming between APs in the same ESS appears seamless (at Layer 2). The APs are connected to the same wired infrastructure via Ethernet. How clients roam between APs, and how quickly, depends on the roaming protocol in use (802.11r fast BSS transition, 802.11k neighbor reports, 802.11v BSS transition management).
+
+**Infrastructure mode** — the standard mode where clients associate with an AP. Contrast with **ad-hoc mode** (IBSS — Independent BSS) where clients communicate directly without an AP, and **mesh networking** where APs use wireless backhaul links to each other.
+
+---
+
+## Channel Width and Throughput
+
+Wider channels carry more data per unit time — the relationship is roughly linear. A 40 MHz channel carries approximately twice the throughput of a 20 MHz channel at the same modulation scheme. An 80 MHz channel carries four times the throughput of 20 MHz.
+
+The tradeoff is that wider channels consume more spectrum, leaving fewer non-overlapping channels available. In a dense deployment where dozens of APs cover the same area, using 80 MHz channels on 5 GHz means only six non-overlapping options are available. Using 20 MHz channels gives 25 options. In high-density environments, narrower channels and more APs typically outperform wider channels on fewer APs.
+
+**Modulation and Coding Scheme (MCS)** determines how many bits are carried per symbol. Higher MCS indices use denser modulation (e.g., 1024-QAM in Wi-Fi 6 carries 10 bits per symbol versus 64-QAM's 6 bits) but require a better signal-to-noise ratio. The radio automatically selects the highest MCS the current SNR can support, which is why throughput degrades gracefully as signal quality drops rather than failing abruptly.
+
+---
+
+## Key Concepts
+
+### Co-channel interference versus adjacent-channel interference
+
+Co-channel interference (multiple APs on the same channel within range of each other) is managed by CSMA/CA — devices sense each other and take turns. Adjacent-channel interference (APs on partially overlapping channels) is far worse because CSMA/CA cannot detect it — the partial overlap is too weak to trigger carrier sense but strong enough to corrupt frames. Always use non-overlapping channels between APs within range of each other.
+
+### Signal strength is not throughput
+
+A client showing full Wi-Fi bars is not necessarily getting high throughput. Signal strength (RSSI) tells you how loud the signal is; signal quality (SNR — signal-to-noise ratio) tells you how clean it is. A strong signal in a noisy environment can have worse performance than a weaker signal in a clean environment. SNR, not RSSI alone, determines which MCS can be used and therefore what throughput is achievable.
+
+### Wireless is Layer 1 and Layer 2
+
+802.11 actually defines both the physical layer (the radio, modulation, and encoding) and the MAC layer (CSMA/CA, frame format, association, authentication). This is different from wired Ethernet where the physical layer (twisted pair, fiber) is completely separate from the MAC layer (Ethernet frames). A full treatment of 802.11 MAC framing is beyond the scope of this article.
+
+---
+
+## References
+
+- [IEEE 802.11 — Wireless LAN Standard](https://standards.ieee.org/ieee/802.11)
+- [Wi-Fi Alliance — Wi-Fi Generations](https://www.wi-fi.org)
+- [RFC 4857 — Mobile IPv4 Regional Registration](https://www.rfc-editor.org/rfc/rfc4857)

@@ -1,0 +1,151 @@
+---
+title: "Signaling & Encoding — Turning Bits into Signals"
+layer: "layer1"
+protocol: "encoding"
+summary: "How binary data is converted into electrical or optical signals on the wire, why raw binary is not transmitted directly, and how encoding schemes evolved from NRZ through PAM4."
+tags: ["layer1", "encoding", "nrz", "manchester", "4b5b", "pam4", "signaling", "physical"]
+order: 5
+draft: false
+---
+
+## Overview
+
+A bit is a logical concept — a zero or a one. The physical layer's job is to translate that logical concept into a physical phenomenon that can travel across a medium: a voltage level on copper, a pulse of light in fiber, a radio wave in air. This translation is called **line encoding**, and the choice of encoding scheme has profound effects on bandwidth efficiency, clock synchronization, DC balance, and the ability to detect transmission errors.
+
+The naive approach — high voltage for a one, low voltage for a zero — seems obvious but fails in practice for several reasons. Real networks use carefully designed encoding schemes that solve these problems while adding some overhead. Understanding why these schemes exist and how they work is the foundation for understanding how physical layer standards achieve their specified data rates, and why standards like 100GBASE-R use an encoding that seems to waste a significant fraction of available bandwidth on purpose.
+
+---
+
+## Why Raw NRZ Fails
+
+**NRZ (Non-Return to Zero)** is the simplest conceivable encoding: a high voltage represents a 1, a low voltage represents a 0, and the signal stays at that level for the entire bit duration without returning to zero between bits.
+
+NRZ has two fundamental problems:
+
+**Clock recovery failure.** The receiver needs to know exactly when each bit period begins and ends so it can sample the signal at the right moment. It derives this timing from transitions in the received signal — every time the signal changes between high and low, the receiver can resynchronize its internal clock. But with NRZ, a long run of identical bits (all zeros or all ones) produces no transitions at all. The receiver's clock drifts, and eventually it samples bits at the wrong moment, producing errors. A stream of 1,000 identical bits produces exactly zero clock recovery opportunities.
+
+**DC bias.** If a data stream has more ones than zeros (or vice versa), NRZ produces a non-zero average voltage on the line. Transformers — used in Ethernet line drivers for galvanic isolation — cannot pass DC. A long run of ones would saturate the transformer's core and cause signal distortion.
+
+Every practical encoding scheme solves at least one of these two problems.
+
+---
+
+## Manchester Encoding — 10BASE-T
+
+Manchester encoding solves both NRZ problems elegantly by encoding each bit as a transition rather than a level:
+
+- A bit **1** is encoded as a transition from high to low in the middle of the bit period
+- A bit **0** is encoded as a transition from low to high in the middle of the bit period
+
+Every bit contains exactly one transition at its midpoint. This means the receiver always has a transition to synchronize against — long runs of identical bits are no longer a problem. The constant number of high and low half-periods also means the average voltage is always zero, solving the DC bias issue.
+
+The cost is bandwidth efficiency: the signal must transition at least once per bit period, which requires twice the signal bandwidth to carry the same data rate. To transmit 10 Mbps of data, Manchester encoding requires a 20 MHz signal bandwidth. This is why 10BASE-T (which uses Manchester encoding) requires only Cat3 cable (rated to 16 MHz), even though the data rate might suggest otherwise — the required signal bandwidth is the full 20 MHz but the transitions are predictable and the cable has sufficient headroom.
+
+---
+
+## 4B/5B and NRZI — 100BASE-TX
+
+At 100 Mbps, Manchester encoding becomes impractical — it would require 200 MHz of signal bandwidth, demanding significantly better cable than was commonly available. 100BASE-TX uses a two-stage approach: **4B/5B encoding** followed by **NRZI (Non-Return to Zero Inverted)** signaling.
+
+**4B/5B** is a block code: every 4 bits of data are encoded as a 5-bit symbol. The 5-bit space has 32 possible values, but only 16 are needed to represent the 4-bit data values. The 16 chosen 5-bit codes are selected to have no more than three consecutive zeros or three consecutive ones — guaranteeing frequent transitions. The remaining 16 5-bit codes are either unused or reserved for control symbols (idle, start-of-stream delimiter, etc.).
+
+The overhead is 25%: transmitting 5 bits for every 4 bits of data. But the benefit is that the resulting code stream guarantees sufficient transitions for clock recovery without requiring the 2× bandwidth overhead of Manchester encoding.
+
+**NRZI (Non-Return to Zero Inverted)** then encodes the 4B/5B output: a **1** is represented by a transition (either direction), and a **0** is represented by no transition (the signal stays at its current level). The combination of 4B/5B (which eliminates long runs of 1s or 0s) and NRZI (which converts 1s to transitions) produces a signal with guaranteed transitions and zero DC bias.
+
+100BASE-TX requires the 4B/5B stream to run at 125 Mbps (100 Mbps × 5/4) but in a format that 5-level MLT-3 signaling can carry over Cat5e at 31.25 MHz — well within the cable's rated bandwidth.
+
+---
+
+## 8B/10B Encoding — Gigabit Ethernet and Storage
+
+**8B/10B** extends the block code approach: every 8 bits of data are encoded as a 10-bit symbol (a 25% overhead, same as 4B/5B). The 10-bit codes are chosen to ensure:
+
+- No more than five consecutive identical bits in any symbol
+- A **running disparity** constraint: the number of 1s and 0s transmitted remains balanced over time, ensuring DC balance
+
+The running disparity is tracked as either positive or negative. For each 8-bit input, there are typically two valid 10-bit output codes — one with more 1s and one with more 0s. The encoder chooses whichever code moves the running disparity toward balance.
+
+8B/10B is used in:
+- 1000BASE-X (Gigabit Ethernet over fiber) — runs at 1.25 Gbps line rate to carry 1 Gbps of data
+- Fibre Channel
+- USB 3.0
+- DisplayPort (earlier versions)
+
+The overhead is exactly 20% (2 bits per 8 bits of data). 8B/10B provides excellent clock recovery, DC balance, and the ability to detect single-bit errors through invalid code detection.
+
+---
+
+## 64B/66B — 10 Gigabit Ethernet
+
+At 10 Gbps, the 20% overhead of 8B/10B becomes a significant efficiency loss. **64B/66B encoding** reduces this overhead to approximately 3%: every 64 bits of data are encoded as a 66-bit block.
+
+The 66-bit block begins with a 2-bit synchronization header (either `01` for data blocks or `10` for control blocks) that guarantees at least one transition per block for clock recovery. The remaining 64 bits carry the actual payload.
+
+The synchronization header alone is not sufficient to guarantee frequent transitions in the data payload — long runs of identical bits are still possible. 10GBASE-R adds **scrambling** to address this: a linear feedback shift register (LFSR) XORs a pseudorandom bit sequence with the data before encoding. The scrambler output has a statistically random distribution of 1s and 0s, which with high probability contains sufficient transitions even without explicit encoding overhead. The receiver applies the same LFSR to descramble the received bits.
+
+64B/66B is used in:
+- 10GBASE-R (10G Ethernet over fiber or DAC)
+- 40GBASE-R (40G as four 10G lanes)
+- 100GBASE-R (100G as four 25G lanes)
+- 25GBASE-R
+
+---
+
+## PAM4 — 400G and Beyond
+
+At 100 Gbps and above, sending individual bits at the required rate pushes against the limits of what electronics can achieve at reasonable power and cost. **PAM4 (Pulse Amplitude Modulation, 4-level)** addresses this by encoding two bits per symbol rather than one bit per symbol.
+
+Instead of two voltage levels (high = 1, low = 0), PAM4 uses four voltage levels:
+
+| Level | Symbol | Two Bits Represented |
+|-------|--------|---------------------|
+| V3 (highest) | 11 | 11 |
+| V2 | 10 | 10 |
+| V1 | 01 | 01 |
+| V0 (lowest)  | 00 | 00 |
+
+By encoding two bits per symbol, PAM4 doubles the bits per second at the same symbol rate (baud rate). A 56 Gbaud PAM4 lane carries 112 Gbps of data. 400GbE uses eight such lanes to achieve 400 Gbps total.
+
+The tradeoff is noise immunity. With only two voltage levels (NRZ), the receiver has a large voltage margin to distinguish 0 from 1. With four voltage levels, the gaps between adjacent levels are much smaller — three times smaller for the same voltage swing. PAM4 links require excellent signal integrity, clean cabling (short runs or high-quality optical), and sophisticated DSP at the receiver to accurately distinguish adjacent levels in the presence of noise and intersymbol interference.
+
+PAM4 is used in:
+- 100GBASE-DR (single-lane 100G)
+- 200GBASE-R and 400GBASE-R standards
+- Modern DAC cables at 100G and 400G
+
+---
+
+## Summary of Encoding Schemes
+
+| Encoding   | Overhead | Standard     | Clock Recovery | DC Balance |
+|------------|----------|--------------|----------------|------------|
+| NRZ        | 0%       | (avoided)    | Poor           | Poor       |
+| Manchester | 100%     | 10BASE-T     | Excellent      | Excellent  |
+| 4B/5B+NRZI | 25%     | 100BASE-TX   | Good           | Good       |
+| 8B/10B     | 25%      | 1000BASE-X   | Excellent      | Excellent  |
+| 64B/66B    | ~3%      | 10GBASE-R+   | Via scrambler  | Via scrambler |
+| PAM4       | ~3% (with 64B/66B) | 100G/400G | Via DSP  | Via DSP    |
+
+---
+
+## Key Concepts
+
+### Encoding overhead is a deliberate tradeoff
+
+The bits added by encoding (the 25% overhead in 8B/10B, the 3% in 64B/66B) are not wasted — they purchase the ability to maintain clock synchronization and DC balance at the physical layer without requiring additional hardware. The "line rate" of a standard (1.25 Gbps for 1000BASE-X) is always higher than the "data rate" (1 Gbps) because of this overhead. When you see specifications listing both line rate and data rate, the difference is the encoding overhead.
+
+### Scrambling is probabilistic, not guaranteed
+
+64B/66B scrambling statistically ensures sufficient transitions in the data stream, but it provides no hard guarantee. An adversarially constructed data pattern could theoretically defeat the scrambler. In practice this does not happen with real traffic, and the 3% overhead is far preferable to the 25% overhead of 8B/10B at 10 Gbps and above.
+
+### Physical layer errors at the encoding level are invisible to IP
+
+When the physical layer detects an invalid code word (an encoding that cannot represent valid data), it replaces it with a code indicating an error — the Ethernet FCS then catches the resulting corrupt frame and the frame is dropped. The IP layer sees a lost packet, not an encoding error. The connection between "the switch is reporting high FCS error rates" and "there is a physical layer encoding problem" is one of the diagnostic skills that distinguishes experienced network engineers.
+
+---
+
+## References
+
+- [IEEE 802.3 — Ethernet Standard (physical coding sublayer clauses)](https://standards.ieee.org/ieee/802.3)
+- [RFC 4086 — Randomness Requirements for Security (LFSR scrambling background)](https://www.rfc-editor.org/rfc/rfc4086)

@@ -1,0 +1,200 @@
+---
+title: "Subnetting — Dividing IP Address Space"
+layer: "layer3"
+protocol: "subnetting"
+summary: "How subnetting divides a large IP block into smaller networks, the mathematics of network addresses and broadcast addresses, CIDR notation, VLSM, and the step-by-step process of designing a subnet scheme."
+tags: ["layer3", "subnetting", "cidr", "vlsm", "ipv4", "network-address", "broadcast", "prefix"]
+order: 3
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+An IP address by itself is just a 32-bit number. To be useful for routing, that number must be split into two parts: a **network portion** that identifies which network the address belongs to, and a **host portion** that identifies a specific device within that network. The dividing line between these two portions is defined by the **subnet mask**.
+
+Understanding subnetting is the core mathematical skill of IP networking. A network engineer who cannot subnet in their head is operating blind — unable to tell at a glance whether two IP addresses are on the same subnet, unable to design an address scheme that fits their requirements, and unable to read routing table output meaningfully.
+
+Subnetting is not complicated. It is arithmetic in base 2. Once you understand the underlying pattern, the same calculation applies to every subnet question you will ever encounter.
+
+---
+
+## The Subnet Mask
+
+A subnet mask is a 32-bit value written in the same dotted-decimal notation as an IP address. The mask consists of a contiguous block of **1 bits** followed by a contiguous block of **0 bits**. The 1 bits mark the network portion of the address; the 0 bits mark the host portion.
+
+```
+IP address:   192.168.10.45    = 11000000.10101000.00001010.00101101
+Subnet mask:  255.255.255.0    = 11111111.11111111.11111111.00000000
+
+Network bits: ─────────────────────────────────────────────
+              11000000.10101000.00001010.00000000  = 192.168.10.0  (network address)
+Host bits:                                         00101101       = .45 (host)
+```
+
+The **CIDR (Classless Inter-Domain Routing) notation** expresses the subnet mask as a prefix length — the count of consecutive 1 bits. `255.255.255.0` has 24 consecutive 1 bits, so in CIDR notation it is written `/24`. The address `192.168.10.45/24` fully identifies both the host address and the subnet mask in a single compact form.
+
+---
+
+## Key Addresses in a Subnet
+
+Every subnet has two special addresses that cannot be assigned to hosts:
+
+**Network Address**: All host bits set to 0. This identifies the subnet itself — it appears in routing tables to represent the entire subnet. You cannot assign this address to any device.
+
+**Broadcast Address**: All host bits set to 1. A packet sent to this address is delivered to every host on the subnet. You cannot assign this address to any device.
+
+For a `/24` subnet `192.168.10.0/24`:
+- Network address: `192.168.10.0` (host bits = 00000000)
+- Broadcast address: `192.168.10.255` (host bits = 11111111)
+- Usable host range: `192.168.10.1` through `192.168.10.254`
+- Number of usable hosts: 256 − 2 = **254**
+
+The formula for usable hosts in a subnet: **2^(host bits) − 2**
+
+The −2 accounts for the network address and broadcast address.
+
+---
+
+## Subnet Sizes — A Reference Table
+
+| CIDR Prefix | Subnet Mask | Host Bits | Total Addresses | Usable Hosts |
+|-------------|-------------|-----------|-----------------|--------------|
+| /24 | 255.255.255.0 | 8 | 256 | 254 |
+| /25 | 255.255.255.128 | 7 | 128 | 126 |
+| /26 | 255.255.255.192 | 6 | 64 | 62 |
+| /27 | 255.255.255.224 | 5 | 32 | 30 |
+| /28 | 255.255.255.240 | 4 | 16 | 14 |
+| /29 | 255.255.255.248 | 3 | 8 | 6 |
+| /30 | 255.255.255.252 | 2 | 4 | 2 |
+| /31 | 255.255.255.254 | 1 | 2 | 0 (or 2 per RFC 3021) |
+| /32 | 255.255.255.255 | 0 | 1 | 1 (host route) |
+
+The `/30` is ubiquitous for point-to-point links between routers — it provides exactly 2 usable host addresses, one for each router interface, with minimal address waste.
+
+The `/31` (RFC 3021) is a special case: if both devices agree to use it for point-to-point links, they skip the network/broadcast reservation and use both addresses, saving one address compared to `/30`. Modern equipment supports this.
+
+---
+
+## Finding the Network and Broadcast Address
+
+The fundamental operation of subnetting is finding the network address and broadcast address for any IP/prefix combination.
+
+**Network address** = IP address **AND** subnet mask (bitwise AND)
+**Broadcast address** = Network address **OR** inverted subnet mask
+
+For `10.20.15.200/21`:
+```
+Subnet mask /21:        11111111.11111111.11111000.00000000 = 255.255.248.0
+Inverted mask:          00000000.00000000.00000111.11111111
+
+IP in binary:           00001010.00010100.00001111.11001000
+
+Network address:        00001010.00010100.00001000.00000000 = 10.20.8.0
+Broadcast address:      00001010.00010100.00001111.11111111 = 10.20.15.255
+Usable host range:      10.20.8.1 — 10.20.15.254  (2046 hosts)
+```
+
+A mental shortcut for the third octet in this example: the mask for that octet is 248 (11111000), so subnets increment in steps of 8 (the value of the lowest 1-bit = 256 − 248 = 8). The host address 15 is in the block that starts at 8 (since 8 ≤ 15 < 16... but wait, the next block starts at 16). So the network starts at 10.20.8.0 and ends at 10.20.15.255.
+
+---
+
+## VLSM — Variable Length Subnet Masking
+
+Early IP routing protocols (RIP v1) required all subnets of a network to be the same size — all subnets of the `10.0.0.0/8` network had to use the same prefix length. This was wasteful: a point-to-point link between two routers and a LAN with 200 workstations could not coexist in the same address space without using the same (large) subnet size.
+
+**VLSM (Variable Length Subnet Masking)** removes this restriction. In a VLSM design, subnets within the same larger address block can have different prefix lengths, each sized appropriately for the number of hosts it needs to support.
+
+Example: You have `192.168.1.0/24` to allocate to a network with:
+- 1 LAN with 100 hosts
+- 2 LANs with 25 hosts each
+- 3 point-to-point router links
+
+VLSM allocation:
+
+| Subnet | Prefix | Size | Purpose |
+|--------|--------|------|---------|
+| 192.168.1.0/25 | /25 | 126 hosts | 100-host LAN |
+| 192.168.1.128/27 | /27 | 30 hosts | 25-host LAN #1 |
+| 192.168.1.160/27 | /27 | 30 hosts | 25-host LAN #2 |
+| 192.168.1.192/30 | /30 | 2 hosts | Router link #1 |
+| 192.168.1.196/30 | /30 | 2 hosts | Router link #2 |
+| 192.168.1.200/30 | /30 | 2 hosts | Router link #3 |
+
+Total used: 128 + 32 + 32 + 4 + 4 + 4 = 204 addresses out of 256 available.
+
+VLSM is supported by all modern routing protocols (OSPF, EIGRP, BGP, RIP v2). It is standard practice in any well-designed network.
+
+---
+
+## Subnetting a Block — Dividing a Larger Network
+
+When you need to divide a given network block into a specific number of subnets, you **borrow host bits** and make them network bits.
+
+Each bit borrowed from the host portion doubles the number of subnets. Borrowing 1 bit creates 2 subnets; borrowing 2 bits creates 4 subnets; borrowing 3 bits creates 8 subnets. The formula: borrowing N bits creates **2^N subnets**.
+
+But each bit borrowed also halves the number of hosts per subnet.
+
+Example: Divide `172.16.0.0/16` into 8 subnets of equal size.
+
+- 8 subnets requires borrowing 3 bits (2^3 = 8)
+- Original prefix: /16
+- New prefix: /16 + 3 = /19
+- Each subnet has 2^13 − 2 = 8190 usable hosts
+
+The 8 subnets:
+```
+172.16.0.0/19     (172.16.0.0   – 172.16.7.255)
+172.16.8.0/19     (172.16.8.0   – 172.16.15.255)
+172.16.16.0/19    (172.16.16.0  – 172.16.23.255)
+172.16.24.0/19    (172.16.24.0  – 172.16.31.255)
+172.16.32.0/19    (172.16.32.0  – 172.16.39.255)
+172.16.40.0/19    (172.16.40.0  – 172.16.47.255)
+172.16.48.0/19    (172.16.48.0  – 172.16.55.255)
+172.16.56.0/19    (172.16.56.0  – 172.16.63.255)
+```
+
+The subnets are always contiguous and non-overlapping. The subnet increment here is 8 (in the third octet) — each subnet starts 8 higher than the previous one, which corresponds to 2^13 = 8192 addresses per /19 subnet.
+
+---
+
+## Supernetting — Route Summarization
+
+Subnetting divides a block. **Supernetting (route summarization)** is the inverse: combining multiple contiguous subnets into a single larger prefix for advertisement in a routing table.
+
+If you have four subnets:
+```
+192.168.4.0/24
+192.168.5.0/24
+192.168.6.0/24
+192.168.7.0/24
+```
+
+These share the same first 22 bits (check: 4 = 00000100, 5 = 00000101, 6 = 00000110, 7 = 00000111 — the first 22 bits are all 00000001xx). So they can be summarized as `192.168.4.0/22`, which covers all 1024 addresses from 192.168.4.0 through 192.168.7.255.
+
+Route summarization reduces the size of routing tables, accelerates convergence (fewer routes to process), and hides internal topology from external routing. It is a fundamental technique in hierarchical network design.
+
+---
+
+## Key Concepts
+
+### The subnet mask is applied with bitwise AND
+
+The fundamental operation is always: IP AND mask = network address. Every routing decision, every "are these hosts on the same subnet?" question, comes down to this single operation applied to two IP addresses and a mask.
+
+### Subnets must be aligned
+
+A subnet cannot start at an arbitrary address. A /25 subnet (128 addresses) must start at a multiple of 128: 0, 128. A /26 (64 addresses) must start at a multiple of 64: 0, 64, 128, 192. A /27 (32 addresses) must start at a multiple of 32. Misaligned subnets are invalid — they would cause the network and host bits to not correspond to a clean binary boundary.
+
+### The routing table uses longest-prefix match
+
+When multiple routes in a routing table could match a destination, the router chooses the route with the longest (most specific) prefix. A /28 route beats a /24 route beats a /0 default route. This is what makes subnetting and summarization work together: specific routes for specific subnets, with summarized routes as fallback.
+
+---
+
+## References
+
+- [RFC 1519 — Classless Inter-Domain Routing (CIDR)](https://www.rfc-editor.org/rfc/rfc1519)
+- [RFC 1918 — Address Allocation for Private Internets](https://www.rfc-editor.org/rfc/rfc1918)
+- [RFC 3021 — Using 31-Bit Prefixes on IPv4 Point-to-Point Links](https://www.rfc-editor.org/rfc/rfc3021)

@@ -1,0 +1,206 @@
+---
+title: "Ports & Sockets — Multiplexing Transport Connections"
+layer: "layer4"
+protocol: "ports-sockets"
+summary: "How port numbers identify services and distinguish connections on the same IP address, what a socket is and how the 5-tuple uniquely identifies every TCP connection, and the difference between well-known, registered, and ephemeral port ranges."
+tags: ["layer4", "ports", "sockets", "ephemeral", "well-known-ports", "5-tuple", "multiplexing", "rfc6335"]
+order: 4
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+An IP address identifies a device on the network. But a device runs many applications simultaneously — a web browser, an email client, a game, a background software updater. When a response packet arrives from the internet, the operating system needs to know which application should receive it.
+
+**Port numbers** solve this problem. A port is a 16-bit number (0–65535) that identifies a specific service or application endpoint on a host. Every TCP and UDP segment carries a source port and a destination port in its header. The destination port tells the OS which application is listening; the source port tells the remote host where to send replies.
+
+Together with IP addresses, port numbers form the **socket** — the complete addressing tuple that uniquely identifies an endpoint of a network connection. Understanding ports and sockets is the foundation for understanding how an operating system multiplexes many simultaneous network connections over a single network interface.
+
+---
+
+## Port Numbers in the Transport Header
+
+<PacketDiagram
+  label="TCP/UDP — Source and Destination Ports"
+  fields={[
+    { name: "Source Port", bytes: 2, value: "e.g. 52341", highlight: true },
+    { name: "Destination Port", bytes: 2, value: "e.g. 443", highlight: true },
+    { name: "... (rest of TCP/UDP header)", bytes: 4 },
+  ]}
+/>
+
+Port numbers are a 16-bit field in both TCP and UDP headers. Valid range: **0–65535**. Both the source and destination port appear in every TCP segment and UDP datagram.
+
+The destination port is the address of the service being contacted. When you connect to a web server, your browser sets the destination port to 443 (HTTPS) or 80 (HTTP). The server receives the packet, sees port 443, and hands it to the HTTPS daemon.
+
+The source port is the address that responses should be sent back to. The OS assigns an ephemeral source port from a pool of available ports when the application opens a connection.
+
+---
+
+## Port Number Ranges
+
+IANA (Internet Assigned Numbers Authority) divides the port number space into three ranges, defined in RFC 6335:
+
+### Well-Known Ports: 0–1023
+
+Reserved for standard, globally recognized services. Assigning a service to a well-known port requires IANA registration. These ports are protected by the operating system — only processes running with elevated privileges (root on Unix, Administrator on Windows) can bind a listening socket to a well-known port.
+
+| Port | Protocol | Service |
+|------|----------|---------|
+| 20 | TCP | FTP data |
+| 21 | TCP | FTP control |
+| 22 | TCP | SSH |
+| 23 | TCP | Telnet |
+| 25 | TCP | SMTP |
+| 53 | TCP/UDP | DNS |
+| 67 | UDP | DHCP Server |
+| 68 | UDP | DHCP Client |
+| 80 | TCP | HTTP |
+| 110 | TCP | POP3 |
+| 143 | TCP | IMAP |
+| 161 | UDP | SNMP |
+| 443 | TCP | HTTPS |
+| 514 | UDP | Syslog |
+| 993 | TCP | IMAPS |
+| 995 | TCP | POP3S |
+
+### Registered Ports: 1024–49151
+
+Available for registration by applications that are not standard internet services but still need a well-known port. Many common applications use registered ports. These ports do not require elevated privileges to bind on most operating systems.
+
+| Port | Protocol | Service |
+|------|----------|---------|
+| 1433 | TCP | Microsoft SQL Server |
+| 1521 | TCP | Oracle Database |
+| 3306 | TCP | MySQL |
+| 3389 | TCP | RDP (Remote Desktop) |
+| 5432 | TCP | PostgreSQL |
+| 5900 | TCP | VNC |
+| 6379 | TCP | Redis |
+| 8080 | TCP | HTTP alternate |
+| 8443 | TCP | HTTPS alternate |
+| 27017 | TCP | MongoDB |
+
+### Ephemeral Ports (Dynamic / Private): 49152–65535
+
+Used as source ports by client applications. When an application opens a TCP connection or sends a UDP datagram, the OS assigns a source port from the ephemeral range. This port is temporary — it is released when the connection closes. The specific range varies by OS:
+
+| OS | Ephemeral Port Range |
+|----|---------------------|
+| Linux (IANA recommendation) | 49152–65535 |
+| Linux (actual default) | 32768–60999 |
+| Windows | 49152–65535 |
+| macOS | 49152–65535 |
+| Many older Unix systems | 1024–5000 |
+
+The OS selects ephemeral ports pseudo-randomly within the range to reduce the predictability of port numbers (relevant for TCP sequence number security and some NAT traversal techniques).
+
+---
+
+## The Socket
+
+A **socket** is an operating system abstraction representing one endpoint of a network connection. A socket is identified by the combination of:
+
+- **Protocol**: TCP or UDP
+- **Local IP address**: The device's IP address on the interface
+- **Local port**: The service port (server) or ephemeral port (client)
+
+This 3-tuple is a **socket address**. On its own, it identifies one endpoint. A connection requires two endpoints.
+
+### The 5-Tuple
+
+A TCP connection is uniquely identified by the **5-tuple**:
+
+```
+(Protocol, Source IP, Source Port, Destination IP, Destination Port)
+```
+
+For example:
+```
+(TCP, 192.168.1.50, 52341, 93.184.216.34, 443)
+```
+
+This 5-tuple is globally unique — no two TCP connections that are simultaneously active on the internet can have the same 5-tuple (because the source IP + source port combination on a given device is unique). The OS uses the 5-tuple to demultiplex incoming packets to the correct socket.
+
+**Why a server can handle thousands of connections on port 443**: The destination port of every incoming HTTPS connection is 443 — all the same. But the 5-tuple is unique for each connection because the source IP + source port varies per client. The server uses the complete 5-tuple, not just the destination port, to identify each connection.
+
+```
+(TCP, 203.0.113.1,  48291, 93.184.216.34, 443)  → Connection from client A
+(TCP, 203.0.113.2,  12045, 93.184.216.34, 443)  → Connection from client B
+(TCP, 203.0.113.1,  48292, 93.184.216.34, 443)  → Second connection from client A
+```
+
+---
+
+## Socket States (TCP)
+
+A TCP socket transitions through a state machine as a connection is established, used, and torn down. The states match the TCP protocol state machine:
+
+| State | Description |
+|-------|-------------|
+| LISTEN | Server socket waiting for incoming connections |
+| SYN_SENT | Client sent SYN, waiting for SYN-ACK |
+| SYN_RECEIVED | Server received SYN, sent SYN-ACK |
+| ESTABLISHED | Connection active, data can flow |
+| FIN_WAIT_1 | Sent FIN, waiting for ACK |
+| FIN_WAIT_2 | FIN ACKed, waiting for peer's FIN |
+| CLOSE_WAIT | Received peer's FIN, waiting for application to close |
+| CLOSING | Both sides sent FIN simultaneously |
+| LAST_ACK | Sent FIN, waiting for final ACK |
+| TIME_WAIT | Connection closed, holding port for 2× MSL |
+| CLOSED | No connection |
+
+**TIME_WAIT** deserves special attention. After a TCP connection closes, the socket that initiated the close (typically the client) stays in TIME_WAIT for **2 × MSL (Maximum Segment Lifetime)**, typically 60–120 seconds. During TIME_WAIT, the 5-tuple cannot be reused. This prevents delayed packets from a previous connection being misinterpreted as packets belonging to a new connection with the same 5-tuple.
+
+On high-volume servers that close many connections per second (HTTP/1.1 servers, load balancers), TIME_WAIT sockets can accumulate and exhaust the ephemeral port range, causing new connections to fail. Solutions include:
+- `SO_REUSEADDR` socket option (allows reuse of TIME_WAIT sockets in some conditions)
+- `SO_REUSEPORT` (allows multiple sockets to bind to the same port, distributing load)
+- Tuning `net.ipv4.tcp_tw_reuse` on Linux
+- Using HTTP/2 or HTTP/3 (persistent connections, far fewer connection teardowns)
+
+---
+
+## UDP Sockets
+
+UDP sockets are simpler than TCP sockets — there is no connection, so there is no state machine. A UDP socket is either:
+
+- **Unconnected**: Can send to and receive from any address. This is the typical server mode.
+- **Connected**: Associated with a specific remote address and port. Sending on a connected UDP socket automatically uses the configured remote address. Receiving only accepts datagrams from that remote address.
+
+Note that "connected UDP socket" does not mean a TCP-style connection exists — it only means the socket has a default remote address configured. UDP remains connectionless at the protocol level.
+
+UDP demultiplexing uses only the **destination port** (and destination IP address for multicast). Datagrams arriving on port 53 (DNS) go to the DNS server socket regardless of which client sent them. This is different from TCP, which uses the full 5-tuple for demultiplexing.
+
+---
+
+## Port Scanning and Security
+
+The standard technique for discovering which services a host is running is **port scanning** — sending packets to a range of ports and observing the responses:
+
+- **TCP SYN scan**: Send SYN to each port. SYN-ACK means the port is open (service listening); RST means the port is closed; no response (firewall drop) means filtered.
+- **UDP scan**: Send UDP datagrams to each port. ICMP Port Unreachable means the port is closed; no response means the port may be open (or filtered).
+
+From a security perspective: ports that are open but not needed are attack surface. The principle of least exposure dictates that a host should only have the ports open that are required for its function. Firewalls enforce this by allowing only expected port numbers and dropping everything else.
+
+**Security note**: Port numbers are not authentication. A service on port 443 is conventionally HTTPS, but nothing prevents an attacker from running a different service on port 443. Port-based firewall rules restrict access to services but do not verify what is running on those ports.
+
+---
+
+## Key Concepts
+
+### The 5-tuple is the connection identifier
+
+The operating system maintains a connection table indexed by 5-tuples. Every incoming packet's 5-tuple is looked up in this table to find the socket that should receive it. When you check `netstat -an` or `ss -tuln`, you are reading this connection table.
+
+### Well-known ports require privilege for a reason
+
+Only privileged processes can bind to ports 0–1023. This prevents a non-privileged user from starting a rogue service on port 80 or port 443 on a multi-user system. If you could bind to port 443 without privilege, any user on the system could intercept HTTPS traffic by starting their service before the legitimate web server.
+
+---
+
+## References
+
+- [RFC 6335 — Internet Assigned Numbers Authority (IANA) Procedures for the Management of the Service Name and Transport Protocol Port Number Registry](https://www.rfc-editor.org/rfc/rfc6335)
+- [IANA Service Name and Transport Protocol Port Number Registry](https://www.iana.org/assignments/service-names-port-numbers)

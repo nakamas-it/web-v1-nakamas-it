@@ -1,0 +1,201 @@
+---
+title: "NAT & PAT — Translating Between Address Spaces"
+layer: "layer3"
+protocol: "nat-pat"
+summary: "How Network Address Translation maps private IP addresses to public ones, how Port Address Translation multiplexes thousands of connections through a single public IP, why NAT exists, and what problems it creates for modern networking."
+tags: ["layer3", "nat", "pat", "masquerade", "private-ip", "rfc1918", "translation", "rfc3022"]
+order: 10
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+The IPv4 address space is 32 bits — about 4.3 billion addresses. In the early days of the internet, this seemed more than adequate. By the mid-1990s it was clear it would not be: the explosive growth of personal computing and internet access was consuming the address space faster than anyone had predicted.
+
+The long-term solution is IPv6, with its 128-bit address space. But IPv6 deployment has taken decades, and the world needed an interim solution immediately. That solution was **NAT (Network Address Translation)** — a technique that allows an entire private network to share a small number (sometimes just one) of public IP addresses.
+
+NAT works by maintaining a mapping table that translates between private addresses used inside the network and public addresses used on the internet. When a device with private address `192.168.1.50` sends a packet to the internet, the NAT device replaces the private source address with a public IP address before forwarding the packet. When the internet sends a response back to the public address, the NAT device looks up the mapping and forwards the packet to `192.168.1.50`.
+
+NAT is now so ubiquitous that most internet users have never had a globally routable IP address. Every home router performs NAT. Most corporate networks perform NAT. Understanding NAT is essential for troubleshooting connectivity problems, designing services, and understanding the implications for protocols that embed IP addresses in their payloads.
+
+---
+
+## Why Private Address Space Exists
+
+RFC 1918 defines three IP address ranges as **private** — they are not globally routable and are available for anyone to use inside their network without registration:
+
+| Range | CIDR Block | Common Use |
+|-------|-----------|------------|
+| 10.0.0.0 – 10.255.255.255 | 10.0.0.0/8 | Large enterprise networks |
+| 172.16.0.0 – 172.31.255.255 | 172.16.0.0/12 | Medium networks, cloud VPCs |
+| 192.168.0.0 – 192.168.255.255 | 192.168.0.0/16 | Home networks, small offices |
+
+Private addresses solve the scarcity problem locally — a company can use 10.0.0.0/8 internally, giving it up to 16 million addresses, without consuming any globally routable IP space. The trade-off is that private addresses are not reachable from the internet and must be translated at the network boundary.
+
+---
+
+## NAT Types
+
+### Static NAT
+
+A permanent one-to-one mapping between a private IP address and a public IP address. Used to make a server with a private IP address accessible from the internet at a specific public IP address.
+
+```
+Private: 192.168.1.100  ←→  Public: 203.0.113.10  (permanent)
+```
+
+The mapping is always active. Any packet sent to `203.0.113.10` from the internet is translated to `192.168.1.100` and delivered to the internal server. Any packet from `192.168.1.100` going out is translated to `203.0.113.10`.
+
+Static NAT requires one public IP address per server — it does not conserve address space.
+
+### Dynamic NAT
+
+A pool of public IP addresses is available. Private addresses are translated to available addresses in the pool on demand. The mapping exists only for the duration of the connection.
+
+If all public addresses in the pool are in use, new connections are refused — dynamic NAT can exhaust the pool under load. Dynamic NAT is relatively uncommon in practice.
+
+### PAT — Port Address Translation (NAT Overload)
+
+**PAT** (also called NAT Overload, NAPT, or Masquerade on Linux systems) is overwhelmingly the most common form of NAT. PAT allows thousands of private addresses to share a **single public IP address** by using the TCP/UDP port number to distinguish connections.
+
+---
+
+## How PAT Works
+
+When a device at `192.168.1.50` port `12345` initiates a connection to `93.184.216.34` port `80`:
+
+1. The packet arrives at the NAT/PAT device with:
+   - Source IP: `192.168.1.50`, Source Port: `12345`
+   - Destination IP: `93.184.216.34`, Destination Port: `80`
+
+2. The PAT device creates a translation table entry and rewrites the source:
+   - Source IP: `203.0.113.1` (the public IP), Source Port: `54321` (randomly assigned)
+   - Destination IP: `93.184.216.34`, Destination Port: `80`
+
+3. The packet is sent to the internet. The server at `93.184.216.34` sees the request coming from `203.0.113.1:54321`.
+
+4. The server responds to `203.0.113.1:54321`.
+
+5. The PAT device receives the response, looks up the translation table, and reverses the translation:
+   - Destination IP: `192.168.1.50`, Destination Port: `12345`
+
+6. The packet is delivered to the original device.
+
+<FlowDiagram
+  parties={["192.168.1.50", "NAT Router (203.0.113.1)"]}
+  steps={[
+    { from: "192.168.1.50", to: "NAT Router (203.0.113.1)", label: "Outbound Packet", sub: "Src: 192.168.1.50:12345 → Dst: 93.184.216.34:80" },
+    { from: "NAT Router (203.0.113.1)", to: "192.168.1.50", label: "NAT Table Entry Created", sub: "192.168.1.50:12345 ↔ 203.0.113.1:54321" },
+  ]}
+/>
+
+The NAT translation table is the core of PAT. It maps:
+- **Inside local address:port** (private side): `192.168.1.50:12345`
+- **Inside global address:port** (public side): `203.0.113.1:54321`
+- **Outside global address:port** (destination): `93.184.216.34:80`
+
+As long as this entry exists, responses from the server are correctly delivered to the originating host.
+
+---
+
+## NAT Translation Table Lifecycle
+
+Translation table entries are created when an **inside host initiates** a connection outbound. Entries are removed when:
+- The TCP connection closes (FIN/RST exchange detected)
+- A UDP or ICMP translation timer expires (UDP has no graceful close signal)
+- An ICMP translation timer expires (default ~60 seconds)
+
+For TCP, NAT tracks the connection state — it knows when a connection completes the three-way handshake and when it closes. UDP and ICMP are stateless, so NAT uses inactivity timers.
+
+| Protocol | Default NAT Timeout |
+|----------|---------------------|
+| TCP established | 86400 seconds (24 hours) |
+| TCP half-open | 30–120 seconds |
+| UDP | 30–300 seconds |
+| ICMP | 60 seconds |
+
+High-volume environments (data centers, large NAT gateways) must carefully tune these timers — too long and the table fills with dead connections; too short and active connections are unexpectedly terminated.
+
+---
+
+## NAT and Inbound Connections
+
+NAT creates a fundamental **asymmetry**: inside hosts can initiate connections to the internet because the NAT device can create translation table entries on demand. But internet hosts cannot initiate connections to inside hosts because there is no translation table entry — the NAT device does not know which inside host should receive an unsolicited inbound connection to the public IP address.
+
+This is why:
+- Running a server behind NAT requires **port forwarding** (a static NAT entry mapping a specific public port to a specific inside host and port)
+- Peer-to-peer applications (VoIP, gaming, file sharing) struggle with NAT because they require bidirectional connection initiation
+- Protocols like FTP (which embed IP addresses in their data payload) break behind NAT and require **Application Layer Gateways (ALGs)** to rewrite the embedded addresses
+
+### Port Forwarding
+
+A static translation that maps a specific public port to a specific inside host:
+
+```
+203.0.113.1:443 → 192.168.1.100:443 (HTTPS server)
+203.0.113.1:22  → 192.168.1.50:22   (SSH access)
+```
+
+Any connection from the internet to `203.0.113.1:443` is always forwarded to `192.168.1.100:443`. This is the mechanism home users use to make servers accessible from outside.
+
+---
+
+## NAT Traversal — Working Around NAT
+
+Applications that need inbound connectivity or peer-to-peer connectivity must work around NAT. Several techniques exist:
+
+**STUN (Session Traversal Utilities for NAT)**: A server outside the NAT helps two peers discover their translated public addresses and attempt a direct connection. Works when both peers can reach each other's translated endpoints.
+
+**TURN (Traversal Using Relays around NAT)**: If direct connection fails (both peers behind symmetric NAT), a relay server forwards the traffic between them. Always works but adds latency.
+
+**ICE (Interactive Connectivity Establishment)**: Combines STUN and TURN, trying the best available connection method. Used extensively in WebRTC (the technology powering browser-based video calls).
+
+**UPnP (Universal Plug and Play) / NAT-PMP / PCP**: Protocols that allow inside applications to automatically create port forwarding rules on the NAT device. Used by gaming consoles, BitTorrent clients, and media servers.
+
+---
+
+## Problems NAT Creates
+
+**Breaks end-to-end connectivity**: The original internet design assumed that every device has a globally unique, routable address. NAT violates this assumption. Applications that embed IP addresses (FTP, SIP, some VPN protocols) break.
+
+**Complicates troubleshooting**: When debugging a connectivity problem, the translated addresses visible outside the NAT device are different from the real addresses inside. Packet captures from inside and outside show different source addresses.
+
+**State table exhaustion**: PAT devices maintain translation state in memory. A high volume of connections — or a port scan, which opens many short-lived connections — can exhaust the translation table, causing new connections to fail.
+
+**TCP and UDP limitations**: PAT uses port numbers to distinguish connections. The available port range is 0–65535 (about 64,000 usable ports). A single public IP address cannot support more than ~64,000 simultaneous connections, and in practice far fewer due to source port conflicts and reserved ports.
+
+**Performance overhead**: Every packet must be examined, the translation table must be looked up, header fields must be rewritten, and checksums must be recalculated. On dedicated hardware this is fast, but on software routers it adds CPU overhead per packet.
+
+---
+
+## CGN — Carrier-Grade NAT
+
+As public IPv4 addresses became scarce, ISPs began deploying **CGN (Carrier-Grade NAT)** — NAT performed by the ISP itself, before the traffic reaches the customer's router. This puts customers behind two layers of NAT: the ISP's CGN and the customer's home router. This is called **double NAT** or **CG-NAT**.
+
+CGN allows ISPs to share a small pool of public IPv4 addresses among thousands of customers, dramatically extending the life of the IPv4 address space. The downside is that CGN makes port forwarding impossible (customers cannot configure static entries on the ISP's NAT device) and creates challenges for peer-to-peer applications.
+
+CGN uses a specific address range reserved by RFC 6598: `100.64.0.0/10` — addresses that are neither globally routable (unlike public addresses) nor RFC 1918 private (they are controlled by the ISP). This range is called **Shared Address Space**.
+
+---
+
+## Key Concepts
+
+### NAT is a workaround, not a security mechanism
+
+NAT hides inside hosts from direct inbound connections, which is sometimes cited as a security benefit. This is incidental — NAT's purpose is address conservation, not security. A firewall with a stateful default-deny policy provides real security. NAT alone is not a firewall and should not be relied upon for security.
+
+### IPv6 makes NAT unnecessary (for address conservation)
+
+IPv6's 128-bit address space is so large that every device on earth can have a globally unique routable address. There is no address scarcity to motivate NAT. In a pure IPv6 world, every device has a real address, end-to-end connectivity is restored, and the complexity of NAT traversal disappears.
+
+---
+
+## References
+
+- [RFC 1918 — Address Allocation for Private Internets](https://www.rfc-editor.org/rfc/rfc1918)
+- [RFC 3022 — Traditional IP Network Address Translator (Traditional NAT)](https://www.rfc-editor.org/rfc/rfc3022)
+- [RFC 6598 — IANA-Reserved IPv4 Prefix for Shared Address Space](https://www.rfc-editor.org/rfc/rfc6598)
+- [RFC 5389 — Session Traversal Utilities for NAT (STUN)](https://www.rfc-editor.org/rfc/rfc5389)

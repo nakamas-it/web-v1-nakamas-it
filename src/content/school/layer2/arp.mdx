@@ -1,0 +1,182 @@
+---
+title: "ARP — Resolving IP Addresses to MAC Addresses"
+layer: "layer2"
+protocol: "arp"
+summary: "How a device discovers the MAC address of a target IP on the same subnet — the ARP request, the ARP reply, the cache, and the security problems that come with it."
+tags: ["layer2", "arp", "mac", "ipv4", "broadcast", "rfc826"]
+order: 3
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+IP packets carry source and destination IP addresses. Ethernet frames carry source and destination MAC addresses. To send an IP packet to a host on the same subnet, a device must know both the destination IP address (to put in the IP header) and the destination MAC address (to put in the Ethernet frame header). If it knows the IP address but not the MAC address — which is the common case when communicating with a host for the first time — it has no way to address the Ethernet frame.
+
+**ARP (Address Resolution Protocol)** bridges this gap. When a device needs to send traffic to an IP address on the same local network and does not know the corresponding MAC address, it broadcasts an ARP Request: "Who has IP address X? Tell me your MAC." Every device on the segment receives the broadcast. The device with that IP address sends back an ARP Reply: "I have IP address X, and my MAC is Y." Now both devices know each other's MAC addresses and can communicate directly.
+
+ARP is defined in [RFC 826](https://www.rfc-editor.org/rfc/rfc826), published in 1982. It is remarkably simple — barely more than the question and the answer — and that simplicity is both its strength and the root of its significant security vulnerabilities.
+
+---
+
+## When ARP Is Needed
+
+Before initiating any IP communication, the sending device compares the destination IP address to its own subnet:
+
+- **Same subnet**: the destination is directly reachable on the local segment. The device sends an ARP Request for the destination's MAC address, then sends the IP packet directly to that MAC address.
+- **Different subnet**: the destination is not on the local segment. The device sends the IP packet to its default gateway's MAC address (looking up the gateway's MAC via ARP if needed). The router handles forwarding from there.
+
+This is why the default gateway must be on the same subnet as the device: the device must be able to reach the gateway directly via Layer 2, which requires knowing the gateway's MAC address via ARP.
+
+---
+
+## The ARP Packet Format
+
+ARP is not carried inside an IP packet — it is a standalone payload in an Ethernet frame, identified by EtherType `0x0806`.
+
+<PacketDiagram
+  label="ARP Packet — 28 bytes for IPv4 over Ethernet"
+  fields={[
+    { name: "HW Type", bytes: 2, value: "0x0001" },
+    { name: "Proto Type", bytes: 2, value: "0x0800" },
+    { name: "HW Len", bytes: 1, value: "6" },
+    { name: "Proto Len", bytes: 1, value: "4" },
+    { name: "Operation", bytes: 2, value: "1=Req 2=Rep" },
+    { name: "Sender MAC", bytes: 6 },
+    { name: "Sender IP", bytes: 4 },
+    { name: "Target MAC", bytes: 6 },
+    { name: "Target IP", bytes: 4 },
+  ]}
+/>
+
+| Field           | Value / Notes                                                          |
+|-----------------|------------------------------------------------------------------------|
+| Hardware Type   | `1` = Ethernet                                                         |
+| Protocol Type   | `0x0800` = IPv4                                                        |
+| Hardware Length | `6` (bytes in a MAC address)                                           |
+| Protocol Length | `4` (bytes in an IPv4 address)                                         |
+| Operation       | `1` = Request, `2` = Reply                                             |
+| Sender MAC      | MAC address of the sender                                              |
+| Sender IP       | IP address of the sender                                               |
+| Target MAC      | `00:00:00:00:00:00` in a Request (unknown); filled in by the reply     |
+| Target IP       | The IP address being queried (Request) or confirmed (Reply)            |
+
+ARP's generality is visible in the hardware type and protocol type fields — the protocol was designed to work with any combination of hardware addressing and network protocol, not just Ethernet and IPv4. In practice, essentially all ARP traffic is Ethernet + IPv4.
+
+---
+
+## The Request and Reply Exchange
+
+<FlowDiagram
+  parties={["Requester", "Target"]}
+  steps={[
+    { from: "Requester", to: "Target", label: "ARP Request", sub: "broadcast · who has 192.168.1.1?" },
+    { from: "Target", to: "Requester", label: "ARP Reply", sub: "unicast · 192.168.1.1 is at AA:BB:CC:DD:EE:FF" },
+  ]}
+/>
+
+### ARP Request
+
+The requester broadcasts the ARP Request to `FF:FF:FF:FF:FF:FF`. Every device on the segment receives it. The request contains:
+- Sender MAC and IP (the requester's own addresses)
+- Target MAC: `00:00:00:00:00:00` (unknown)
+- Target IP: the address being queried (e.g., `192.168.1.1`)
+
+Every device checks: "Is the Target IP my IP address?" If no, the device silently discards the ARP Request. If yes, the device sends an ARP Reply.
+
+### ARP Reply
+
+The target device sends the ARP Reply as a **unicast** directly to the requester's MAC address (which it learned from the Sender MAC field of the Request). The reply contains:
+- Sender MAC and IP: the target's own addresses (this is the answer the requester was looking for)
+- Target MAC and IP: the requester's addresses (echoed from the request)
+
+After receiving the reply, the requester stores the MAC-to-IP mapping in its **ARP cache** and can now send IP traffic directly to that MAC address.
+
+---
+
+## The ARP Cache
+
+ARP requests are expensive in the sense that they are broadcasts — every device on the segment must receive and process them. Repeating an ARP Request for every packet sent to the same destination would flood the network with unnecessary broadcasts.
+
+The **ARP cache** (also called the ARP table) stores recently resolved MAC-to-IP mappings. Once a mapping is learned, subsequent packets to the same IP address reuse the cached MAC address without broadcasting.
+
+```
+192.168.1.1    AA:BB:CC:DD:EE:FF    dynamic    180s
+192.168.1.50   11:22:33:44:55:66    dynamic    240s
+192.168.1.254  00:0C:29:AB:CD:EF   static     permanent
+```
+
+ARP cache entries have a **TTL** — they age out after a period of inactivity, typically 5–20 minutes depending on the operating system. When an entry expires, the next packet to that IP triggers a new ARP Request.
+
+**Static ARP entries** can be manually configured. They never age out. Static ARP entries are used for critical infrastructure (default gateway, NTP server) in environments where ARP spoofing is a concern, though managing static entries at scale is impractical.
+
+---
+
+## Gratuitous ARP
+
+A **Gratuitous ARP** is an ARP Request or Reply that a device sends about its own IP address — not to resolve someone else's address, but to announce its own presence or claim an address.
+
+A device sends a Gratuitous ARP when:
+- It first connects to the network, to announce "I am here with this IP and MAC"
+- It detects an IP address conflict (the Gratuitous ARP generates a reply if someone else already has the same IP)
+- A virtual IP address changes owner in a high-availability cluster (the new owner sends Gratuitous ARP to update all ARP caches)
+- A network interface comes back up after a failure
+
+In the Gratuitous ARP Request, both the Target IP and the Sender IP are the device's own IP. Every device that receives it and has that IP in its ARP cache updates the entry with the new MAC address. This is the mechanism HSRP, VRRP, and other first-hop redundancy protocols use to redirect traffic to the new active router when a failover occurs.
+
+---
+
+## Proxy ARP
+
+**Proxy ARP** is a technique where a router responds to ARP Requests on behalf of a host on a different network. When a host sends an ARP Request for an IP address that is not on its local subnet (because the host has an incorrect subnet mask), the router can reply with its own MAC address, causing the host to send traffic to the router, which then routes it normally.
+
+Proxy ARP was originally used to allow hosts with incorrect subnet masks to still communicate across router boundaries. Modern networks should not rely on proxy ARP — correct subnet configuration is always preferable. However, proxy ARP is still commonly enabled by default on router interfaces and is sometimes useful in migration scenarios.
+
+---
+
+## ARP Spoofing — The Security Problem
+
+ARP has no authentication. Any device on the network can send an ARP Reply claiming to be any IP address, and every device that receives it will update its ARP cache accordingly. This is **ARP spoofing** (also called ARP poisoning).
+
+An attacker on the same broadcast domain can send unsolicited ARP Replies telling all devices that the attacker's MAC address corresponds to the default gateway's IP. All hosts then update their ARP caches and begin sending traffic to the attacker instead of the real gateway. The attacker can:
+- **Eavesdrop**: forward the traffic to the real gateway after reading it (man-in-the-middle attack)
+- **Disrupt**: drop the traffic, causing a denial of service
+- **Modify**: alter traffic in transit before forwarding it
+
+This attack requires the attacker to be on the same Layer 2 broadcast domain as the victim — it does not work across routers. But in a flat, unsegmented network, a single compromised device can intercept traffic between all other devices.
+
+### Mitigations
+
+**Dynamic ARP Inspection (DAI)**: a switch feature that validates ARP packets against a DHCP snooping binding table. Only ARP packets with (MAC, IP) pairs that match a DHCP-assigned mapping are forwarded; others are dropped. Requires DHCP snooping to be enabled.
+
+**Static ARP entries**: manually configure the gateway's MAC-to-IP mapping on endpoints. Prevents ARP spoofing of the gateway, but does not scale.
+
+**Private VLANs**: limit which devices can communicate directly at Layer 2, reducing the scope of ARP spoofing attacks.
+
+**Monitoring**: tools like arpwatch or Wireshark ARP filters can detect ARP cache changes that might indicate spoofing.
+
+---
+
+## Key Concepts
+
+### ARP only works within a subnet
+
+ARP is a Layer 2 protocol — it operates within a broadcast domain. Routers separate broadcast domains. You cannot ARP across a router, which is exactly why traffic to remote subnets is sent to the default gateway's MAC address (the gateway is on the same subnet and can be ARPed). The router then handles the inter-subnet routing.
+
+### The ARP cache is the source of truth for local delivery
+
+When a device sends an IP packet to a local destination, it does not look at the destination IP address for the Layer 2 delivery decision — it looks up the destination IP in its ARP cache to get the MAC address. A stale or poisoned ARP cache entry silently redirects traffic to the wrong destination. Many hard-to-diagnose connectivity issues between hosts on the same subnet trace back to incorrect ARP cache entries.
+
+### IPv6 uses NDP instead of ARP
+
+IPv6 does not use ARP. IPv6 Neighbor Discovery Protocol (NDP) performs the equivalent function — resolving IPv6 addresses to MAC addresses — but uses ICMPv6 messages (Neighbor Solicitation and Neighbor Advertisement) sent to multicast addresses rather than broadcasts. This is more efficient and more secure than ARP.
+
+---
+
+## References
+
+- [RFC 826 — An Ethernet Address Resolution Protocol](https://www.rfc-editor.org/rfc/rfc826)
+- [RFC 5227 — IPv4 Address Conflict Detection](https://www.rfc-editor.org/rfc/rfc5227)
+- [RFC 4861 — Neighbor Discovery for IP version 6 (NDP)](https://www.rfc-editor.org/rfc/rfc4861)

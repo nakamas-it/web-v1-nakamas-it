@@ -1,0 +1,148 @@
+---
+title: "MAC Addressing — Hardware Identifiers at Layer 2"
+layer: "layer2"
+protocol: "mac"
+summary: "What MAC addresses are, how they are structured, the difference between unicast, multicast, and broadcast addresses, and how modern devices handle privacy through MAC randomization."
+tags: ["layer2", "mac", "addressing", "oui", "ethernet", "ieee802"]
+order: 2
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Every network interface that participates in an Ethernet network has a MAC address — a 48-bit identifier burned into the hardware at manufacture. It is the Layer 2 equivalent of a name: every device on a local network segment is reachable by its MAC address, and every Ethernet frame carries both the sender's MAC address and the intended recipient's MAC address in its header.
+
+MAC addresses are what make Ethernet work without any configuration. Plug a device into a switch and the switch immediately knows, from the source MAC address of the first frame it receives, which port that device is connected to. No IP address, no DHCP, no routing — Layer 2 reachability within a broadcast domain is purely MAC-based.
+
+Understanding MAC addresses in depth — their structure, the special categories that exist within the 48-bit space, how they are allocated, and the modern reality of MAC randomization — is essential for anyone working with switches, packet captures, or network security.
+
+---
+
+## Structure of a MAC Address
+
+A MAC address is a 48-bit (6-byte) number, conventionally written in hexadecimal with colons or hyphens separating each byte: `AA:BB:CC:DD:EE:FF`. In some contexts (particularly Windows) dashes are used: `AA-BB-CC-DD-EE-FF`. In others (Cisco CLI), dots separate groups of four hex digits: `AABB.CCDD.EEFF`. All three notations represent the same 48-bit value.
+
+<PacketDiagram
+  label="MAC Address — 48-bit structure"
+  fields={[
+    { name: "OUI (vendor)", bytes: 3, value: "first 3 bytes" },
+    { name: "NIC-specific", bytes: 3, value: "last 3 bytes" },
+  ]}
+/>
+
+### The OUI — Organizationally Unique Identifier
+
+The first three bytes (24 bits) form the **OUI** — assigned by the IEEE to organizations that manufacture network devices. Every manufacturer of network interfaces must obtain one or more OUIs from the IEEE. The OUI is the global registry of "who made this device."
+
+When you see a MAC address in a Wireshark capture, the OUI is resolved to a vendor name: `00:50:56` is VMware, `3C:22:FB` is Apple, `00:1B:21` is Intel. This is an immediate first indicator of what a device is — even before you know its IP address or hostname. The IEEE publishes the OUI registry publicly.
+
+### The Device-Specific Portion
+
+The last three bytes are assigned by the manufacturer to each specific device. Combined with the OUI, these three bytes make the address globally unique — no two devices should ever ship from the factory with the same MAC address.
+
+### The Special Bits
+
+Within the first byte (the byte containing the OUI's most significant bits), two individual bits carry special meaning regardless of the OUI:
+
+| Bit position in first byte | Name  | Meaning                                                      |
+|---------------------------|-------|--------------------------------------------------------------|
+| Bit 0 (least significant) | I/G   | `0` = Individual (unicast); `1` = Group (multicast)          |
+| Bit 1                     | U/L   | `0` = Universally administered; `1` = Locally administered   |
+
+The I/G bit determines the address type. The U/L bit determines whether the address was assigned by the IEEE (universally administered) or was assigned locally by software configuration (locally administered).
+
+---
+
+## Address Categories
+
+### Unicast
+
+A unicast MAC address has the I/G bit set to 0. It identifies exactly one network interface. Frames with a unicast destination are delivered to one specific device (or flooded by the switch if the address is not in the MAC table). The vast majority of Ethernet frames use unicast addresses.
+
+### Multicast
+
+A multicast MAC address has the I/G bit set to 1 but is not the all-ones broadcast address. Multicast frames are addressed to a group of devices that have expressed interest in receiving them — they are delivered to all devices in the multicast group and ignored by all others.
+
+IPv4 multicast addresses in the `224.0.0.0/4` range map to MAC addresses in the `01:00:5E:xx:xx:xx` range. The mapping is: `01:00:5E` followed by the lower 23 bits of the IPv4 multicast address. Note that this mapping is not one-to-one: 32 different multicast IP groups map to each multicast MAC address (because only 23 of the 28 multicast IP bits are carried in the MAC).
+
+Some well-known multicast MAC addresses:
+
+| MAC Address           | Protocol | Used by                    |
+|-----------------------|----------|----------------------------|
+| `01:00:0C:CC:CC:CC`   | CDP      | Cisco Discovery Protocol   |
+| `01:80:C2:00:00:00`   | STP      | Spanning Tree Protocol BPDUs |
+| `01:00:5E:00:00:01`   | IGMP     | All-routers (224.0.0.1)    |
+| `33:33:00:00:00:01`   | IPv6 ND  | All-nodes multicast (IPv6) |
+| `01:00:5E:00:00:FB`   | mDNS     | Multicast DNS (224.0.0.251)|
+
+### Broadcast
+
+The broadcast MAC address is `FF:FF:FF:FF:FF:FF` — all 48 bits set to 1. Every device on the local broadcast domain receives and processes broadcast frames. Protocols that need to reach all devices on a segment — ARP, DHCP DISCOVER, some routing protocols — use the broadcast address.
+
+Switches flood broadcast frames out all ports except the port the frame arrived on. Routers do not forward broadcasts — they define the boundary of broadcast domains.
+
+---
+
+## Universally vs Locally Administered
+
+The U/L bit indicates whether the MAC address follows the IEEE's globally administered assignment (U/L = 0, the normal case) or was assigned locally (U/L = 1).
+
+**Locally administered addresses (LAA)** are used in several contexts:
+- **Virtual machines**: hypervisors generate LAAs for virtual network adapters. VMware, Hyper-V, and KVM all generate addresses in LAA space to avoid conflicts with physical NIC addresses.
+- **Link aggregation**: some implementations assign a LAA to the logical bond interface rather than using one of the member NIC addresses.
+- **Network testing**: when creating test traffic, LAAs avoid any risk of conflict with real deployed addresses.
+- **MAC randomization**: modern operating systems use LAAs for randomized MAC addresses.
+
+When you see an OUI that does not resolve to any known vendor, or a vendor name you do not recognize, check the U/L bit — a locally administered address has no OUI by definition.
+
+---
+
+## MAC Randomization and Privacy
+
+A globally unique MAC address, by its nature, can be used to track a device across different networks. If your device always announces the same MAC address when probing for Wi-Fi networks, any monitoring system that collects probe request frames can track your physical movement across locations.
+
+Modern operating systems address this with **MAC randomization**: the device generates a random locally administered MAC address (U/L bit = 1) to use for scanning and connection to Wi-Fi networks. The specifics vary by operating system:
+
+- **iOS 14+ and Android 10+**: randomize MAC per SSID by default. Each new network association uses a different random MAC.
+- **Windows 10/11**: supports randomization per network or with daily changes; not enabled by default in all versions.
+- **Linux**: NetworkManager and wpa_supplicant support per-connection randomization.
+
+MAC randomization has implications for network management tools that rely on MAC addresses for device identification, DHCP reservations, or 802.1X certificate mapping. An administrator who has assigned DHCP reservations by MAC address will find those reservations stop working when a user's phone begins randomizing. Enterprise environments using 802.1X (certificate-based authentication) are generally unaffected because authentication is not MAC-based.
+
+---
+
+## MAC Tables in Switches
+
+Every Layer 2 switch maintains a **MAC address table** (also called the CAM table — Content Addressable Memory) that maps MAC addresses to switch ports. This table is how the switch knows where to send unicast frames without flooding them everywhere.
+
+| MAC Address         | Port    | VLAN | Age   |
+|---------------------|---------|------|-------|
+| AA:BB:CC:DD:EE:FF   | Gi0/1   | 10   | 12 s  |
+| 11:22:33:44:55:66   | Gi0/2   | 10   | 4 s   |
+| 00:11:22:33:44:55   | Gi0/24  | 20   | 187 s |
+
+The table is populated by **learning**: when a frame arrives on a port, the switch records the source MAC address and the port number. Entries age out after a configurable timeout (default 300 seconds on most platforms). The table has a finite size — typically 16,000 to 64,000 entries on enterprise switches. A **MAC table overflow attack** (sending frames with thousands of different spoofed source MAC addresses) can fill the table, causing the switch to flood all traffic (since unknown destinations must be flooded) and effectively turning it into a hub.
+
+**Port security** is the common mitigation: limit the number of MAC addresses allowed to be learned on a port, and take action (shutdown, restrict, protect) if the limit is exceeded.
+
+---
+
+## Key Concepts
+
+### MAC addresses are Layer 2 local — not routed
+
+A MAC address is meaningful only within a single broadcast domain (a single VLAN on a switched network). When a packet crosses a router, the router creates a new Ethernet frame on the other side with a new source MAC (the router's outgoing interface) and a new destination MAC (the next hop or the destination host if on the same subnet). The original source device's MAC address does not appear in the frame once it has been routed.
+
+### MAC spoofing is trivial
+
+Most operating systems allow the MAC address of a network interface to be changed in software — this is called MAC spoofing. It does not require root access on some platforms. MAC-based security controls (MAC filtering, DHCP reservations, port security with a specific MAC) are not meaningful security boundaries — they are administrative conveniences that a determined attacker bypasses trivially.
+
+---
+
+## References
+
+- [IEEE OUI Public Registry](https://regauth.standards.ieee.org/standards-ra-web/pub/view.html)
+- [IEEE 802 — LAN/MAN Standards Overview](https://standards.ieee.org/ieee/802)
+- [RFC 7042 — IANA Considerations and IETF Protocol Usage for IEEE 802 Parameters](https://www.rfc-editor.org/rfc/rfc7042)

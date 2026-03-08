@@ -1,0 +1,186 @@
+---
+title: "VLANs — Segmenting a Network at Layer 2"
+layer: "layer2"
+protocol: "vlans"
+summary: "How VLANs divide a single physical switch infrastructure into multiple isolated broadcast domains, how 802.1Q tagging carries VLAN membership across trunk links, and how inter-VLAN routing brings those segments back together."
+tags: ["layer2", "vlan", "802.1q", "trunking", "dot1q", "native-vlan", "inter-vlan"]
+order: 4
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+A VLAN — Virtual Local Area Network — is a logical partition of a switched network. Without VLANs, every device connected to a switch is in the same broadcast domain: an ARP request from one device floods to every port on the switch (and through any trunk links to neighboring switches). In a large flat network, this broadcast traffic becomes a significant overhead, and more importantly, every device can reach every other device at Layer 2, which creates a serious security problem.
+
+VLANs solve both problems. By assigning switch ports to different VLANs, you create multiple independent broadcast domains on the same physical switch infrastructure. Traffic inside VLAN 10 is completely invisible to devices in VLAN 20 at the Layer 2 level. An ARP request from VLAN 10 never reaches VLAN 20, and a device in VLAN 20 cannot send an Ethernet frame directly to a device in VLAN 10 — not even if they are plugged into adjacent ports on the same switch.
+
+The switch enforces this isolation entirely in software. No additional physical hardware is required to add VLANs — just configuration. A single 48-port switch can host dozens of separate VLANs, each with its own isolated broadcast domain.
+
+---
+
+## Why VLANs Exist
+
+Three problems motivated VLAN technology:
+
+**Broadcast containment.** Every broadcast on an Ethernet segment reaches every device on that segment. As networks grew larger in the 1990s, broadcast traffic from protocols like ARP, DHCP, and legacy protocols such as NetBIOS consumed a growing fraction of available bandwidth and CPU cycles on every host. VLANs limit the scope of broadcasts to the devices that actually need to receive them.
+
+**Security isolation.** In a flat network, any device can attempt to communicate with any other device at Layer 2. Separating user workstations, servers, VoIP phones, and guest wireless into different VLANs means that even if a device in the guest VLAN is compromised, it cannot send Ethernet frames to the server VLAN. Layer 2 isolation is a meaningful security boundary as long as there are no misconfigured trunk ports or VLAN hopping vulnerabilities.
+
+**Network flexibility.** Logical grouping by function rather than physical location. The finance department's workstations can all be in VLAN 30 regardless of which floor they are on or which switch they are connected to, as long as the switches are interconnected by trunk links that carry VLAN 30.
+
+---
+
+## Access Ports and Trunk Ports
+
+A switch port operates in one of two fundamental modes:
+
+### Access Port
+
+An access port belongs to exactly one VLAN. It is the port type used to connect end devices — workstations, servers, printers, IP phones. The device connected to an access port has no knowledge of VLANs. It sends and receives ordinary Ethernet frames. The switch assigns those frames to the configured VLAN and never exposes the VLAN number to the connected device.
+
+When a frame arrives on an access port, the switch internally tags it with the port's VLAN ID for forwarding decisions. When a frame leaves through an access port, the switch strips any VLAN tag before sending it to the connected device.
+
+### Trunk Port
+
+A trunk port carries traffic for **multiple VLANs simultaneously**. Trunk ports are used to connect switches to other switches, to routers performing inter-VLAN routing, and to servers that need membership in multiple VLANs (common for virtualization hosts and firewalls).
+
+On a trunk link, frames from different VLANs must be distinguishable from each other. This is where **802.1Q tagging** comes in.
+
+---
+
+## 802.1Q — The VLAN Tag
+
+IEEE 802.1Q defines the standard mechanism for carrying VLAN membership information inside Ethernet frames on trunk links. It inserts a 4-byte tag into the Ethernet frame between the source MAC address and the EtherType field.
+
+<PacketDiagram
+  label="802.1Q Tagged Ethernet Frame"
+  fields={[
+    { name: "Dst MAC", bytes: 6 },
+    { name: "Src MAC", bytes: 6 },
+    { name: "802.1Q Tag", bytes: 4, value: "0x8100 + TCI", highlight: true },
+    { name: "EtherType", bytes: 2, value: "0x0800" },
+    { name: "Payload", bytes: 6 },
+    { name: "FCS", bytes: 4 },
+  ]}
+/>
+
+The 4-byte 802.1Q tag contains:
+
+<PacketDiagram
+  label="802.1Q Tag — 4-byte detail"
+  fields={[
+    { name: "TPID", bytes: 2, value: "0x8100" },
+    { name: "PCP", bytes: "1 bit", value: "QoS priority" },
+    { name: "DEI", bytes: "1 bit", value: "drop eligible" },
+    { name: "VLAN ID", bytes: "12 bits", value: "1–4094", highlight: true },
+  ]}
+/>
+
+| Field | Size | Description |
+|-------|------|-------------|
+| TPID (Tag Protocol ID) | 16 bits | Always `0x8100` — identifies this as an 802.1Q tag. A receiving device checks this field to know a tag is present. |
+| PCP (Priority Code Point) | 3 bits | 802.1p QoS priority (0–7). Higher values get preferential treatment for QoS queuing. |
+| DEI (Drop Eligible Indicator) | 1 bit | Originally CFI (Canonical Format Indicator). Now indicates that this frame may be dropped during congestion. |
+| VLAN ID (VID) | 12 bits | The VLAN number (0–4095). VLAN 0 means no VLAN (QoS only). VLAN 4095 is reserved. Valid range: **1–4094**. |
+
+The 12-bit VLAN ID field allows for 4,094 usable VLANs (IDs 1 through 4094). VLAN 1 is the default VLAN on Cisco equipment and carries management traffic by default. In practice, most organizations use a small fraction of the available VLAN space.
+
+When a switch receives a tagged frame on a trunk port, it reads the VLAN ID from the tag, makes forwarding decisions based on that VLAN ID and the destination MAC address, and forwards the frame out the appropriate trunk port (keeping the tag) or access port (removing the tag).
+
+---
+
+## Native VLAN
+
+The native VLAN is a special concept on 802.1Q trunk links. Frames that belong to the native VLAN are sent **untagged** on a trunk link. If a tagged frame arrives on a trunk port, it is processed according to its VLAN ID. If an untagged frame arrives on a trunk port, it is assigned to the native VLAN.
+
+The native VLAN exists for backward compatibility with devices that do not understand 802.1Q tags — they receive untagged frames normally. The default native VLAN on Cisco equipment is VLAN 1.
+
+**Native VLAN must match on both ends of a trunk link.** If one switch has native VLAN 1 and the other has native VLAN 99, untagged frames will be placed in different VLANs at each end, causing connectivity failures and potential security issues. A native VLAN mismatch is a common misconfiguration.
+
+**Native VLAN security best practice**: configure an unused VLAN as the native VLAN on all trunk ports — a VLAN that no access ports are assigned to. This prevents native VLAN hopping attacks where an attacker on a native VLAN access port sends double-tagged frames to reach another VLAN.
+
+---
+
+## VLAN Hopping — The Attack
+
+VLAN hopping is an attack that exploits either of two misconfigurations:
+
+**Switch Spoofing**: The attacker's device sends DTP (Dynamic Trunking Protocol) negotiation frames, tricking the switch into establishing a trunk link with the attacker's machine. Once the link is trunked, the attacker can tag frames with any VLAN ID and reach any VLAN. **Mitigation**: Disable DTP on all access ports (`switchport nonegotiate`) and explicitly configure access mode.
+
+**Double Tagging**: The attacker sends a frame with two 802.1Q tags. The outer tag matches the native VLAN (untagged on the trunk), so the switch strips it and forwards the inner-tagged frame to the target VLAN. This only works in one direction (the response cannot be routed back the same way). **Mitigation**: Use an unused native VLAN that is never assigned to any access port.
+
+---
+
+## Inter-VLAN Routing
+
+VLANs are Layer 2 isolation boundaries. Traffic cannot cross between VLANs at Layer 2 — that is the whole point. When a host in VLAN 10 needs to communicate with a host in VLAN 20, the traffic must be routed at Layer 3. There are three common approaches:
+
+### Router-on-a-Stick
+
+A single physical router port is configured as a trunk port. Multiple **subinterfaces** are created on that port, each corresponding to one VLAN. The router receives inter-VLAN traffic on one subinterface and routes it back out through another subinterface on the same physical port.
+
+```
+Router interface GigabitEthernet0/0.10:
+  encapsulation dot1Q 10
+  ip address 192.168.10.1 255.255.255.0
+
+Router interface GigabitEthernet0/0.20:
+  encapsulation dot1Q 20
+  ip address 192.168.20.1 255.255.255.0
+```
+
+All inter-VLAN traffic passes through the single physical link between the switch and router, which can become a bottleneck in high-traffic environments. Suitable for small deployments.
+
+### Layer 3 Switch (SVI)
+
+A Layer 3 switch (also called a multilayer switch) has routing capabilities built in. A **Switched Virtual Interface (SVI)** is a virtual Layer 3 interface that represents a VLAN:
+
+```
+interface Vlan10
+  ip address 192.168.10.1 255.255.255.0
+  no shutdown
+
+interface Vlan20
+  ip address 192.168.20.1 255.255.255.0
+  no shutdown
+```
+
+Inter-VLAN routing on a Layer 3 switch happens at hardware speed inside the switch — no external router is needed, and there is no bandwidth bottleneck from a single uplink. This is the standard approach in enterprise networks.
+
+### Dedicated Firewall
+
+In security-conscious environments, inter-VLAN traffic is routed through a firewall rather than a router or Layer 3 switch. This allows stateful inspection of all traffic crossing VLAN boundaries. The firewall acts as the default gateway for each VLAN and enforces access control policies between segments.
+
+---
+
+## VLAN Best Practices
+
+**Use VLANs to separate network functions.** A typical enterprise design uses separate VLANs for: user workstations, servers, VoIP phones, management (switch/router management interfaces), guest Wi-Fi, and security cameras.
+
+**Never use VLAN 1 for user traffic.** VLAN 1 is the default on all Cisco switches and carries control plane traffic (CDP, STP BPDUs, etc.) on many platforms. Configure a different VLAN for all user-facing access ports.
+
+**Explicit trunk configuration.** Always explicitly configure trunk ports and specify which VLANs are allowed on each trunk (`switchport trunk allowed vlan`). Allowing only the VLANs that are actually needed on each trunk limits the scope of misconfiguration and attack.
+
+**VLAN pruning.** A trunk link should only carry the VLANs that are actually used downstream of that link. Flooding a frame from VLAN 50 across a trunk to a switch that has no ports in VLAN 50 wastes bandwidth. VTP pruning and manual pruning both accomplish this.
+
+---
+
+## Key Concepts
+
+### VLANs are local to the switch (without a distribution mechanism)
+
+A VLAN configured on one switch is not automatically known to neighboring switches. On Cisco networks, **VTP (VLAN Trunking Protocol)** propagates VLAN database information between switches. Many organizations prefer to manage VLANs manually to avoid VTP-related accidents (a misconfigured VTP revision number can wipe the VLAN database from an entire network).
+
+### The VLAN ID in the 802.1Q tag is not encrypted or authenticated
+
+Any device on a trunk link can send frames tagged with any VLAN ID. This is why trunk ports should only connect to trusted network equipment, never to end-user devices.
+
+---
+
+## References
+
+- [IEEE 802.1Q — Bridges and Bridged Networks](https://standards.ieee.org/ieee/802.1Q)
+- [RFC 5517 — Cisco Systems' Private VLANs](https://www.rfc-editor.org/rfc/rfc5517)

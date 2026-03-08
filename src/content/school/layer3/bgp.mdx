@@ -1,0 +1,168 @@
+---
+title: "BGP — The Protocol That Routes the Internet"
+layer: "layer3"
+protocol: "bgp"
+summary: "How BGP connects autonomous systems across the internet using path-vector routing, what attributes control route selection, the difference between iBGP and eBGP, and why BGP is the most important routing protocol you will ever encounter."
+tags: ["layer3", "bgp", "ebgp", "ibgp", "as", "asn", "path-vector", "route-policy", "rfc4271"]
+order: 9
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+OSPF and RIP are **Interior Gateway Protocols (IGPs)** — they route traffic within a single administrative domain: a company's network, a university campus, an ISP's core network. They share topology or routing table information freely because all the routers involved are under the same control and speak the same routing policy language.
+
+The internet is not one network. It is tens of thousands of separately administered networks — **Autonomous Systems (ASes)** — that agree to exchange routing information at their interconnection points. An AS is a collection of IP networks under a single administrative authority with a unified routing policy. Every major ISP, cloud provider, enterprise, and university with a public internet presence operates one or more ASes, each identified by a globally unique **Autonomous System Number (ASN)**.
+
+**BGP (Border Gateway Protocol)** is the protocol that these autonomous systems use to exchange routing information with each other. BGP is how the internet knows how to route a packet from Tokyo to São Paulo: every router along the path knows, because the routers at the borders of each AS have exchanged BGP routes advertising which prefixes are reachable through their network.
+
+BGP is currently at version 4, defined in RFC 4271. It is the most important routing protocol in existence — the routing table of the global internet is a BGP table, and BGP misconfigurations have caused some of the most significant internet outages in history.
+
+---
+
+## Autonomous Systems
+
+Every participant in the global routing table has an **ASN (Autonomous System Number)**, assigned by regional internet registries (ARIN, RIPE, APNIC, LACNIC, AFRINIC). Public ASNs in the range 1–64495 and 131072–4199999999 are globally unique. Private ASNs (64512–65534 for 16-bit; 4200000000–4294967294 for 32-bit) can be used internally without registration, similar to RFC 1918 private IP addresses.
+
+When a company obtains internet connectivity from an ISP, the ISP may route the company's IP prefixes under the ISP's ASN (common for smaller customers) or the company may obtain its own ASN and announce its prefixes directly (common for larger enterprises and multi-homed customers).
+
+---
+
+## Path Vector — How BGP Differs from Other Protocols
+
+BGP is a **path-vector** protocol. Like distance-vector protocols, it shares reachability information (which prefixes are reachable). But unlike distance-vector protocols, BGP includes the complete **AS path** — the list of every AS that a route advertisement has traversed — as an attribute of every route.
+
+For a route to `203.0.113.0/24` with AS path `[65001 65002 65003]`:
+- AS 65001 is the origin — the AS that originates the prefix
+- AS 65002 is the first transit AS
+- AS 65003 is the local AS (where this route was received)
+
+The AS path serves two purposes:
+
+**Loop prevention**: BGP routers reject any route advertisement that contains their own ASN in the AS path. If a route comes back to the AS that originated it, that AS discards it. This is BGP's equivalent of TTL — clean, simple, and effective.
+
+**Policy tool**: The length and content of the AS path is a key input to BGP path selection. Longer AS paths generally indicate more transit hops and are deprioritized. Operators manipulate AS path length using **AS path prepending** — artificially adding their own ASN to a path to make it look longer and therefore less preferred.
+
+---
+
+## eBGP vs iBGP
+
+BGP runs in two modes:
+
+**eBGP (External BGP)**: Between routers in **different** ASes. This is the inter-AS communication that connects the internet. eBGP peers are typically directly connected (adjacent routers at a peering point or customer-ISP link), though this is not required. Each router in an eBGP session prepends its own ASN to routes it advertises.
+
+**iBGP (Internal BGP)**: Between routers in the **same** AS. iBGP is used to distribute external BGP routes throughout an AS so that all routers know how to reach external prefixes. iBGP does not modify the AS path (it stays the same as received from eBGP), and iBGP does not require physical adjacency — it can run over any IP path between two routers.
+
+**iBGP split horizon rule**: A route learned from an iBGP peer is **not re-advertised to another iBGP peer**. This prevents routing loops within the AS, but it means that for a route to be known by all iBGP routers, either every router must peer with every other router (**full mesh** — impractical at scale) or **Route Reflectors** (or Confederations) must be used.
+
+**Route Reflector (RR)**: A designated router that receives iBGP routes from clients and reflects them to other clients. Clients only need to peer with the RR (or a pair of RRs for redundancy) rather than every other router in the AS.
+
+---
+
+## BGP Session Establishment
+
+BGP is a TCP-based protocol (port 179). Unlike OSPF, BGP does not use multicast discovery — **neighbors must be explicitly configured** on both sides. BGP uses TCP because its messages can be very large (the full internet routing table is over 900,000 prefixes), and TCP provides reliable delivery without requiring BGP to implement its own retransmission logic.
+
+<FlowDiagram
+  parties={["Local Router", "Remote Peer"]}
+  steps={[
+    { from: "Local Router", to: "Remote Peer", label: "TCP SYN (port 179)", sub: "Initiating TCP connection" },
+    { from: "Remote Peer", to: "Local Router", label: "TCP SYN-ACK", sub: "Connection accepted" },
+    { from: "Local Router", to: "Remote Peer", label: "OPEN message", sub: "BGP version, ASN, hold time, Router ID" },
+    { from: "Remote Peer", to: "Local Router", label: "OPEN message", sub: "BGP version, ASN, hold time, Router ID" },
+    { from: "Local Router", to: "Remote Peer", label: "KEEPALIVE", sub: "Parameters accepted — session Established" },
+    { from: "Remote Peer", to: "Local Router", label: "UPDATE messages", sub: "Routes being advertised/withdrawn" },
+  ]}
+/>
+
+BGP uses four message types:
+- **OPEN**: Initiates the session, carries BGP version, ASN, Hold Time, Router ID, and capabilities
+- **KEEPALIVE**: Confirms that the session is alive. Sent every Hold Time / 3 (default: every 60 seconds). If no message is received within Hold Time (default 180 seconds), the session is torn down.
+- **UPDATE**: Carries new route advertisements or route withdrawals
+- **NOTIFICATION**: Reports errors; always followed by session teardown
+
+---
+
+## BGP Route Attributes
+
+Every BGP route carries a set of **path attributes** that describe the route and influence path selection. This is what makes BGP so powerful — operators can attach policy to routes through attributes.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| **AS_PATH** | Well-known mandatory | List of ASNs the route has traversed |
+| **NEXT_HOP** | Well-known mandatory | IP address to use as the next hop |
+| **ORIGIN** | Well-known mandatory | How the route originated: IGP (i), EGP (e), or Incomplete (?) |
+| **LOCAL_PREF** | Well-known discretionary | Preference for exit path within an AS (higher is preferred); only in iBGP |
+| **MED (MULTI_EXIT_DISC)** | Optional non-transitive | Suggests a preferred entry point into an AS (lower is preferred); only compared across same AS |
+| **COMMUNITY** | Optional transitive | Arbitrary tag (ASN:value) used for policy grouping |
+| **ATOMIC_AGGREGATE** | Well-known discretionary | Indicates that a summary (aggregate) route is being advertised |
+
+---
+
+## BGP Path Selection Algorithm
+
+When BGP receives multiple paths to the same prefix from different peers, it must choose one to install in the routing table. BGP's selection algorithm evaluates attributes in a fixed order:
+
+1. **Highest Local Preference (LOCAL_PREF)**: The primary tool for selecting exit paths from the AS. Set by policy on inbound eBGP routes. Higher is preferred.
+2. **Locally originated route**: Prefer routes originated by the local router.
+3. **Shortest AS_PATH**: Fewer AS hops is preferred.
+4. **Lowest ORIGIN**: IGP (i) < EGP (e) < Incomplete (?)
+5. **Lowest MED**: Compared only between routes from the same neighboring AS.
+6. **eBGP over iBGP**: Prefer routes learned from external peers over internal peers.
+7. **Lowest IGP metric to NEXT_HOP**: Among iBGP routes, prefer the one with the lowest cost to reach the next hop.
+8. **Oldest eBGP route**: Prefer the oldest eBGP route (stability).
+9. **Lowest Router ID of advertising peer**.
+10. **Lowest peer IP address**: Final tiebreaker.
+
+The algorithm stops at the first attribute that produces a winner. Route selection is deterministic — the same inputs always produce the same output.
+
+---
+
+## BGP Communities
+
+**Communities** are one of BGP's most powerful mechanisms for expressing routing policy. A community is a 32-bit value (traditionally written as `ASN:value`) that is attached to a route as a tag. Routers can apply policy based on community values without examining individual prefixes.
+
+Common uses:
+- **Traffic engineering**: Tag routes from Customer A with community `65001:100`, routes from Customer B with `65001:200`, then apply different Local Preferences based on community
+- **Blackholing**: Tag a route with community `65535:666` (RTBH — Remotely Triggered Black Hole) to signal upstream ASes to drop traffic to that prefix
+- **No-export**: Attach community `65535:65281` to tell receiving routers not to advertise the route outside their AS
+- **Selective advertisement**: "Only advertise this route to ASes with community `X`"
+
+Large-scale communities (RFC 8092) extend the concept to 64 bits, allowing more complex expressions.
+
+---
+
+## BGP in Enterprise Networks
+
+Most enterprises never need to run BGP internally — they use OSPF or EIGRP for internal routing. But enterprises with **multi-homed internet connectivity** (two or more ISPs) benefit from running eBGP with each ISP:
+
+- Receive the full BGP table (or at least partial routes) from each ISP
+- Advertise the company's own IP prefixes to both ISPs
+- Use Local Preference to prefer one ISP for outbound traffic
+- Use MED or AS path prepending to influence which ISP upstream networks prefer for inbound traffic
+
+Without BGP, multi-homing must rely on the ISP to route traffic correctly, which limits the enterprise's control over traffic engineering and failover.
+
+---
+
+## Key Concepts
+
+### BGP is a policy protocol, not just a routing protocol
+
+The routing table produced by BGP is the result of policy decisions expressed through attribute manipulation. What route an AS announces, which paths it prefers, and which customers it accepts routes from are all business decisions expressed in routing policy. Understanding BGP means understanding both the protocol mechanics and the business relationships that drive routing policy.
+
+### BGP convergence is intentionally slow
+
+The internet-scale BGP table has over 900,000 prefixes. A single routing change triggers UPDATE messages that propagate across every peering session in the internet, potentially through dozens of ASes. BGP deliberately includes mechanisms (MRAI — Minimum Route Advertisement Interval, default 30 seconds for eBGP) to dampen the propagation of rapid route changes and prevent cascading instability.
+
+---
+
+## References
+
+- [RFC 4271 — A Border Gateway Protocol 4 (BGP-4)](https://www.rfc-editor.org/rfc/rfc4271)
+- [RFC 1997 — BGP Communities Attribute](https://www.rfc-editor.org/rfc/rfc1997)
+- [RFC 4456 — BGP Route Reflection](https://www.rfc-editor.org/rfc/rfc4456)
+- [RFC 8092 — BGP Large Communities Attribute](https://www.rfc-editor.org/rfc/rfc8092)

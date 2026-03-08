@@ -1,0 +1,182 @@
+---
+title: "Static Routing — Manual Path Configuration"
+layer: "layer3"
+protocol: "static-routing"
+summary: "How static routes work, when to use them over dynamic routing protocols, administrative distance, route summarization with static routes, floating static routes for backup paths, and the limitations that make them impractical at scale."
+tags: ["layer3", "static-routing", "routing", "default-route", "administrative-distance", "floating-static", "nexthop"]
+order: 6
+draft: false
+---
+
+## Overview
+
+A router's job is to forward packets toward their destinations. To do that, it must know which direction to send each packet — which interface to use, which next-hop router to hand the packet to. This knowledge is encoded in the **routing table**.
+
+There are two ways to populate a routing table: **statically** (an administrator manually configures each route) or **dynamically** (routing protocols like OSPF, BGP, or RIP automatically discover routes by exchanging information with neighboring routers).
+
+**Static routing** is the manual approach. The administrator explicitly tells each router: "To reach network `192.168.10.0/24`, forward packets out interface `GigabitEthernet0/1` toward next-hop `10.0.0.2`." The router accepts this instruction and installs it in the routing table. The route does not change unless the administrator explicitly changes it.
+
+Static routing is the simplest possible approach, and simplicity has real value. There is no protocol overhead, no route flapping, no complex configuration. But static routing does not adapt to failures and does not scale. What starts as a simple and obvious choice in a small network becomes an administrative nightmare in a larger one.
+
+---
+
+## The Routing Table
+
+Before understanding static routes, it helps to see what a routing table looks like:
+
+```
+Router# show ip route
+
+Codes: C - connected, S - static, O - OSPF, B - BGP
+
+Gateway of last resort is 10.0.0.1 to network 0.0.0.0
+
+S    0.0.0.0/0 [1/0] via 10.0.0.1
+C    10.0.0.0/30 is directly connected, GigabitEthernet0/0
+C    192.168.1.0/24 is directly connected, GigabitEthernet0/1
+S    192.168.2.0/24 [1/0] via 10.0.0.2
+O    192.168.3.0/24 [110/2] via 10.0.0.2
+```
+
+Each entry shows:
+- **Code**: How the route was learned (S = static, C = connected, O = OSPF)
+- **Destination**: The network prefix (network address/prefix length)
+- **Administrative Distance / Metric**: `[1/0]` — administrative distance 1 (for static routes), metric 0
+- **Next Hop**: The IP address to forward packets to, or the outgoing interface
+
+---
+
+## Configuring a Static Route
+
+A static route requires three pieces of information:
+1. **Destination network**: The prefix to match (e.g., `192.168.10.0/24`)
+2. **Next hop**: Either the IP address of the next router, or the outgoing interface
+3. **Administrative distance** (optional): Priority of this route versus other routing sources
+
+**Using a next-hop IP address** (preferred in most cases):
+```
+ip route 192.168.10.0 255.255.255.0 10.0.0.2
+```
+
+**Using an outgoing interface** (only appropriate for point-to-point links):
+```
+ip route 192.168.10.0 255.255.255.0 GigabitEthernet0/0
+```
+
+**Using both next-hop and interface** (most explicit):
+```
+ip route 192.168.10.0 255.255.255.0 GigabitEthernet0/0 10.0.0.2
+```
+
+When only an interface is specified on a multi-access network (Ethernet), the router must ARP for the destination IP of every packet, because the next-hop address is not specified. This generates unnecessary ARP traffic and is generally avoided on Ethernet. Always specify a next-hop IP address on Ethernet interfaces.
+
+---
+
+## Default Route
+
+The **default route** is a static route to `0.0.0.0/0` — the prefix that matches any destination address. It is the routing table's "catch-all" — if no more-specific route matches, the packet is forwarded according to the default route.
+
+```
+ip route 0.0.0.0 0.0.0.0 203.0.113.1
+```
+
+This single entry tells the router: "For any destination you do not have a more specific route for, forward to `203.0.113.1`." In most networks, the default route points toward the internet or toward the next upstream router.
+
+The default route is sometimes called the **gateway of last resort** (you can see this in Cisco's `show ip route` output). A router with no matching route and no default route will drop the packet and send an ICMP Destination Unreachable message back to the sender.
+
+---
+
+## Administrative Distance
+
+When a router learns about the same destination from multiple sources — a static route and an OSPF route to the same prefix, for example — it must choose which one to install in the routing table. The **administrative distance (AD)** is the metric used for this selection: lower is preferred.
+
+| Source | Default Administrative Distance |
+|--------|--------------------------------|
+| Directly connected | 0 |
+| Static route | 1 |
+| EIGRP (internal) | 90 |
+| OSPF | 110 |
+| IS-IS | 115 |
+| RIP | 120 |
+| BGP (external) | 20 |
+| Unknown / unbelievable | 255 (never used) |
+
+Static routes have AD = 1 by default, which is lower than any dynamic routing protocol. This means a static route will always override a dynamically learned route to the same prefix. This is usually the intended behavior — if you manually configure a static route, you want it to take precedence.
+
+---
+
+## Floating Static Routes — Backup Paths
+
+A **floating static route** is a static route with a manually elevated administrative distance. It sits in the configuration but is not installed in the routing table as long as a preferred dynamic route to the same destination exists.
+
+```
+! Primary route via OSPF (AD 110):
+! O 192.168.20.0/24 [110/2] via 10.0.0.2
+
+! Floating static route (AD 200 — higher than OSPF's 110):
+ip route 192.168.20.0 255.255.255.0 10.0.1.2 200
+```
+
+As long as OSPF has a route to `192.168.20.0/24`, the static route with AD 200 is **not installed** in the routing table — it sits in the configuration, inactive. If OSPF loses the route (because a link fails or the neighbor goes down), the static route with AD 200 is immediately installed as a backup.
+
+This is a clean way to implement backup path redundancy without requiring the backup to be actively carrying traffic. The floating static route only activates when the preferred dynamic route disappears.
+
+---
+
+## Recursive Static Routes
+
+When a static route specifies a next-hop IP address, the router must resolve that next-hop IP to a directly reachable address — it performs a **recursive route lookup**. If there is no route to the next-hop address itself, the static route becomes inactive.
+
+```
+ip route 192.168.50.0 255.255.255.0 10.0.5.1
+```
+
+The router must have a route to `10.0.5.1` for this static route to be active. If the directly connected route for the subnet containing `10.0.5.1` goes down, this static route also goes down automatically — a useful behavior that prevents routes from remaining active when the path is broken.
+
+---
+
+## When to Use Static Routing
+
+Static routing is appropriate in specific scenarios:
+
+**Small, stable networks**: A network with 3–5 routers that never changes benefits from the simplicity of static routes. There is no protocol overhead and the configuration is easy to read and understand.
+
+**Default route at network edge**: Even in large networks that use OSPF or BGP internally, the edge routers typically have a static default route pointing toward the upstream ISP.
+
+**Stub networks**: A network with only one exit point (a "stub" — traffic can only enter and leave through one router) does not benefit from dynamic routing. A single static default route on the stub router pointing to the upstream router covers all cases.
+
+**Specific policy routing**: When you want traffic to a specific destination to always take a specific path regardless of what dynamic routing says. Static routes override dynamic routes.
+
+**Floating backup paths**: As described above — static routes as backup paths when primary dynamic routes fail.
+
+---
+
+## Limitations of Static Routing
+
+**No automatic failover**: If a link fails, a static route pointing through that link continues to be installed in the routing table (unless the directly connected interface goes down, which deactivates routes using that interface). The router continues trying to forward traffic into the dead link.
+
+**No scalability**: Each route must be manually configured on each router. A network with 50 routers and 200 subnets requires hundreds of static route configurations across all devices — and every change must be manually replicated everywhere.
+
+**No optimal path selection**: Static routes do not adapt to congestion or link quality. Dynamic routing protocols can use metrics to select better paths automatically.
+
+**Operational risk**: Manual configuration means human error. A single typo in a static route can create a routing black hole that is difficult to diagnose.
+
+At a certain scale, dynamic routing protocols become not just more convenient but mandatory for reliable operation.
+
+---
+
+## Key Concepts
+
+### A route to the next-hop is required
+
+A static route is only active if the router can reach the next-hop address. If the next-hop is reachable via a directly connected interface and that interface goes down, the static route is automatically deactivated. This is correct behavior — you want routes to disappear when the path is broken.
+
+### The routing table holds the best route per destination
+
+For any given destination prefix, only one route is installed in the forwarding table (the one with the lowest administrative distance, then lowest metric). All other candidates sit in the routing protocol's database, waiting to take over if the preferred route disappears.
+
+---
+
+## References
+
+- [RFC 1812 — Requirements for IP Version 4 Routers](https://www.rfc-editor.org/rfc/rfc1812)

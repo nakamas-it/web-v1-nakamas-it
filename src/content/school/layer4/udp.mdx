@@ -1,0 +1,139 @@
+---
+title: "UDP — Fast, Stateless Transport"
+layer: "layer4"
+protocol: "udp"
+summary: "How UDP delivers datagrams without connection setup, acknowledgment, or ordering — why this simplicity makes it the right choice for real-time applications, DNS, and any protocol that builds its own reliability layer."
+tags: ["layer4", "udp", "datagram", "stateless", "dns", "voip", "rfc768"]
+order: 2
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Transport protocols sit between the application layer and the IP layer. Their job is to take an application's data and get it to the right application on the destination host. The two dominant transport protocols — TCP and UDP — represent opposite design philosophies.
+
+TCP is connection-oriented, reliable, and ordered. It guarantees delivery, retransmits lost packets, and ensures the receiver sees data in the same order the sender transmitted it. These guarantees make TCP ideal for transferring files, web pages, and email.
+
+**UDP (User Datagram Protocol)** takes the opposite approach. It provides no connection, no acknowledgment, no retransmission, and no ordering guarantee. A UDP datagram is sent and forgotten — the sender has no way to know whether it arrived. If the application needs reliability, it must implement it itself.
+
+This sounds like a serious limitation. In practice, it is the right design for a large class of applications. UDP's simplicity means it has extremely low overhead: no handshake to establish a connection, no state to maintain, no acknowledgments to wait for. A UDP packet can be sent immediately, the moment the application has data. For applications where speed matters more than perfection — real-time audio, video streaming, gaming, DNS queries — UDP's lack of overhead is a feature, not a bug.
+
+UDP is defined in RFC 768, published in 1980. Its specification is remarkably brief — just three pages — reflecting the protocol's deliberate simplicity.
+
+---
+
+## UDP Header
+
+<PacketDiagram
+  label="UDP Header — 8 bytes"
+  fields={[
+    { name: "Source Port", bytes: 2, value: "ephemeral" },
+    { name: "Destination Port", bytes: 2, value: "service port" },
+    { name: "Length", bytes: 2, value: "header + data" },
+    { name: "Checksum", bytes: 2, value: "optional (IPv4)" },
+  ]}
+/>
+
+| Field | Description |
+|-------|-------------|
+| Source Port | The port number of the sending application. Optional — set to 0 if the sender does not need replies. For request/response protocols, this is the ephemeral port that the response will be sent back to. |
+| Destination Port | The port number of the receiving application. This is how the OS knows which process to deliver the datagram to. |
+| Length | The total length of the UDP datagram in bytes, including both the 8-byte header and the payload. Minimum value is 8 (header only, no data). |
+| Checksum | An error-checking field covering a pseudo-header (source IP, destination IP, protocol, UDP length), the UDP header, and the payload. In IPv4, this field is optional — if zero, the receiver should not check it. In IPv6, the checksum is mandatory because IPv6 dropped the IP header checksum. |
+
+UDP's header is exactly **8 bytes** — compared to TCP's 20-byte minimum header (plus options). This is a concrete measure of UDP's overhead advantage.
+
+---
+
+## What UDP Does Not Do
+
+Understanding UDP means understanding what it deliberately omits:
+
+**No connection establishment**: TCP requires a three-way handshake before any data can flow — one round trip of latency before the first byte of application data. UDP has no handshake. The application writes a datagram and it is immediately sent. For a DNS query and response, this saves an entire round trip.
+
+**No acknowledgment**: TCP's receiver sends ACK messages confirming receipt of data. UDP's receiver does nothing — there is no ACK. The sender has no way to know if the datagram arrived.
+
+**No retransmission**: TCP detects lost packets (via missing ACKs) and retransmits them. UDP sends each datagram once. If it is lost, it is lost.
+
+**No ordering**: TCP's receiver buffers out-of-order segments and delivers them to the application in the correct order. UDP delivers each datagram to the application as it arrives. If three datagrams are sent in order 1, 2, 3 but arrive as 3, 1, 2, that is what the application receives.
+
+**No flow control**: TCP adjusts its sending rate based on the receiver's capacity (the receive window). UDP will happily send as fast as the application requests, regardless of whether the receiver can keep up. If the receiver's buffer fills, datagrams are dropped without notification.
+
+**No congestion control**: TCP detects network congestion and reduces its sending rate. UDP does not participate in congestion control. This is a significant concern for high-bitrate UDP applications — they can fill network buffers and cause congestion that affects all other traffic, including TCP.
+
+---
+
+## What UDP Does Do
+
+**Demultiplexing via ports**: Like TCP, UDP uses port numbers to identify which application should receive each datagram. A UDP socket is identified by the (protocol, local IP, local port) tuple — or (protocol, local IP, local port, remote IP, remote port) for connected UDP sockets.
+
+**Optional error detection**: The checksum provides a basic integrity check. If the checksum fails, the datagram is silently discarded.
+
+**Framing**: Each UDP send produces exactly one datagram. The application message boundaries are preserved — if you send 500 bytes, the receiver gets one 500-byte datagram. TCP, by contrast, is a byte stream with no message boundaries.
+
+This framing property is important for protocols that need message-oriented delivery without connection overhead. DNS, DHCP, SNMP, and many others rely on UDP's datagram nature.
+
+---
+
+## Applications That Use UDP
+
+### DNS
+
+DNS queries and responses fit in a single UDP datagram (typically well under 512 bytes for simple queries). Using TCP for DNS would add a round trip for the handshake before every query — unacceptable when DNS lookups happen hundreds of times per browsing session. UDP makes DNS queries instantaneous.
+
+If a DNS response is too large for a single UDP datagram, the server sets the TC (Truncated) flag and the client retries via TCP. This fallback happens transparently.
+
+### DHCP
+
+DHCP clients send their initial DISCOVER broadcast before they have an IP address — they cannot complete a TCP handshake because they do not yet have an address to put in the source IP field. UDP's connectionless nature allows a DHCP client to broadcast on a network and receive a response with its assigned address.
+
+### VoIP and Real-Time Audio
+
+A 20ms audio packet that arrives 100ms late is useless — the audio has moved on. Real-time voice over IP (VoIP) using protocols like RTP sends audio data as UDP datagrams. If a datagram is lost, the codec interpolates — it produces a plausible guess at the missing audio based on surrounding frames. This sounds better than what TCP would do: wait for a retransmission that arrives so late it disrupts playback.
+
+### Video Streaming (Live)
+
+Live video streams cannot buffer indefinitely waiting for retransmissions. A live sports broadcast that pauses to retransmit a lost frame would be unacceptable. UDP allows the stream to continue, with the decoder concealing lost frames.
+
+### Online Gaming
+
+Game state updates — player positions, actions, events — must arrive quickly. A game running at 60 frames per second sends updates 60 times per second. An update from 50ms ago is outdated. UDP's lack of head-of-line blocking (where TCP must wait for a lost packet before delivering subsequent packets) means games get the most recent state immediately, even if some older states were lost.
+
+### SNMP
+
+SNMP polls are simple request/response exchanges. The overhead of a TCP connection for each poll would be disproportionate. UDP keeps SNMP lightweight.
+
+### QUIC
+
+QUIC (the transport protocol underlying HTTP/3) is built on UDP. QUIC implements its own reliable delivery, connection management, and congestion control on top of UDP — gaining the flexibility to be implemented in user space (where it can be rapidly improved) rather than in the kernel (where TCP lives). QUIC's use of UDP is a modern example of "build your own reliability on top of UDP when the standard TCP behavior doesn't fit."
+
+---
+
+## UDP and Firewalls
+
+Firewalls treating UDP are in a different position than with TCP. TCP connections have clear state (SYN, established, FIN), making it easy for stateful firewalls to track them. UDP has no such state.
+
+Stateful firewalls typically handle UDP by tracking (source IP, source port, destination IP, destination port) tuples and their timestamps. An outbound UDP datagram creates a state entry. A response arriving with the reversed tuple within the timeout is allowed through. Unsolicited inbound UDP is dropped.
+
+This is generally correct behavior, but it means that UDP NAT traversal (for peer-to-peer applications) requires techniques like STUN to punch holes through the stateful firewall on both sides simultaneously.
+
+---
+
+## Key Concepts
+
+### UDP is not unreliable — it is best-effort
+
+"Unreliable" implies failure. UDP is designed to deliver datagrams with best effort — on a well-functioning network, the vast majority of UDP datagrams arrive successfully. "Unreliable" just means there is no automatic retry. Applications that need reliability implement it at the application layer, tailored to their specific needs (as QUIC and RTP do).
+
+### The right transport depends on the application
+
+TCP is not better than UDP. They solve different problems. An FTP transfer that loses 1% of segments needs retransmission — the file is corrupted without it. A VoIP call that loses 1% of audio frames barely notices — the codec interpolates. The application's tolerance for latency versus loss determines which transport is appropriate.
+
+---
+
+## References
+
+- [RFC 768 — User Datagram Protocol](https://www.rfc-editor.org/rfc/rfc768)
+- [RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport](https://www.rfc-editor.org/rfc/rfc9000)
