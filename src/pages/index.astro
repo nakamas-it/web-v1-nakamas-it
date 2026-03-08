@@ -15,7 +15,7 @@ const experience = [
   {
     company: "Nature's Path Foods",
     type: 'Permanent Full-time',
-    location: 'Hybrid · BC, Canada',
+    location: 'Richmond, BC, Canada',
     roles: [
       { title: 'IT Operations Manager', period: 'Mar 2026 – Present' },
       { title: 'Systems Administrator', period: 'Nov 2024 – Mar 2026' },
@@ -58,7 +58,7 @@ const experience = [
   {
     company: 'Pontificia Universidad Católica del Ecuador',
     type: 'Contract Part-time',
-    location: 'Ecuador',
+    location: 'Quito, Ecuador',
     roles: [
       { title: 'IT Technical Assistant', period: 'Jan 2015 – Jun 2017' },
     ],
@@ -135,29 +135,29 @@ const experience = [
   <section class="mb-16">
     <h2 class="text-2xl font-bold text-slate-100 mb-6 flex items-center gap-3">
       <span class="w-8 h-px bg-cyan-400 inline-block"></span>
-      What I care about
+      Interests
     </h2>
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       {[
         {
-          icon: '🌐',
+          icon: '📡',
           label: 'Networking',
-          desc: 'Protocols, packet analysis, and understanding exactly how data travels across a network.',
+          desc: 'Fluent in TCP/IP and unreasonably excited about a clean Wireshark capture. I read routing tables for fun and consider a well-tuned OSPF topology a form of art.',
         },
         {
-          icon: '🔒',
+          icon: '🛡️',
           label: 'Cybersecurity',
-          desc: 'Defense-in-depth, SOC operations, EDR, and building security programs that actually work.',
+          desc: 'Defender by day, threat hunter by night. Zero-trust, defense-in-depth, EDR, and the thrill of tracing a lateral movement path through event logs at 2am.',
+        },
+        {
+          icon: '🖥️',
+          label: 'Servers & Hypervisors',
+          desc: 'Baremetal whisperer. Hyper-V clusters, iDRAC consoles, storage pools, and the deeply satisfying sound of rack rails clicking into place.',
         },
         {
           icon: '☁️',
-          label: 'Microsoft / Cloud',
-          desc: 'Active Directory, Hyper-V, Microsoft 365, and moving workloads from on-prem to the cloud.',
-        },
-        {
-          icon: '🧪',
-          label: 'Lab work',
-          desc: 'EVE-NG simulations, Wireshark captures, and hands-on experimentation with real protocols.',
+          label: 'Cloud',
+          desc: 'Microsoft 365 admin and recovering on-prem purist. Entra ID, Intune, Exchange Online, Defender — yes, I know the cloud is just someone else\'s server. I try to know that person pretty well.',
         },
       ].map(item => (
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
