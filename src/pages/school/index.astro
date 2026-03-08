@@ -81,10 +81,12 @@ const layers = Object.entries(layerMeta).map(([key, meta]) => ({
                     href={`${base}school/${layerKey}/${slug}`}
                     class={`bg-slate-900 border ${layer.accent.split(' ')[1]} hover:border-opacity-60 rounded-xl p-5 transition-colors group`}
                   >
-                    <h3 class={`font-semibold mb-1 group-hover:underline underline-offset-2 ${layer.accent.split(' ')[0]}`}>
-                      {article.data.protocol.toUpperCase()}
-                    </h3>
-                    <p class="text-slate-100 text-sm font-medium mb-1">{article.data.title}</p>
+                    <div class="flex items-start justify-between gap-3 mb-2">
+                      <p class="text-slate-100 text-sm font-semibold leading-snug group-hover:underline underline-offset-2">{article.data.title}</p>
+                      <span class={`font-mono font-bold text-xs shrink-0 mt-0.5 ${layer.accent.split(' ')[0]}`}>
+                        {article.data.protocol.toUpperCase()}
+                      </span>
+                    </div>
                     <p class="text-slate-400 text-sm leading-relaxed">{article.data.summary}</p>
                   </a>
                 );
