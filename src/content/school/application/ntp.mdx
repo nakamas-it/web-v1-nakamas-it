@@ -1,0 +1,178 @@
+---
+title: "NTP — Network Time Protocol"
+layer: "application"
+protocol: "ntp"
+summary: "Accurate time is invisible infrastructure — until it breaks. NTP synchronises clocks across the internet to within milliseconds, using a hierarchy of stratum levels from atomic reference clocks down to your laptop. Kerberos, TLS certificates, log correlation, and distributed databases all depend on it."
+tags: ["application", "ntp", "time", "stratum", "ptp", "rfc5905"]
+order: 8
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Network Time Protocol (NTP) has been synchronising computer clocks since 1985 — it is one of the oldest continuously operating internet protocols. The current version is NTPv4, defined in RFC 5905 (2010).
+
+Why does clock accuracy matter? Many security and operational systems depend on timestamps being consistent across devices:
+
+- **Kerberos authentication** — tickets expire, and a clock skew of more than 5 minutes causes authentication failures
+- **TLS certificates** — validity is checked against the current time; clocks off by days cause certificate errors
+- **Log correlation** — when debugging an incident across multiple systems, timestamps from different servers must align to reconstruct the sequence of events
+- **Distributed databases** — CockroachDB, Spanner, and similar systems use timestamps to determine transaction ordering
+- **Cryptographic protocols** — replay attack prevention relies on timestamps being accurate
+- **Billing systems** — financial records require accurate timestamps
+
+NTP operates on **UDP port 123**, both for queries and responses.
+
+---
+
+## The Stratum Hierarchy
+
+NTP organises time sources into a hierarchy of **strata** (plural of stratum):
+
+**Stratum 0**: Reference clocks — atomic clocks, GPS receivers, radio clocks synchronized to national standards (NIST, BIPM). These are not directly on the network; they are physical devices connected to Stratum 1 servers.
+
+**Stratum 1**: Primary time servers directly connected to a Stratum 0 device. Examples: `time.nist.gov`, `pool.ntp.org` servers. These are the authoritative internet time sources.
+
+**Stratum 2**: Servers synchronised to Stratum 1. Most enterprise NTP servers are Stratum 2 or 3.
+
+**Stratum 3–15**: Each level synchronised to the level above. The stratum number represents distance from the reference clock, not accuracy directly — a well-connected Stratum 3 server can be more accurate than a poorly connected Stratum 2.
+
+**Stratum 16**: Unsynchronised — the device has no valid time source.
+
+In a typical enterprise deployment: routers and core servers sync to external Stratum 1/2 servers, then internal workstations and network devices sync to those internal servers. This reduces external NTP traffic and provides resilience.
+
+```
+GPS/Atomic Clock (Stratum 0)
+    └── pool.ntp.org servers (Stratum 1)
+            └── Your edge router (Stratum 2)
+                    ├── Internal NTP server (Stratum 3)
+                    │       ├── Workstations (Stratum 4)
+                    │       └── Network switches (Stratum 4)
+                    └── Backup NTP server (Stratum 3)
+```
+
+---
+
+## How NTP Calculates Offset
+
+NTP does not simply ask "what time is it?" and set the clock. It uses a four-timestamp exchange to calculate the offset between the client's clock and the server's clock, while accounting for network delay.
+
+<FlowDiagram
+  parties={["Client", "NTP Server"]}
+  steps={[
+    { from: "Client", to: "NTP Server", label: "NTP Request", sub: "T1 = client transmit timestamp" },
+    { from: "NTP Server", to: "Client", label: "NTP Response", sub: "T2 = server receive timestamp, T3 = server transmit timestamp" },
+    { from: "Client", to: "NTP Server", label: "(client records T4 = receive timestamp)", sub: "" },
+  ]}
+/>
+
+With four timestamps (T1, T2, T3, T4):
+
+```
+Round-trip delay δ = (T4 − T1) − (T3 − T2)
+Clock offset θ = [(T2 − T1) + (T3 − T4)] / 2
+```
+
+The offset `θ` is the difference between the server's clock and the client's clock. A positive offset means the client is behind; negative means it is ahead.
+
+NTP applies this correction **gradually** (slewing the clock) rather than jumping. A sudden time jump can break applications that depend on monotonic time. The kernel adjusts the clock rate slightly until the offset is corrected — typically at up to 500 ppm (parts per million), which corrects 1ms of error per 2 seconds. Large offsets (> 128ms by default) trigger a **step correction** — an immediate clock jump — because slewing would take too long.
+
+<PacketDiagram
+  label="NTP Packet Format (48 bytes)"
+  fields={[
+    { name: "LI + VN + Mode", bytes: 1, highlight: true },
+    { name: "Stratum", bytes: 1, highlight: true },
+    { name: "Poll Interval", bytes: 1 },
+    { name: "Precision", bytes: 1 },
+    { name: "Root Delay", bytes: 4 },
+    { name: "Root Dispersion", bytes: 4 },
+    { name: "Reference Identifier", bytes: 4, highlight: true },
+    { name: "Reference Timestamp", bytes: 8 },
+    { name: "Originate Timestamp (T1)", bytes: 8, highlight: true },
+    { name: "Receive Timestamp (T2)", bytes: 8, highlight: true },
+    { name: "Transmit Timestamp (T3)", bytes: 8, highlight: true },
+  ]}
+/>
+
+**LI (Leap Indicator)**: Warns of an upcoming leap second insertion or deletion.
+
+**Reference Identifier**: For Stratum 1, this is a 4-character ASCII code identifying the reference clock type (e.g., `GPS`, `PPS`, `ATOM`). For Stratum 2+, it is the IP address of the upstream server.
+
+**Root Delay and Root Dispersion**: The accumulated round-trip delay and error bound from the reference clock down through all strata to this server. The client uses these to assess the quality of the time source.
+
+---
+
+## NTP Pool and Public Servers
+
+The **NTP Pool Project** (`pool.ntp.org`) is a volunteer-operated global cluster of thousands of NTP servers. DNS round-robin returns different servers each time, distributing load. Most operating systems and devices use the pool by default:
+
+- `0.pool.ntp.org`, `1.pool.ntp.org`, `2.pool.ntp.org`, `3.pool.ntp.org` — general pool
+- `0.debian.pool.ntp.org` — Debian-specific
+- `time.cloudflare.com` — Cloudflare's public NTP service with NTS support
+- `time.google.com` — Google's public NTP service
+
+For enterprise deployments, configure 3–4 external servers for resilience. If one server is returning incorrect time (the **falseticker** problem), NTP can detect and reject it by comparing against the others.
+
+---
+
+## NTS — NTP with Security
+
+Plain NTP has no authentication — a network attacker can send forged NTP responses and shift a client's clock. The classic attack: set the victim's clock back to replay expired Kerberos tickets or TLS certificates.
+
+**NTS (Network Time Security)** — RFC 8915 (2020) — adds authenticated, encrypted NTP using TLS 1.3. The client negotiates an NTS session over TCP (port 4460), then uses cookie-based authentication for subsequent UDP NTP exchanges. Cloudflare and several other public NTP providers support NTS.
+
+For lower security requirements, NTPv4 supports symmetric key authentication (HMAC-MD5 or HMAC-SHA1) — shared secret between client and server, not as strong as NTS but better than nothing.
+
+---
+
+## Chrony and systemd-timesyncd
+
+**`ntpd`** is the original NTP daemon, full-featured but complex.
+
+**`chrony`** is the modern replacement — faster convergence, better handling of intermittent connectivity, more robust against network jitter. Recommended for servers and workstations that may sleep or have unreliable network connections. Default on RHEL/CentOS/Fedora from v7 onwards.
+
+**`systemd-timesyncd`** is a lightweight SNTP client built into systemd — simpler than full NTP but sufficient for clients that just need to stay roughly in sync. Default on Ubuntu desktop installs.
+
+```bash
+# Check NTP synchronisation status (chrony)
+chronyc tracking
+chronyc sources -v
+
+# Check with timedatectl (systemd)
+timedatectl status
+timedatectl show-timesync
+
+# Force immediate sync (chrony)
+chronyc makestep
+```
+
+---
+
+## PTP — Precision Time Protocol
+
+For applications requiring sub-microsecond accuracy (financial trading, telecom, industrial control, scientific measurement), NTP's millisecond accuracy is insufficient. **PTP (Precision Time Protocol)** — IEEE 1588 — achieves nanosecond-level accuracy using hardware timestamping in network interfaces and switches.
+
+PTP is common in telecom (5G base stations require it), stock exchanges, and broadcast video production. It uses multicast on a local network segment and requires PTP-aware network hardware for best accuracy. NTP is sufficient for most IT infrastructure; PTP is for specialised precision timing.
+
+---
+
+## Key Concepts
+
+### NTP uses slewing, not jumping
+
+This is critical: when NTP corrects a small offset, it adjusts the clock rate slightly rather than jumping. This preserves monotonic time — clocks always move forward. Log timestamps, database transactions, and file modification times remain consistent. The `makestep` directive or `chronyc makestep` forces a step correction when slewing would take too long (typically on first boot or after long sleep).
+
+### Check your stratum, not just connectivity
+
+A device that says "NTP configured" might be a Stratum 16 unsynchronised clock pointing at an unreachable server. Always verify `ntpq -p` or `chronyc sources` shows active sources with valid stratum levels and small offsets and jitter values.
+
+---
+
+## References
+
+- [RFC 5905 — Network Time Protocol Version 4](https://www.rfc-editor.org/rfc/rfc5905)
+- [RFC 8915 — Network Time Security for the NTP](https://www.rfc-editor.org/rfc/rfc8915)
+- [NTP Pool Project](https://www.ntppool.org/)

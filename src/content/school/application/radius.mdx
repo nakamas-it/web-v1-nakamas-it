@@ -1,0 +1,184 @@
+---
+title: "RADIUS — Remote Authentication"
+layer: "application"
+protocol: "radius"
+summary: "RADIUS centralises authentication, authorisation, and accounting for network access — VPNs, Wi-Fi, 802.1X port authentication, and dial-up all delegate credential verification to a RADIUS server. It is the reason your corporate Wi-Fi can check your Active Directory password without each access point knowing anything about your account."
+tags: ["application", "radius", "aaa", "802.1x", "authentication", "accounting", "eap", "rfc2865"]
+order: 10
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+RADIUS — Remote Authentication Dial-In User Service — was created in 1991 to centralise authentication for dial-up modem pools. The name reflects its origins, but RADIUS today authenticates Wi-Fi connections, VPN users, network switches via 802.1X, and administrative access to routers and firewalls.
+
+The core value proposition: **centralisation**. Without RADIUS, each network device (each access point, each VPN endpoint, each switch) would need its own user database. With RADIUS, all these devices delegate authentication to a central server that can check credentials against Active Directory, LDAP, a local database, or any other source.
+
+RADIUS operates on:
+- **UDP port 1812** — Authentication and Authorisation (RFC 2865)
+- **UDP port 1813** — Accounting (RFC 2866)
+- Legacy ports: 1645 (auth) and 1646 (accounting)
+
+---
+
+## AAA — The Three Functions
+
+RADIUS implements **AAA**:
+
+**Authentication**: Is this user who they claim to be? Verify identity via username/password, certificate, or token.
+
+**Authorisation**: What is this user allowed to do? After authentication, the RADIUS server returns attributes that tell the network device how to treat the user — which VLAN to assign, which ACL to apply, what services to permit.
+
+**Accounting**: What did the user do? Session start/stop records with duration, bytes transferred, and the assigned address. Used for billing (ISPs), auditing (enterprise), and troubleshooting.
+
+---
+
+## The Three Roles
+
+**Supplicant**: The device or user requesting access (laptop, phone, VPN client).
+
+**NAS (Network Access Server)** / **RADIUS Client**: The device enforcing access — wireless access point, VPN concentrator, switch, or router. The NAS does not validate credentials itself; it forwards them to the RADIUS server and acts on the response.
+
+**RADIUS Server**: The central authentication server — FreeRADIUS, Cisco ISE, Microsoft NPS (Network Policy Server), Aruba ClearPass. Validates credentials, applies policy, returns access decision.
+
+---
+
+## RADIUS Authentication Flow
+
+<FlowDiagram
+  parties={["Supplicant", "NAS (AP/VPN)", "RADIUS Server"]}
+  steps={[
+    { from: "Supplicant", to: "NAS (AP/VPN)", label: "Connection request", sub: "Wi-Fi association or VPN connection attempt" },
+    { from: "NAS (AP/VPN)", to: "RADIUS Server", label: "Access-Request", sub: "Username, password (encrypted), NAS IP, Called-Station-Id" },
+    { from: "RADIUS Server", to: "NAS (AP/VPN)", label: "Access-Challenge (optional)", sub: "Request for additional factor — OTP, EAP message" },
+    { from: "NAS (AP/VPN)", to: "Supplicant", label: "Challenge forwarded", sub: "" },
+    { from: "Supplicant", to: "NAS (AP/VPN)", label: "Challenge response", sub: "OTP code or EAP response" },
+    { from: "NAS (AP/VPN)", to: "RADIUS Server", label: "Access-Request (with response)", sub: "" },
+    { from: "RADIUS Server", to: "NAS (AP/VPN)", label: "Access-Accept", sub: "User authenticated — includes authorisation attributes" },
+    { from: "NAS (AP/VPN)", to: "Supplicant", label: "Access granted", sub: "VLAN assigned, session started" },
+    { from: "NAS (AP/VPN)", to: "RADIUS Server", label: "Accounting-Request (Start)", sub: "Session start timestamp, framed IP, session ID" },
+    { from: "NAS (AP/VPN)", to: "RADIUS Server", label: "Accounting-Request (Stop)", sub: "Session end — bytes in/out, duration, terminate cause" },
+  ]}
+/>
+
+### RADIUS Packet Structure
+
+<PacketDiagram
+  label="RADIUS Packet"
+  fields={[
+    { name: "Code (1 byte)", bytes: 1, highlight: true },
+    { name: "Identifier (1 byte)", bytes: 1 },
+    { name: "Length (2 bytes)", bytes: 2 },
+    { name: "Authenticator (16 bytes)", bytes: 4, highlight: true },
+    { name: "Attributes (variable)", bytes: 8, highlight: true },
+  ]}
+/>
+
+**Code** values: 1 = Access-Request, 2 = Access-Accept, 3 = Access-Reject, 4 = Accounting-Request, 5 = Accounting-Response, 11 = Access-Challenge
+
+**Authenticator**: A 16-byte MD5 hash used for packet integrity and to obfuscate the password in Access-Request packets. In Access-Request, this is a random value (Request Authenticator). In responses, it is an MD5 hash over the packet content and the shared secret.
+
+**Password encryption**: The user's password is XORed with the MD5 of (shared secret + Request Authenticator). This is not strong encryption — it prevents casual interception but is not resistant to offline attacks if the shared secret is weak.
+
+---
+
+## RADIUS Attributes
+
+Attributes are type-length-value (TLV) structures carrying all the data in a RADIUS packet. Standard attributes are defined in RFC 2865/2866; vendors add their own in **VSA (Vendor-Specific Attributes)**, attribute type 26.
+
+**Authentication attributes**:
+
+| Attribute | Type | Purpose |
+|-----------|------|---------|
+| User-Name | 1 | The username |
+| User-Password | 2 | Encrypted password |
+| NAS-IP-Address | 4 | IP of the NAS |
+| NAS-Port | 5 | Physical port on NAS |
+| Called-Station-Id | 30 | BSSID/SSID for Wi-Fi |
+| Calling-Station-Id | 31 | MAC address of supplicant |
+| EAP-Message | 79 | EAP payload (fragmented) |
+
+**Authorisation attributes** (returned in Access-Accept):
+
+| Attribute | Type | Purpose |
+|-----------|------|---------|
+| Framed-IP-Address | 8 | Assign specific IP to user |
+| Session-Timeout | 27 | Maximum session length (seconds) |
+| Filter-Id | 11 | ACL name to apply |
+| Tunnel-Type | 64 | Tunnel protocol for VLAN assignment |
+| Tunnel-Medium-Type | 65 | Medium type (802 for Ethernet) |
+| Tunnel-Private-Group-Id | 81 | VLAN ID to assign |
+
+Dynamic VLAN assignment uses attributes 64, 65, and 81: the RADIUS server tells the NAS which VLAN to put the user in based on their group membership. A developer gets VLAN 10, a guest gets VLAN 99, an admin gets VLAN 5 — all using the same SSID.
+
+---
+
+## 802.1X — Port-Based Network Access Control
+
+802.1X is the IEEE standard for authenticating devices before granting network access at the port level. RADIUS is the authentication back-end for 802.1X.
+
+Without 802.1X: anyone who plugs into a network port or connects to an SSID gets network access. With 802.1X: the port remains in an unauthorised state, only allowing RADIUS EAP traffic, until authentication succeeds.
+
+### EAP — Extensible Authentication Protocol
+
+EAP is the authentication framework used within 802.1X (and encapsulated in RADIUS's EAP-Message attributes). EAP itself is just a container — the actual authentication happens in an EAP method:
+
+| EAP Method | Authentication | TLS Tunnel | Notes |
+|-----------|----------------|------------|-------|
+| **EAP-TLS** | Client certificate | Yes | Strongest — no passwords; requires PKI for all clients |
+| **PEAP** (Protected EAP) | Password inside TLS tunnel | Yes | Most common enterprise Wi-Fi; uses server cert only |
+| **EAP-TTLS** | Password inside TLS tunnel | Yes | Similar to PEAP; more flexible inner methods |
+| **EAP-MD5** | MD5 challenge | No | No server authentication — vulnerable to MITM |
+| **EAP-FAST** | PAC-based | Yes | Cisco proprietary; no certificates needed |
+
+**PEAP with MSCHAPv2** is the dominant enterprise Wi-Fi authentication combination: the server presents a TLS certificate (so the client can verify it is talking to the real RADIUS server), and the user's password is exchanged inside the TLS tunnel using MSCHAPv2.
+
+---
+
+## Shared Secret — The RADIUS Weak Point
+
+RADIUS uses a **shared secret** between the NAS and the RADIUS server for packet authentication and password encryption. This is a static password configured on both sides. Its security implications:
+
+- If the shared secret is weak, an attacker capturing RADIUS traffic can brute-force the password encryption
+- The shared secret is not used for TLS — RADIUS runs over UDP with no channel encryption unless RADSEC is used
+- Every NAS has its own shared secret; rotating them across many devices is operationally painful
+
+**RADSEC (RADIUS over TLS/DTLS)** — RFC 6614 — solves this by tunnelling RADIUS over TLS, providing proper channel encryption and mutual certificate authentication. Increasingly deployed in large enterprise and carrier environments.
+
+---
+
+## FreeRADIUS
+
+FreeRADIUS is the dominant open-source RADIUS server. It supports every EAP method, integrates with LDAP/AD, SQL databases, and REST APIs, and handles millions of authentication requests per day in ISP deployments.
+
+Configuration directory: `/etc/freeradius/3.0/`
+
+Key files:
+- `clients.conf` — define NAS devices and their shared secrets
+- `users` — local user accounts and attribute overrides
+- `mods-enabled/ldap` — Active Directory/LDAP integration
+- `sites-enabled/default` — the main virtual server configuration
+
+---
+
+## Key Concepts
+
+### RADIUS vs LDAP for authentication
+
+Both can authenticate users, but they serve different roles. LDAP is a directory protocol — applications query it directly. RADIUS is an AAA proxy — network devices forward credentials to it. RADIUS can use LDAP as its back-end. A VPN authenticating against AD typically does so via RADIUS (with FreeRADIUS or NPS as the RADIUS server, which in turn queries AD over LDAP).
+
+### Accounting is underutilised
+
+RADIUS accounting provides a detailed log of every session: who connected, when, from where, for how long, how much data they transferred. This is invaluable for incident response (who was on the VPN when the breach happened?) and capacity planning. Many organisations deploy RADIUS auth but ignore the accounting data.
+
+---
+
+## References
+
+- [RFC 2865 — Remote Authentication Dial-In User Service (RADIUS)](https://www.rfc-editor.org/rfc/rfc2865)
+- [RFC 2866 — RADIUS Accounting](https://www.rfc-editor.org/rfc/rfc2866)
+- [RFC 3579 — RADIUS Support for EAP](https://www.rfc-editor.org/rfc/rfc3579)
+- [RFC 6614 — RADIUS over TLS (RADSEC)](https://www.rfc-editor.org/rfc/rfc6614)

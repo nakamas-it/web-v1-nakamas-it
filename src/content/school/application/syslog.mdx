@@ -1,0 +1,210 @@
+---
+title: "Syslog — System Logging"
+layer: "application"
+protocol: "syslog"
+summary: "Every router, switch, firewall, and server can send log messages to a central collector using syslog. The protocol defines a simple severity-and-facility taxonomy, a message format, and a transport — but the real value is what you build on top: centralised log aggregation, alerting, and the ability to reconstruct what happened across your entire infrastructure from a single pane of glass."
+tags: ["application", "syslog", "logging", "monitoring", "siem", "rsyslog", "rfc5424"]
+order: 11
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Syslog is the standard protocol for sending log messages from devices and applications to a centralised log collector. Originally developed for Unix in the 1980s, it became the de facto standard for network device logging and is now used by virtually every network device, server, and security appliance.
+
+Two RFCs define modern syslog:
+- **RFC 3164** (2001) — the original "BSD syslog" format, widely implemented but loosely specified
+- **RFC 5424** (2009) — the current standard with a formal, structured format and structured data support
+
+**UDP port 514** is the traditional transport (fire-and-forget, no delivery guarantee). **TCP port 514** and **TCP port 6514** (TLS) are used when reliability and confidentiality matter.
+
+---
+
+## Severity Levels
+
+Every syslog message has a **severity** that indicates urgency:
+
+| Level | Name | Meaning |
+|-------|------|---------|
+| 0 | **Emergency** | System is unusable — kernel panic, catastrophic failure |
+| 1 | **Alert** | Action must be taken immediately — database corruption |
+| 2 | **Critical** | Critical conditions — hardware failure, out of disk |
+| 3 | **Error** | Error conditions — service restart failed |
+| 4 | **Warning** | Warning conditions — disk approaching capacity |
+| 5 | **Notice** | Normal but significant conditions — configuration change |
+| 6 | **Informational** | Informational messages — service started, user logged in |
+| 7 | **Debug** | Debug-level messages — verbose diagnostic output |
+
+In practice: Severity 0–2 pages someone immediately. Severity 3–4 generates alerts. Severity 5–6 is logged and reviewed. Severity 7 is only enabled temporarily for troubleshooting — at scale, debug logging can generate millions of messages per second.
+
+---
+
+## Facility Codes
+
+**Facility** identifies the source subsystem that generated the message:
+
+| Code | Facility | Used By |
+|------|----------|---------|
+| 0 | kern | Kernel messages |
+| 1 | user | User-level messages |
+| 2 | mail | Mail system |
+| 3 | daemon | System daemons |
+| 4 | auth | Security/authentication |
+| 5 | syslog | Syslog daemon itself |
+| 6 | lpr | Line printer |
+| 7 | news | Network news |
+| 10 | authpriv | Private auth messages |
+| 16–23 | local0–local7 | Locally defined — commonly used by network devices |
+
+Cisco routers default to **local7**. Cisco ASA firewalls use **local4**. Most application syslog is sent as **daemon** or **local0–7** depending on configuration. The facility is used to route messages to different files or systems on the receiver.
+
+### Priority Calculation
+
+The **priority** (PRI) value in the syslog message combines facility and severity:
+
+```
+PRI = (Facility × 8) + Severity
+```
+
+Examples:
+- `kern.emerg` = (0 × 8) + 0 = **0**
+- `local7.notice` = (23 × 8) + 5 = **189**
+- `auth.warning` = (4 × 8) + 4 = **36**
+
+---
+
+## Syslog Message Format
+
+### RFC 3164 (BSD Syslog)
+
+```
+<189>Mar  8 09:15:32 router01 %LINEPROTO-5-UPDOWN: Interface GigabitEthernet0/1, changed state to down
+```
+
+Components: `<PRI>TIMESTAMP HOSTNAME TAG: MESSAGE`
+
+The format is loosely specified — timestamp formats vary, the hostname field is often an IP address, and the tag format differs by vendor. This makes parsing difficult.
+
+### RFC 5424 (Structured Syslog)
+
+```
+<189>1 2026-03-08T09:15:32.000Z router01.nakamas-it.com IOS 12345 LINK - %LINEPROTO-5-UPDOWN: Interface GigabitEthernet0/1, changed state to down
+```
+
+Components: `<PRI>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID STRUCTURED-DATA MSG`
+
+RFC 5424 adds:
+- ISO 8601 timestamps with timezone (no ambiguity)
+- Separate app-name and process ID fields
+- **Structured data** — key-value pairs in `[element key="value"]` format for machine-parseable metadata
+
+---
+
+## Centralised Log Collection
+
+<FlowDiagram
+  parties={["Network Device", "Syslog Collector", "SIEM / Storage"]}
+  steps={[
+    { from: "Network Device", to: "Syslog Collector", label: "UDP 514 — syslog messages", sub: "Routers, switches, firewalls, servers" },
+    { from: "Syslog Collector", to: "Network Device", label: "(no acknowledgement — UDP)", sub: "Fire and forget" },
+    { from: "Syslog Collector", to: "SIEM / Storage", label: "Parsed, normalised log events", sub: "Forwarded to Elasticsearch, Splunk, Graylog" },
+    { from: "SIEM / Storage", to: "Syslog Collector", label: "Alert triggered", sub: "Rule: auth failure × 10 in 60s → alert" },
+  ]}
+/>
+
+A typical production logging stack:
+
+1. **Sources**: Cisco IOS (`logging host 10.0.0.5`), Linux (`rsyslog` or `journald`), Windows (via NXLog or Winlogbeat), firewalls, VPNs
+2. **Collector**: `rsyslog` or `syslog-ng` — receives, parses, and forwards. Can write to local files and forward to aggregators simultaneously
+3. **Aggregator / SIEM**: Graylog, Splunk, Elastic Stack (ELK), Wazuh — indexes logs for search, dashboards, and alerting
+
+---
+
+## rsyslog and syslog-ng
+
+**rsyslog** is the default syslog daemon on RHEL/CentOS/Debian/Ubuntu. It is backward-compatible with classic syslogd but extends it with:
+- Input and output modules (TCP, UDP, RELP, Kafka, Elasticsearch)
+- Filtering by facility, severity, message content
+- Templates for custom output formats
+- Queue-based reliable forwarding
+
+Example `/etc/rsyslog.conf` snippet — forward all messages to a remote collector:
+
+```
+# Send all log messages to central syslog server over TCP
+*.* @@10.0.0.5:514          # @@ = TCP; @ = UDP
+
+# Or with TLS (rsyslog gtls module)
+*.* action(type="omfwd" target="logs.nakamas-it.com" port="6514"
+           protocol="tcp" StreamDriver="gtls"
+           StreamDriverMode="1" StreamDriverAuthMode="x509/name"
+           StreamDriverPermittedPeers="logs.nakamas-it.com")
+```
+
+**syslog-ng** is the alternative, widely used in enterprise environments, with a more expressive configuration language and strong filtering capabilities.
+
+---
+
+## Cisco IOS Syslog Configuration
+
+Network equipment is typically configured to forward syslog messages to a central collector:
+
+```
+logging host 10.0.0.5
+logging trap informational      ! Send severity 6 (informational) and above
+logging facility local7
+logging source-interface Loopback0   ! Use Loopback as source IP
+service timestamps log datetime msec localtime show-timezone
+```
+
+`logging trap` sets the minimum severity to send — `informational` means levels 0–6 are forwarded. Setting it to `warnings` (level 4) reduces volume but may miss important events.
+
+`service timestamps log datetime msec localtime show-timezone` ensures logs have accurate, readable timestamps — essential for log correlation.
+
+---
+
+## Security Considerations
+
+### UDP syslog is unreliable and unauthenticated
+
+UDP syslog has two problems:
+1. **No delivery guarantee** — messages are silently dropped when the network is congested or the collector is overloaded. This is the worst time to lose logs (during an incident)
+2. **No authentication** — anyone who can reach the collector on port 514 can inject fake log messages
+
+For security-sensitive logging: use **TCP syslog** (at minimum) or **syslog over TLS** (RFC 5425, port 6514). TLS provides channel encryption and mutual authentication — only authorised devices can send logs, and the log stream cannot be intercepted or modified.
+
+### Log integrity and retention
+
+Syslog messages can be modified before they reach the collector, and the collector itself can be compromised. For compliance and forensics:
+- Use TLS transport
+- Send logs to a **write-once** storage system or an immutable S3 bucket
+- Consider **RELP (Reliable Event Logging Protocol)** for guaranteed delivery with acknowledgement
+
+### What to log
+
+**Minimum for security monitoring**: Authentication events (login success/failure), privilege escalation, configuration changes, firewall permit/deny, VPN connection/disconnection, NTP synchronisation events.
+
+**The key insight**: Logs you do not collect cannot be searched during an incident. Storage is cheap; missing evidence is not. Log aggressively and filter at the query layer.
+
+---
+
+## Key Concepts
+
+### Severity 5 (Notice) is often the most useful
+
+Emergency and Critical are obvious. Debug is noise. Notice — significant events that are not errors — captures configuration changes, service restarts, interface state changes, authentication successes. These are the events that let you reconstruct what changed before something broke.
+
+### Timestamps must be synchronised
+
+A syslog message with a wrong timestamp is worse than no log at all — it puts events in the wrong order and breaks incident correlation. NTP synchronisation is a prerequisite for useful centralised logging. Every device sending syslog must be NTP-synchronised.
+
+---
+
+## References
+
+- [RFC 5424 — The Syslog Protocol](https://www.rfc-editor.org/rfc/rfc5424)
+- [RFC 5425 — TLS Transport Mapping for Syslog](https://www.rfc-editor.org/rfc/rfc5425)
+- [RFC 3164 — The BSD Syslog Protocol (legacy)](https://www.rfc-editor.org/rfc/rfc3164)

@@ -1,0 +1,172 @@
+---
+title: "SMTP — How Email Travels"
+layer: "application"
+protocol: "smtp"
+summary: "The protocol that moves email between servers has been largely unchanged since 1982 — SMTP handles message submission and relay, while authentication extensions like SPF, DKIM, and DMARC were bolted on decades later to fight spam and spoofing."
+tags: ["application", "smtp", "email", "spf", "dkim", "dmarc", "starttls", "rfc5321"]
+order: 5
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Email has been a core internet service since the early 1970s. SMTP — Simple Mail Transfer Protocol — is the protocol that moves mail between servers. Defined in RFC 821 (1982) and updated in RFC 5321 (2008), SMTP is one of the oldest application protocols still operating at internet scale.
+
+SMTP's original design assumed all senders were trustworthy — there was no authentication, no encryption, no spam protection. Decades of additions (TLS, SASL, SPF, DKIM, DMARC) have layered security onto a protocol that was never designed for it. Understanding email security means understanding which extensions do what.
+
+### Email Protocol Landscape
+
+| Protocol | Port | Purpose |
+|----------|------|---------|
+| **SMTP** | 25 | Server-to-server mail relay (MTA to MTA) |
+| **Submission** | 587 | Client-to-server submission (MUA to MTA) — requires auth |
+| **SMTPS** | 465 | Submission over implicit TLS (legacy but still used) |
+| **IMAP** | 143 / 993 | Client reads mail from server (see IMAP article) |
+| **POP3** | 110 / 995 | Client downloads mail from server (see IMAP article) |
+
+---
+
+## SMTP Transaction — Moving a Message
+
+<FlowDiagram
+  parties={["Sending MTA", "Receiving MTA"]}
+  steps={[
+    { from: "Sending MTA", to: "Receiving MTA", label: "TCP Connect → port 25", sub: "" },
+    { from: "Receiving MTA", to: "Sending MTA", label: "220 mail.example.com ESMTP ready", sub: "Server banner" },
+    { from: "Sending MTA", to: "Receiving MTA", label: "EHLO mail.sender.com", sub: "Extended HELLO — identify sender, request feature list" },
+    { from: "Receiving MTA", to: "Sending MTA", label: "250-mail.example.com\n250-STARTTLS\n250-AUTH LOGIN PLAIN\n250 SIZE 52428800", sub: "Server capabilities" },
+    { from: "Sending MTA", to: "Receiving MTA", label: "STARTTLS", sub: "Upgrade connection to TLS" },
+    { from: "Receiving MTA", to: "Sending MTA", label: "220 Go ahead", sub: "TLS handshake follows" },
+    { from: "Sending MTA", to: "Receiving MTA", label: "MAIL FROM:<alice@sender.com>", sub: "Envelope sender (return path)" },
+    { from: "Receiving MTA", to: "Sending MTA", label: "250 OK", sub: "" },
+    { from: "Sending MTA", to: "Receiving MTA", label: "RCPT TO:<bob@example.com>", sub: "Envelope recipient" },
+    { from: "Receiving MTA", to: "Sending MTA", label: "250 OK", sub: "" },
+    { from: "Sending MTA", to: "Receiving MTA", label: "DATA", sub: "Begin message content" },
+    { from: "Receiving MTA", to: "Sending MTA", label: "354 Start mail input; end with <CRLF>.<CRLF>", sub: "" },
+    { from: "Sending MTA", to: "Receiving MTA", label: "Headers + Body + <CRLF>.<CRLF>", sub: "Full RFC 5322 message" },
+    { from: "Receiving MTA", to: "Sending MTA", label: "250 OK: queued as abc123", sub: "Message accepted" },
+    { from: "Sending MTA", to: "Receiving MTA", label: "QUIT", sub: "" },
+  ]}
+/>
+
+### Envelope vs Message Headers
+
+This distinction is critical and a source of constant confusion:
+
+**SMTP Envelope** (`MAIL FROM` / `RCPT TO`): The routing information used by the SMTP servers. The envelope sender is where bounces go. The envelope recipient is who actually receives the message. Neither is shown to the email user.
+
+**Message Headers** (`From:` / `To:` / `Subject:`): The content headers inside the DATA portion, defined by RFC 5322. These are what the user sees in their email client. They can contain **anything** — including a different address than the envelope.
+
+This separation is what enables spoofing: SMTP does not require the `From:` header to match the `MAIL FROM` envelope. SPF, DKIM, and DMARC exist specifically to bridge this gap.
+
+---
+
+## MX Record — How Servers Find Each Other
+
+When a mail server needs to deliver to `@example.com`, it does not connect directly to that domain's web server. It looks up the **MX (Mail Exchanger) record** in DNS:
+
+```
+example.com.    IN    MX    10    mail1.example.com.
+example.com.    IN    MX    20    mail2.example.com.
+```
+
+The number is the **priority** (lower = preferred). The sending server connects to `mail1.example.com` first; if unavailable, falls back to `mail2.example.com`. If no MX record exists, the sending server falls back to the A record of the domain itself (rarely used correctly).
+
+---
+
+## Email Authentication — SPF, DKIM, DMARC
+
+The original SMTP protocol has no authentication. These three DNS-based mechanisms were added to solve spoofing and spam:
+
+### SPF — Sender Policy Framework
+
+**What it does**: Declares which IP addresses are authorised to send mail for a domain.
+
+Published as a TXT record in DNS:
+```
+nakamas-it.com.    TXT    "v=spf1 include:_spf.google.com ip4:203.0.113.10 -all"
+```
+
+- `include:_spf.google.com` — Google Workspace servers are authorised
+- `ip4:203.0.113.10` — this specific IP is authorised
+- `-all` — everything else fails (hard fail)
+
+**Limitation**: SPF checks the envelope `MAIL FROM`, not the visible `From:` header. A spoofed email can pass SPF if it uses the attacker's domain as the envelope sender but shows a different `From:` header to the user.
+
+### DKIM — DomainKeys Identified Mail
+
+**What it does**: The sending mail server cryptographically signs the message headers and body. The receiving server retrieves the public key from DNS and verifies the signature.
+
+```
+DKIM-Signature: v=1; a=rsa-sha256; d=sender.com; s=mail;
+    h=from:to:subject:date:message-id;
+    bh=<body hash>; b=<signature>
+```
+
+The public key is at `mail._domainkey.sender.com` in DNS. If the signature verifies, the message has not been altered in transit, and the signing domain (`d=`) is authentic.
+
+**What DKIM provides**: Integrity and origin authentication for the signing domain. It does not prevent replay attacks (a valid signed message can be re-sent to new recipients).
+
+### DMARC — Domain-based Message Authentication, Reporting, and Conformance
+
+**What it does**: Ties SPF and DKIM together and tells receiving servers what to do when they fail.
+
+```
+_dmarc.nakamas-it.com.    TXT    "v=DMARC1; p=reject; rua=mailto:dmarc@nakamas-it.com; pct=100"
+```
+
+- `p=reject` — reject messages that fail DMARC (other options: `none` for monitoring, `quarantine` for spam folder)
+- `rua=` — aggregate report destination (daily XML reports of what passed/failed)
+- `pct=100` — apply policy to 100% of messages
+
+**Alignment**: DMARC requires either the SPF envelope domain or the DKIM signing domain to **align** (match) the visible `From:` header domain. This closes the gap that SPF alone has — a spoofed `From:` cannot pass DMARC even if the envelope domain passes SPF.
+
+---
+
+## SMTP Reply Codes
+
+SMTP uses 3-digit reply codes, similar to HTTP:
+
+| Code | Meaning |
+|------|---------|
+| 220 | Service ready |
+| 250 | Requested mail action okay, completed |
+| 354 | Start mail input |
+| 421 | Service not available (transient — retry later) |
+| 450 | Mailbox unavailable (transient) |
+| 451 | Local error in processing (transient) |
+| 550 | Mailbox unavailable (permanent — no such user) |
+| 551 | User not local |
+| 552 | Exceeded storage allocation |
+| 554 | Transaction failed (permanent — often spam rejection) |
+
+The first digit: `2xx` success, `3xx` waiting for more data, `4xx` transient failure (retry), `5xx` permanent failure (do not retry).
+
+---
+
+## Key Concepts
+
+### Port 25 vs 587 vs 465
+
+Port 25 is server-to-server relay. Most ISPs and cloud providers block outbound port 25 from residential IPs to prevent botnet spam. Email clients (Outlook, Thunderbird, Gmail web) use port 587 (STARTTLS submission) or 465 (implicit TLS) with mandatory SMTP AUTH credentials to submit mail to their provider's mail server.
+
+### STARTTLS is not the same as SSL/TLS
+
+`STARTTLS` is a command that upgrades a plain-text SMTP connection to TLS. The connection starts unencrypted on port 25 or 587; after `STARTTLS` is negotiated, all subsequent traffic is encrypted. This is **opportunistic TLS** — if STARTTLS fails or is not offered, some servers fall back to plaintext. `SMTP over implicit TLS` (port 465) is encrypted from the first byte.
+
+### SMTP queuing and retry
+
+If a receiving server is unavailable, the sending MTA queues the message and retries. RFC 5321 recommends retrying at increasing intervals for up to 4–5 days before generating a non-delivery report (NDR/bounce) to the sender.
+
+---
+
+## References
+
+- [RFC 5321 — Simple Mail Transfer Protocol](https://www.rfc-editor.org/rfc/rfc5321)
+- [RFC 5322 — Internet Message Format](https://www.rfc-editor.org/rfc/rfc5322)
+- [RFC 7208 — Sender Policy Framework (SPF)](https://www.rfc-editor.org/rfc/rfc7208)
+- [RFC 6376 — DomainKeys Identified Mail (DKIM)](https://www.rfc-editor.org/rfc/rfc6376)
+- [RFC 7489 — DMARC](https://www.rfc-editor.org/rfc/rfc7489)

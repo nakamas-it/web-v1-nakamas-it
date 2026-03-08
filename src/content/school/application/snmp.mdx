@@ -1,0 +1,179 @@
+---
+title: "SNMP — Network Device Monitoring"
+layer: "application"
+protocol: "snmp"
+summary: "Simple Network Management Protocol is how network devices expose their state — interface counters, CPU load, error rates — to monitoring systems. SNMPv1 sent community strings in cleartext; SNMPv3 finally added encryption and real authentication, but much of the industry still runs v2c."
+tags: ["application", "snmp", "monitoring", "oid", "mib", "trap", "rfc3411"]
+order: 7
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Every managed network device — router, switch, firewall, UPS, printer — exposes operational data through SNMP. Interface counters, CPU utilisation, memory usage, temperature sensors, error rates — all queryable via a standard protocol. SNMP is the backbone of network monitoring systems like Zabbix, LibreNMS, PRTG, and Nagios.
+
+SNMP uses **UDP port 161** for queries (manager to agent) and **UDP port 162** for traps (agent to manager). The choice of UDP reflects SNMP's design: monitoring should not add load to the network, and individual lost packets are acceptable — the manager will poll again.
+
+SNMP has three major versions:
+
+| Version | Authentication | Encryption | Status |
+|---------|---------------|------------|--------|
+| **SNMPv1** | Community string (plaintext) | None | Legacy — avoid |
+| **SNMPv2c** | Community string (plaintext) | None | Widely deployed — acceptable on isolated management networks |
+| **SNMPv3** | Username + HMAC-MD5/SHA | AES/DES | Recommended for any network with untrusted paths |
+
+---
+
+## The SNMP Model
+
+SNMP involves three components:
+
+**Manager**: The monitoring system that queries devices and receives traps. Examples: Zabbix server, LibreNMS, your custom Python script.
+
+**Agent**: Software running on the managed device (router, switch, server) that responds to queries and sends traps. Built into Cisco IOS, Junos, Linux (`snmpd`), and virtually every managed network device.
+
+**MIB (Management Information Base)**: A structured database of all the variables a device exposes. MIBs are written in ASN.1 and define what each OID means. The manager and agent must share the same MIB definitions.
+
+---
+
+## OIDs — Object Identifiers
+
+Every piece of data in SNMP is identified by an **OID** — a hierarchical dotted-number path through the MIB tree. Think of it as a file system path where each node is a number.
+
+```
+.1.3.6.1.2.1.1.1.0
+ │ │ │ │ │ │ │ │ └─ Instance (0 = scalar)
+ │ │ │ │ │ │ │ └─── sysDescr (system description)
+ │ │ │ │ │ │ └───── system
+ │ │ │ │ │ └─────── mib-2
+ │ │ │ │ └───────── mgmt
+ │ │ │ └─────────── internet
+ │ │ └───────────── dod (Department of Defense)
+ │ └─────────────── org
+ └───────────────── iso
+```
+
+`1.3.6.1.2.1.1.1.0` = `sysDescr` = the text description of the device. Every device that implements RFC 1213 exposes this.
+
+**Commonly queried OIDs**:
+
+| OID | Symbolic Name | Description |
+|-----|---------------|-------------|
+| `1.3.6.1.2.1.1.1.0` | `sysDescr` | System description string |
+| `1.3.6.1.2.1.1.3.0` | `sysUpTime` | Uptime in hundredths of a second |
+| `1.3.6.1.2.1.1.5.0` | `sysName` | Configured hostname |
+| `1.3.6.1.2.1.2.2.1.10.X` | `ifInOctets` | Bytes received on interface X |
+| `1.3.6.1.2.1.2.2.1.16.X` | `ifOutOctets` | Bytes sent on interface X |
+| `1.3.6.1.2.1.2.2.1.14.X` | `ifInErrors` | Input errors on interface X |
+| `1.3.6.1.4.1.*` | Enterprise | Vendor-specific OIDs (Cisco: .1.3.6.1.4.1.9) |
+
+Vendor-specific data lives under the **enterprise** branch (`.1.3.6.1.4.1`). Cisco's OIDs start with `.1.3.6.1.4.1.9`; Juniper's with `.1.3.6.1.4.1.2636`. Each vendor publishes their own MIB files defining what these OIDs mean.
+
+---
+
+## SNMP Operations
+
+<FlowDiagram
+  parties={["Manager", "Agent"]}
+  steps={[
+    { from: "Manager", to: "Agent", label: "GET Request (OID: 1.3.6.1.2.1.1.3.0)", sub: "Query single value — sysUpTime" },
+    { from: "Agent", to: "Manager", label: "GET Response (value: 42856300)", sub: "428563 seconds uptime" },
+    { from: "Manager", to: "Agent", label: "GETNEXT Request (OID: 1.3.6.1.2.1.2.2.1.10.1)", sub: "Get next OID in MIB tree" },
+    { from: "Agent", to: "Manager", label: "GETNEXT Response", sub: "Returns next sequential OID and value" },
+    { from: "Manager", to: "Agent", label: "GETBULK Request (OIDs + max-repetitions)", sub: "SNMPv2 — fetch multiple OIDs in one request" },
+    { from: "Agent", to: "Manager", label: "GETBULK Response (multiple values)", sub: "Efficient bulk retrieval" },
+    { from: "Manager", to: "Agent", label: "SET Request (OID, new value)", sub: "Write a configuration value" },
+    { from: "Agent", to: "Manager", label: "SET Response", sub: "Confirm or error" },
+    { from: "Agent", to: "Manager", label: "TRAP (unsolicited)", sub: "Agent notifies manager of event — link down, threshold exceeded" },
+  ]}
+/>
+
+**GET**: Retrieve one or more specific OIDs. The manager must know the exact OID.
+
+**GETNEXT**: Retrieve the next OID after the specified one. Used to walk through a table without knowing all OIDs in advance.
+
+**GETBULK** (SNMPv2+): Retrieve multiple OIDs and multiple rows of tables in a single request. Dramatically more efficient than sequential GETs for polling interface tables.
+
+**SET**: Write a value to a writable OID. Used for configuration changes (e.g., enabling/disabling an interface, setting a threshold). Requires write community string (v2c) or appropriate SNMPv3 permissions.
+
+**TRAP** (v1) / **INFORM** (v2c/v3): Unsolicited notifications from agent to manager. A link going down, a fan failing, a temperature threshold being exceeded — agents send traps immediately without waiting to be polled. **INFORM** is like TRAP but requires acknowledgement from the manager; unacknowledged INFORMs are retransmitted.
+
+---
+
+## SNMPv3 Security Model
+
+SNMPv3 introduces proper security through three configurable levels:
+
+| Security Level | Authentication | Privacy (Encryption) |
+|---------------|---------------|----------------------|
+| `noAuthNoPriv` | None | None |
+| `authNoPriv` | HMAC-MD5 or HMAC-SHA | None |
+| `authPriv` | HMAC-MD5 or HMAC-SHA | DES or AES |
+
+**Use `authPriv` with SHA and AES** for any SNMPv3 deployment. MD5 and DES are deprecated.
+
+SNMPv3 uses **USM (User-based Security Model)**: each agent is configured with usernames, authentication passwords, and privacy passwords. The authentication password is hashed with the engine ID to produce the authentication key — the plain password is never stored or transmitted.
+
+<PacketDiagram
+  label="SNMPv3 Message Structure"
+  fields={[
+    { name: "msgVersion (3)", bytes: 2 },
+    { name: "msgGlobalData", bytes: 4, highlight: true },
+    { name: "msgSecurityParameters (USM)", bytes: 6, highlight: true },
+    { name: "msgData — PDU (encrypted if authPriv)", bytes: 8, highlight: true },
+  ]}
+/>
+
+---
+
+## SNMP Walk — Discovering What a Device Exposes
+
+`snmpwalk` traverses the entire MIB tree from a starting OID, printing every OID and value:
+
+```bash
+# SNMPv2c walk — get all interface stats
+snmpwalk -v2c -c public 192.168.1.1 1.3.6.1.2.1.2.2
+
+# SNMPv3 walk with auth and encryption
+snmpwalk -v3 -l authPriv -u monitoruser \
+  -a SHA -A "authpass" -x AES -X "privpass" \
+  192.168.1.1 1.3.6.1.2.1.1
+
+# Get a single value
+snmpget -v2c -c public 192.168.1.1 1.3.6.1.2.1.1.3.0
+```
+
+---
+
+## Community Strings — The SNMPv1/v2c "Password"
+
+SNMPv1 and SNMPv2c use **community strings** — a shared text string that functions as a password, sent in plaintext with every packet. The default community strings are:
+- `public` — read-only access (the most dangerous default in networking)
+- `private` — read-write access
+
+Every network device ships with these defaults. Changing them is basic hardening, but even custom community strings are transmitted in cleartext — anyone capturing packets on the management network can read them.
+
+**If you must use SNMPv2c**: Restrict SNMP access via ACLs on the device and firewall rules at the network level. Never allow SNMP from untrusted networks. Consider SNMPv2c read-only with a non-default community string on a dedicated management VLAN acceptable for internal-only monitoring.
+
+---
+
+## Key Concepts
+
+### Poll vs trap — two data collection models
+
+SNMP polling (GET every 60 seconds) gives you time-series data for graphing trends. SNMP traps give you instant notification of events. Production monitoring systems use both: polling for dashboards and trend analysis, traps for alerting on failures. A link that goes down and comes back up in 30 seconds may never appear in 5-minute polling data — traps catch transient events.
+
+### SNMP is read-mostly; SET is dangerous
+
+SET operations allow reconfiguring devices via SNMP. Many environments disable SNMP write access entirely and use dedicated APIs or CLI automation instead. An exposed SNMP write community string is a critical vulnerability.
+
+---
+
+## References
+
+- [RFC 3411 — An Architecture for Describing SNMP Management Frameworks](https://www.rfc-editor.org/rfc/rfc3411)
+- [RFC 3414 — USM for SNMPv3](https://www.rfc-editor.org/rfc/rfc3414)
+- [RFC 1213 — MIB-II](https://www.rfc-editor.org/rfc/rfc1213)

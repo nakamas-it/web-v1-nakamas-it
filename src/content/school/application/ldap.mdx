@@ -1,0 +1,196 @@
+---
+title: "LDAP — Directory Services"
+layer: "application"
+protocol: "ldap"
+summary: "LDAP is the protocol that reads and writes directory information — the hierarchical database storing users, groups, computers, and policies in Active Directory, OpenLDAP, and every enterprise identity system. Understanding LDAP means understanding how authentication, group membership, and policy application work at the protocol level."
+tags: ["application", "ldap", "active-directory", "directory", "authentication", "x500", "rfc4511"]
+order: 9
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+LDAP — Lightweight Directory Access Protocol — is a protocol for accessing and modifying distributed directory information services. It evolved from X.500 directory standards in the early 1990s as a lighter-weight alternative. Today, LDAP is the backbone of enterprise identity infrastructure:
+
+- **Microsoft Active Directory** stores all user accounts, computer accounts, groups, and Group Policy objects in an LDAP-accessible directory
+- **OpenLDAP** is the dominant open-source implementation, used on Linux/Unix systems
+- **Applications** use LDAP for authentication and authorisation — VPNs, web applications, mail servers, network equipment, Kubernetes — all support LDAP/AD authentication
+
+| Port | Usage |
+|------|-------|
+| **389** | LDAP (plain text or STARTTLS) |
+| **636** | LDAPS — LDAP over TLS (implicit) |
+| **3268** | Active Directory Global Catalog |
+| **3269** | Active Directory Global Catalog over TLS |
+
+---
+
+## The Directory Information Tree
+
+An LDAP directory is organised as a tree — the **DIT (Directory Information Tree)**. Each node is an **entry** with a **DN (Distinguished Name)** that uniquely identifies it by its path from the root.
+
+```
+DC=nakamas-it,DC=com                           ← Root domain
+├── CN=Users,DC=nakamas-it,DC=com              ← Users container
+│   ├── CN=Alice Martin,OU=IT,DC=nakamas-it,DC=com
+│   └── CN=Bob Chen,OU=Sales,DC=nakamas-it,DC=com
+├── OU=Groups,DC=nakamas-it,DC=com             ← Groups OU
+│   ├── CN=Domain Admins,CN=Users,...
+│   └── CN=VPN-Users,OU=Groups,...
+└── OU=Computers,DC=nakamas-it,DC=com          ← Computer accounts
+    ├── CN=WS-ALICE,OU=Computers,...
+    └── CN=SRV-FILE01,OU=Computers,...
+```
+
+### DN Components
+
+| Abbreviation | Attribute | Example |
+|-------------|-----------|---------|
+| `DC` | Domain Component | `DC=nakamas-it`, `DC=com` |
+| `OU` | Organizational Unit | `OU=IT`, `OU=Sales` |
+| `CN` | Common Name | `CN=Alice Martin` |
+| `O` | Organization | `O=Nakamas IT` |
+| `C` | Country | `C=US` |
+
+A user's full DN might be: `CN=Alice Martin,OU=IT,OU=Staff,DC=nakamas-it,DC=com`
+
+The **RDN (Relative Distinguished Name)** is the leftmost component — `CN=Alice Martin`. The rest is the path to the root.
+
+---
+
+## LDAP Entries and Object Classes
+
+Each entry has an **objectClass** attribute that defines what attributes it must (MUST) and may (MAY) have. Object classes are defined in the LDAP schema.
+
+**Common objectClasses**:
+
+| ObjectClass | Used For | Key Attributes |
+|------------|----------|----------------|
+| `person` | Base person entry | `cn`, `sn` (surname) |
+| `inetOrgPerson` | Internet user | `mail`, `telephoneNumber`, `uid` |
+| `organizationalUnit` | OU container | `ou` |
+| `posixAccount` | Unix account | `uid`, `uidNumber`, `gidNumber`, `homeDirectory` |
+| `groupOfNames` | Group | `cn`, `member` (list of DNs) |
+| `user` (AD) | AD user | `sAMAccountName`, `userPrincipalName`, `memberOf` |
+
+Active Directory extends standard LDAP with proprietary attributes:
+- `sAMAccountName` — the NetBIOS/pre-Windows 2000 username (`alice`)
+- `userPrincipalName` — the UPN login (`alice@nakamas-it.com`)
+- `memberOf` — the groups the user belongs to (AD back-link attribute)
+- `unicodePwd` — the password hash (write-only, requires TLS)
+
+---
+
+## LDAP Operations
+
+<FlowDiagram
+  parties={["LDAP Client", "LDAP Server"]}
+  steps={[
+    { from: "LDAP Client", to: "LDAP Server", label: "TCP Connect → port 389 or 636", sub: "" },
+    { from: "LDAP Client", to: "LDAP Server", label: "BindRequest (DN + password)", sub: "Authenticate — simple bind or SASL" },
+    { from: "LDAP Server", to: "LDAP Client", label: "BindResponse (success)", sub: "Session authenticated" },
+    { from: "LDAP Client", to: "LDAP Server", label: "SearchRequest", sub: "base DN + scope + filter + attributes" },
+    { from: "LDAP Server", to: "LDAP Client", label: "SearchResultEntry (entry 1)", sub: "Matching entry with requested attributes" },
+    { from: "LDAP Server", to: "LDAP Client", label: "SearchResultEntry (entry 2)", sub: "" },
+    { from: "LDAP Server", to: "LDAP Client", label: "SearchResultDone (success)", sub: "" },
+    { from: "LDAP Client", to: "LDAP Server", label: "ModifyRequest (DN + changes)", sub: "Add/delete/replace attributes" },
+    { from: "LDAP Server", to: "LDAP Client", label: "ModifyResponse (success)", sub: "" },
+    { from: "LDAP Client", to: "LDAP Server", label: "UnbindRequest", sub: "Close session" },
+  ]}
+/>
+
+**Bind**: Authentication. Simple bind sends DN and password (should only be used over TLS). Anonymous bind (no credentials) reads publicly accessible entries. SASL bind uses mechanisms like GSSAPI (Kerberos) for stronger authentication.
+
+**Search**: The most common operation. Parameters:
+- **Base DN**: Start point in the tree
+- **Scope**: `base` (just the entry), `one` (one level down), `sub` (entire subtree)
+- **Filter**: Boolean expression of attribute conditions
+- **Attributes**: Which attributes to return (empty = all)
+
+**Modify**: Add, delete, or replace attribute values on an entry.
+
+**Add**: Create a new entry.
+
+**Delete**: Remove an entry (must be a leaf node — no children).
+
+**ModifyDN**: Rename an entry or move it to a different parent.
+
+**Compare**: Test whether an entry has a specific attribute value — returns `compareTrue` or `compareFalse`. Often used for checking group membership or validating passwords without retrieving the value.
+
+---
+
+## LDAP Search Filters
+
+LDAP filters use a prefix notation with parentheses. These appear in application configuration files and command-line queries constantly:
+
+```
+(objectClass=user)                           -- All users
+(sAMAccountName=alice)                       -- Specific username
+(mail=alice@nakamas-it.com)                  -- By email
+(&(objectClass=user)(department=IT))         -- AND: users in IT
+(|(cn=Alice*)(cn=Bob*))                      -- OR: starts with Alice or Bob
+(!(userAccountControl:1.2.840.113556.1.4.803:=2))  -- NOT disabled (AD)
+(&(objectClass=user)(memberOf=CN=VPN-Users,OU=Groups,DC=nakamas-it,DC=com))
+```
+
+**Filter operators**:
+- `&` — AND (all conditions must match)
+- `|` — OR (any condition must match)
+- `!` — NOT
+- `=` — equality
+- `~=` — approximate match
+- `>=` / `<=` — greater/less than
+- `*` — wildcard (in value)
+
+---
+
+## LDAP for Application Authentication
+
+The most common use of LDAP in practice is **application authentication**: a web app, VPN, or service checks credentials against an LDAP/AD server.
+
+The typical flow:
+1. User enters username and password in the application
+2. Application binds to LDAP with a **service account** (read-only dedicated account)
+3. Application searches for the user: `(sAMAccountName=alice)` → gets Alice's DN
+4. Application attempts a **bind with Alice's DN and her password**
+5. If the bind succeeds, LDAP has verified the password — authentication passed
+6. Application may then search `memberOf` to check group membership for authorisation
+
+This pattern is called **bind authentication** and is universal across VPN concentrators, web apps, network equipment (RADIUS with LDAP back-end), and Linux PAM.
+
+---
+
+## Active Directory Specifics
+
+Active Directory is an LDAP directory plus:
+- **Kerberos** for ticket-based authentication (the default for domain-joined Windows systems)
+- **DNS** — AD is tightly integrated with DNS for service discovery
+- **Group Policy** — delivered via LDAP/SYSVOL
+- **Replication** — multi-master replication between Domain Controllers
+
+**Global Catalog** (port 3268/3269): A read-only, partial-attribute replica of all objects across all domains in an Active Directory forest. Used for cross-domain user lookups and UPN authentication. Searching the Global Catalog avoids referrals to other domain controllers.
+
+**LDAP Referrals**: When a domain controller does not have the entry you're searching for (it's in another domain), it returns a referral — a pointer to a DC that does. Applications must follow referrals or search the Global Catalog to avoid missing cross-domain results.
+
+---
+
+## Key Concepts
+
+### Anonymous bind leaks information
+
+Many LDAP servers (including poorly configured Active Directory) allow anonymous bind with read access to the directory. An attacker with network access can enumerate all user accounts, groups, email addresses, and computer names without any credentials. Lock down anonymous access and use dedicated service accounts with minimum required permissions.
+
+### Use LDAPS or STARTTLS
+
+Plain LDAP on port 389 sends credentials in cleartext. Always use LDAPS (port 636) or STARTTLS for any production deployment. Note: STARTTLS on port 389 still starts with an unencrypted negotiation — verify the client enforces TLS before sending credentials.
+
+---
+
+## References
+
+- [RFC 4511 — LDAP: The Protocol](https://www.rfc-editor.org/rfc/rfc4511)
+- [RFC 4512 — LDAP: Directory Information Models](https://www.rfc-editor.org/rfc/rfc4512)
+- [RFC 4513 — LDAP: Authentication Methods and Security Mechanisms](https://www.rfc-editor.org/rfc/rfc4513)

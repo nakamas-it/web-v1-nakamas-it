@@ -1,0 +1,141 @@
+---
+title: "FTP, SFTP & FTPS — File Transfer Protocols"
+layer: "application"
+protocol: "ftp-sftp-ftps"
+summary: "Three protocols share 'FTP' in their name but work completely differently under the hood — plain FTP sends credentials in cleartext, FTPS wraps FTP in TLS, and SFTP is an entirely separate protocol riding over SSH."
+tags: ["application", "ftp", "sftp", "ftps", "ssh", "tls", "file-transfer", "rfc959"]
+order: 3
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+File Transfer Protocol (FTP) is one of the oldest application protocols still in active use — defined in RFC 959 (1985), predating the web by years. Its age shows: it was designed for a trusted academic network where encryption was not a concern. Today, plain FTP is used only in legacy environments or air-gapped internal networks where security is enforced at another layer.
+
+The confusion in this space comes from naming: **SFTP** and **FTPS** both add security, but they do so in completely different ways and are not interchangeable.
+
+| Protocol | Transport | Port | Authentication | Encryption |
+|----------|-----------|------|----------------|------------|
+| **FTP** | TCP | 21 (control), 20 (data) | Username/password in cleartext | None |
+| **FTPS** | TCP + TLS | 990 (implicit), 21 (explicit) | Username/password over TLS | TLS |
+| **SFTP** | SSH | 22 | SSH key or password | SSH (always) |
+
+---
+
+## How FTP Works — The Dual-Channel Design
+
+FTP's most unusual characteristic is that it uses **two separate TCP connections**: a persistent **control channel** on port 21 for commands, and a transient **data channel** for actual file transfers. The data channel is opened and closed for each file or directory listing.
+
+<FlowDiagram
+  parties={["Client", "Server"]}
+  steps={[
+    { from: "Client", to: "Server", label: "TCP Connect → port 21", sub: "Control channel established" },
+    { from: "Server", to: "Client", label: "220 Service ready", sub: "FTP banner" },
+    { from: "Client", to: "Server", label: "USER alice", sub: "Username" },
+    { from: "Server", to: "Client", label: "331 Password required", sub: "" },
+    { from: "Client", to: "Server", label: "PASS s3cret", sub: "Password — sent in cleartext" },
+    { from: "Server", to: "Client", label: "230 User logged in", sub: "" },
+    { from: "Client", to: "Server", label: "PASV", sub: "Request passive mode data channel" },
+    { from: "Server", to: "Client", label: "227 Entering Passive Mode (host, port)", sub: "Server tells client where to connect for data" },
+    { from: "Client", to: "Server", label: "TCP Connect → data port", sub: "Client opens data channel" },
+    { from: "Client", to: "Server", label: "RETR report.pdf", sub: "Request file on control channel" },
+    { from: "Server", to: "Client", label: "File data", sub: "File sent on data channel" },
+    { from: "Server", to: "Client", label: "226 Transfer complete", sub: "Data channel closed" },
+  ]}
+/>
+
+### Active vs Passive Mode
+
+FTP's dual-channel design creates a firewall problem: who initiates the data connection?
+
+**Active mode** (original): The client tells the server its IP and a random port. The server initiates the data connection from port 20 back to the client. Problem: the client's firewall typically blocks incoming connections from random servers — active mode breaks through NAT and firewalls.
+
+**Passive mode** (the fix): The client sends `PASV`. The server opens a random port and tells the client to connect to it. The client initiates the data connection. This works through NAT because the client is always the initiator. Almost all modern FTP clients use passive mode.
+
+---
+
+## FTP Commands and Reply Codes
+
+FTP's control channel is human-readable text. Commands are 3–4 letter codes; replies are 3-digit numeric codes with a text message.
+
+**Common commands**: `USER`, `PASS`, `LIST` (directory listing), `RETR` (download), `STOR` (upload), `DELE` (delete), `MKD` (make directory), `PWD` (print working directory), `QUIT`
+
+**Reply code structure**: The first digit indicates success/failure/pending. `2xx` = success, `3xx` = further action needed, `4xx` = transient failure, `5xx` = permanent failure.
+
+---
+
+## FTPS — FTP over TLS
+
+FTPS (defined in RFC 4217) wraps the FTP protocol in TLS. It comes in two flavours:
+
+**Explicit FTPS (STARTTLS)**: The client connects to port 21 and issues the `AUTH TLS` command to upgrade the connection to TLS before sending credentials. More firewall-friendly; the same port works for both plain and TLS connections. This is the preferred mode.
+
+**Implicit FTPS**: The entire connection is TLS from the start, on port 990. No plain-text negotiation. Simpler but requires a dedicated port and a server that does not serve plain FTP on the same port.
+
+Both the control channel and data channel are encrypted separately. FTPS requires a server-side TLS certificate; clients can optionally present client certificates.
+
+**The firewall problem persists**: Even with FTPS, the passive mode data channel uses a random high port. Firewalls must either allow a range of these ports or the FTP server must be configured to restrict the passive port range and the firewall must allow that specific range.
+
+---
+
+## SFTP — SSH File Transfer Protocol
+
+SFTP (defined in the SSH protocol suite, not an RFC on its own) is **not FTP over SSH**. It is a completely separate binary protocol designed from scratch to work as a subsystem of SSH. The only thing SFTP shares with FTP is the ability to transfer files.
+
+<FlowDiagram
+  parties={["Client", "Server"]}
+  steps={[
+    { from: "Client", to: "Server", label: "TCP Connect → port 22", sub: "Single connection — no separate data channel" },
+    { from: "Client", to: "Server", label: "SSH handshake + key exchange", sub: "All traffic encrypted from this point" },
+    { from: "Client", to: "Server", label: "SSH_MSG_CHANNEL_REQUEST: subsystem sftp", sub: "Start SFTP subsystem" },
+    { from: "Client", to: "Server", label: "SSH_FXP_OPEN (filename)", sub: "Open file for reading" },
+    { from: "Server", to: "Client", label: "SSH_FXP_HANDLE (handle)", sub: "File handle returned" },
+    { from: "Client", to: "Server", label: "SSH_FXP_READ (handle, offset, length)", sub: "Read file data" },
+    { from: "Server", to: "Client", label: "SSH_FXP_DATA (data)", sub: "File data returned" },
+    { from: "Client", to: "Server", label: "SSH_FXP_CLOSE (handle)", sub: "Close file" },
+  ]}
+/>
+
+### Why SFTP is Different
+
+**Single connection**: Everything goes through the SSH session — no separate data channel, no passive/active mode problem, no firewall complications. Port 22 only.
+
+**Binary protocol**: Unlike FTP's human-readable text, SFTP uses binary packets with fixed fields. More efficient; no ambiguity in parsing.
+
+**Full filesystem semantics**: SFTP is not just file transfer — it exposes a filesystem API with operations like `stat`, `rename`, `mkdir`, `readdir`, `symlink`. It is closer to a remote filesystem than a file transfer protocol.
+
+**Authentication via SSH**: SSH keys (RSA, ECDSA, Ed25519) are the standard. Password authentication is also supported but discouraged. No certificates are needed — SSH public key authentication is simpler to deploy than PKI.
+
+---
+
+## Security Comparison
+
+| Feature | FTP | FTPS | SFTP |
+|---------|-----|------|------|
+| Credentials encrypted | No | Yes | Yes |
+| Data encrypted | No | Yes | Yes |
+| Certificate required | No | Yes (server) | No |
+| SSH key auth | No | No | Yes |
+| Firewall-friendly | No (dual channel) | No (dual channel) | Yes (port 22 only) |
+| Port(s) | 21, 20 | 21 or 990 + data ports | 22 |
+
+**If you control the server, use SFTP.** It is simpler to configure, firewall-friendly, and SSH key authentication is more secure than passwords. FTPS is appropriate when you must interface with legacy systems that do not support SFTP or when compliance requirements mandate certificate-based authentication.
+
+Plain FTP should not be used for anything traversing a network you do not fully control. In 2026, the only acceptable uses of plain FTP are isolated lab environments and truly air-gapped systems.
+
+---
+
+## SCP — Secure Copy Protocol
+
+SCP (`scp` command) also runs over SSH and is worth mentioning here. It is a simple file copy tool: it copies a file from point A to point B. Unlike SFTP, it has no interactive filesystem browsing — it is a one-shot transfer tool. Modern `scp` implementations use SFTP under the hood; older ones used a legacy protocol that had vulnerabilities.
+
+---
+
+## References
+
+- [RFC 959 — File Transfer Protocol](https://www.rfc-editor.org/rfc/rfc959)
+- [RFC 4217 — Securing FTP with TLS (FTPS)](https://www.rfc-editor.org/rfc/rfc4217)
+- [draft-ietf-secsh-filexfer — SSH File Transfer Protocol](https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer)

@@ -1,0 +1,181 @@
+---
+title: "SSH — Secure Shell"
+layer: "application"
+protocol: "ssh"
+summary: "How SSH replaced telnet and rsh to become the universal tool for secure remote access — the key exchange that protects every session, public key authentication, and the protocol's multiplexing architecture that carries shells, file transfers, and tunnels over a single encrypted connection."
+tags: ["application", "ssh", "cryptography", "key-exchange", "public-key", "tunneling", "rfc4253"]
+order: 4
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Before SSH, remote administration meant `telnet` or `rsh` — both sent everything, including passwords, as cleartext. Anyone on the network path could capture credentials with a packet sniffer. SSH (Secure Shell), developed by Tatu Ylönen in 1995 and standardised as SSH-2 in RFC 4253 (2006), solved this by encrypting the entire session and providing cryptographic authentication.
+
+SSH is not a single protocol — it is a **protocol family**:
+
+- **SSH Transport Layer Protocol** (RFC 4253) — key exchange, encryption, integrity
+- **SSH Authentication Protocol** (RFC 4252) — user authentication methods
+- **SSH Connection Protocol** (RFC 4254) — multiplexing multiple logical channels over one connection
+
+Port 22. TCP only.
+
+---
+
+## The SSH Connection — Step by Step
+
+<FlowDiagram
+  parties={["Client", "Server"]}
+  steps={[
+    { from: "Client", to: "Server", label: "TCP Connect → port 22", sub: "" },
+    { from: "Server", to: "Client", label: "SSH-2.0 banner", sub: "Protocol version identification" },
+    { from: "Client", to: "Server", label: "SSH-2.0 banner", sub: "Client version identification" },
+    { from: "Client", to: "Server", label: "SSH_MSG_KEXINIT", sub: "Proposed algorithms: key exchange, ciphers, MACs, compression" },
+    { from: "Server", to: "Client", label: "SSH_MSG_KEXINIT", sub: "Server's algorithm preferences" },
+    { from: "Client", to: "Server", label: "SSH_MSG_KEX_ECDH_INIT", sub: "Client's ephemeral ECDH public key" },
+    { from: "Server", to: "Client", label: "SSH_MSG_KEX_ECDH_REPLY", sub: "Server host key + ephemeral ECDH key + signature" },
+    { from: "Client", to: "Server", label: "SSH_MSG_NEWKEYS", sub: "Switch to negotiated encryption" },
+    { from: "Client", to: "Server", label: "SSH_MSG_SERVICE_REQUEST: ssh-userauth", sub: "Begin authentication" },
+    { from: "Client", to: "Server", label: "SSH_MSG_USERAUTH_REQUEST", sub: "Public key or password auth" },
+    { from: "Server", to: "Client", label: "SSH_MSG_USERAUTH_SUCCESS", sub: "Authentication accepted" },
+    { from: "Client", to: "Server", label: "SSH_MSG_CHANNEL_OPEN: session", sub: "Open a shell channel" },
+    { from: "Server", to: "Client", label: "SSH_MSG_CHANNEL_OPEN_CONFIRMATION", sub: "Channel ready — interactive session begins" },
+  ]}
+/>
+
+---
+
+## Host Key Verification — Trust on First Use
+
+When you connect to a server for the first time, SSH shows the server's **host key fingerprint** and asks you to verify it:
+
+```
+The authenticity of host 'nakamas-it.com (104.21.1.1)' can't be established.
+ED25519 key fingerprint is SHA256:aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/=.
+Are you sure you want to continue connecting (yes/no)?
+```
+
+If you type `yes`, the fingerprint is stored in `~/.ssh/known_hosts`. On every subsequent connection, the server's key is checked against this stored value. If it does not match — because the server was reinstalled, or because someone is performing a man-in-the-middle attack — SSH refuses to connect and shows a loud warning.
+
+This model is called **TOFU (Trust On First Use)**. Its weakness is the first connection: if you are being attacked on day one, you will store the attacker's key. In high-security environments, host key fingerprints are distributed out-of-band (e.g., via a configuration management system or by physically reading them from the server console).
+
+---
+
+## Public Key Authentication
+
+Password authentication sends a password (encrypted by the SSH session, not cleartext) to the server, which checks it against `/etc/shadow`. Public key authentication never sends a secret to the server.
+
+### How It Works
+
+1. The user generates a key pair: a **private key** (stays on the client, never leaves) and a **public key** (placed in `~/.ssh/authorized_keys` on the server).
+2. When authenticating, the client sends the public key it wishes to use.
+3. The server checks `authorized_keys` — if the public key is present, it sends the client a random challenge.
+4. The client signs the challenge with the private key.
+5. The server verifies the signature using the public key. A valid signature proves the client possesses the private key without the private key ever being transmitted.
+
+```bash
+# Generate an Ed25519 key pair
+ssh-keygen -t ed25519 -C "alice@workstation"
+
+# Copy public key to server
+ssh-copy-id -i ~/.ssh/id_ed25519.pub alice@server.example.com
+
+# Connect — no password prompted
+ssh alice@server.example.com
+```
+
+**Key types**: Ed25519 is the modern recommendation (compact, fast, strong). ECDSA (P-256, P-384) is acceptable. RSA is legacy — use 4096-bit minimum if required; avoid RSA-1024 and RSA-2048 for new deployments. DSA is broken and removed from OpenSSH.
+
+---
+
+## SSH Channels — One Connection, Many Uses
+
+Once the encrypted session is established, SSH multiplexes multiple **channels** over it. Each channel is an independent bidirectional stream. This is how SSH is simultaneously a remote shell, a file transfer tool, and a network tunnelling system.
+
+<PacketDiagram
+  label="SSH Packet Format"
+  fields={[
+    { name: "Packet Length", bytes: 4 },
+    { name: "Padding Length", bytes: 1 },
+    { name: "Payload (message type + data)", bytes: 8, highlight: true },
+    { name: "Random Padding", bytes: 3 },
+    { name: "MAC", bytes: 4, highlight: true },
+  ]}
+/>
+
+**Session channel**: An interactive shell (`ssh user@host`) or a single command (`ssh user@host ls -la`).
+
+**SFTP subsystem**: The `sftp` client requests the SFTP subsystem on a session channel. The SSH connection layer handles the multiplexing.
+
+**Local port forwarding** (`-L`): Traffic sent to a local port is tunnelled through the SSH connection and delivered to a remote address from the server's perspective. Example: `ssh -L 5432:db.internal:5432 bastion` — connect to `localhost:5432`, packets emerge at `db.internal:5432` from behind the bastion.
+
+**Remote port forwarding** (`-R`): The server listens on a port and forwards incoming traffic to the client. Used for exposing a local service through a public server.
+
+**Dynamic port forwarding / SOCKS proxy** (`-D`): Turns the SSH client into a SOCKS proxy. Applications configured to use the SOCKS proxy route all traffic through the SSH tunnel.
+
+---
+
+## SSH Configuration Files
+
+`~/.ssh/config` — client configuration:
+
+```
+Host bastion
+    HostName bastion.example.com
+    User admin
+    IdentityFile ~/.ssh/id_ed25519
+    ForwardAgent no
+
+Host internal-db
+    HostName 10.0.1.50
+    User postgres
+    ProxyJump bastion
+    Port 22
+```
+
+`ProxyJump` (formerly `ProxyCommand`) chains SSH connections — you reach `internal-db` by first SSHing to `bastion`, then SSHing from there. This is the modern way to access hosts behind a bastion/jump server.
+
+`/etc/ssh/sshd_config` — server configuration. Critical security settings:
+
+```
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+AllowUsers alice bob
+MaxAuthTries 3
+```
+
+Disabling password authentication (`PasswordAuthentication no`) eliminates brute-force attacks entirely — only clients with a valid private key can authenticate.
+
+---
+
+## SSH Agent
+
+`ssh-agent` is a daemon that holds decrypted private keys in memory. Instead of typing the key passphrase on every connection, you unlock the key once with `ssh-add`, and the agent handles authentication requests transparently.
+
+**Agent forwarding** (`ForwardAgent yes` or `ssh -A`): The agent is accessible from the remote server. This allows `ssh` commands run on the remote server to use your local keys — useful for hopping through bastion hosts without copying private keys to intermediate servers. **Use with caution**: a compromised server with agent forwarding enabled can use your agent to authenticate to other servers as you.
+
+---
+
+## Key Concepts
+
+### SSH is not just a shell
+
+SSH is a general-purpose encrypted tunnel. It carries interactive shells, file transfers (SFTP/SCP), port forwards, and arbitrary TCP streams. `git` over SSH, database connections through tunnels, VNC over SSH — all common patterns.
+
+### Disable password authentication
+
+Bots scan port 22 constantly and attempt credential stuffing with common passwords. Once you have public key authentication working, set `PasswordAuthentication no` in `sshd_config`. Brute-force attacks become mathematically impossible.
+
+---
+
+## References
+
+- [RFC 4251 — The Secure Shell (SSH) Protocol Architecture](https://www.rfc-editor.org/rfc/rfc4251)
+- [RFC 4252 — The Secure Shell (SSH) Authentication Protocol](https://www.rfc-editor.org/rfc/rfc4252)
+- [RFC 4253 — The Secure Shell (SSH) Transport Layer Protocol](https://www.rfc-editor.org/rfc/rfc4253)
+- [RFC 4254 — The Secure Shell (SSH) Connection Protocol](https://www.rfc-editor.org/rfc/rfc4254)

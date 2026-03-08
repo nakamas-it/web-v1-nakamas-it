@@ -1,0 +1,154 @@
+---
+title: "IMAP & POP3 — Reading Your Email"
+layer: "application"
+protocol: "imap-pop3"
+summary: "SMTP delivers mail to servers; IMAP and POP3 are how clients retrieve it. IMAP keeps mail on the server and synchronises state across devices — the modern standard. POP3 downloads and deletes — a relic of the single-device era that still sees use in specific scenarios."
+tags: ["application", "imap", "pop3", "email", "rfc9051", "rfc1939"]
+order: 6
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+When an email arrives at a mail server, SMTP's job is done — the message is stored in a mailbox. The user needs a separate protocol to access that mailbox from their email client. Two protocols serve this purpose:
+
+**POP3 (Post Office Protocol version 3)** — defined in RFC 1939 (1996). Designed for the era of single, always-connected desktop computers. Downloads messages to the local machine and (typically) deletes them from the server.
+
+**IMAP (Internet Message Access Protocol)** — currently IMAPv4rev2, RFC 9051 (2021). Designed for a world where users access email from multiple devices. Mail stays on the server; clients synchronise folders and message state (read/unread, flagged, deleted).
+
+In 2026, IMAP dominates. POP3 persists in automated processing pipelines, legacy systems, and niche use cases where local-only storage is desired.
+
+| Feature | IMAP | POP3 |
+|---------|------|------|
+| Mail stored | On server | Downloaded to client |
+| Multi-device sync | Yes | No (unless configured) |
+| Folder management | Full | None |
+| Server-side search | Yes | No |
+| Partial message fetch | Yes (just headers, no body) | No (full message) |
+| Port (plaintext) | 143 | 110 |
+| Port (TLS) | 993 | 995 |
+
+---
+
+## IMAP — Server-Side Mailbox Management
+
+IMAP treats the mail server as the authoritative store. Clients download messages on demand and synchronise state changes back to the server. Reading a message on your phone marks it read on your laptop too.
+
+<FlowDiagram
+  parties={["Mail Client", "IMAP Server"]}
+  steps={[
+    { from: "Mail Client", to: "IMAP Server", label: "TCP Connect → port 993 (TLS)", sub: "" },
+    { from: "IMAP Server", to: "Mail Client", label: "* OK Dovecot ready", sub: "Server greeting" },
+    { from: "Mail Client", to: "IMAP Server", label: "a1 LOGIN alice password", sub: "Authenticate (ideally SASL AUTH over TLS)" },
+    { from: "IMAP Server", to: "Mail Client", label: "a1 OK LOGIN completed", sub: "" },
+    { from: "Mail Client", to: "IMAP Server", label: "a2 SELECT INBOX", sub: "Open a mailbox" },
+    { from: "IMAP Server", to: "Mail Client", label: "* 42 EXISTS\n* 3 RECENT\na2 OK [READ-WRITE] SELECT completed", sub: "42 messages total, 3 new" },
+    { from: "Mail Client", to: "IMAP Server", label: "a3 FETCH 40:42 (FLAGS ENVELOPE)", sub: "Fetch headers for messages 40–42" },
+    { from: "IMAP Server", to: "Mail Client", label: "* 40 FETCH (FLAGS (\\Seen) ENVELOPE (...))\n* 41 FETCH ...\n* 42 FETCH ...", sub: "Message metadata" },
+    { from: "Mail Client", to: "IMAP Server", label: "a4 FETCH 42 BODY[]", sub: "Fetch full body of message 42" },
+    { from: "IMAP Server", to: "Mail Client", label: "* 42 FETCH (BODY[] {2048}\n<message data>)", sub: "Full message content" },
+    { from: "Mail Client", to: "IMAP Server", label: "a5 STORE 42 +FLAGS (\\Seen)", sub: "Mark as read" },
+    { from: "IMAP Server", to: "Mail Client", label: "* 42 FETCH (FLAGS (\\Seen))", sub: "State updated on server" },
+    { from: "Mail Client", to: "IMAP Server", label: "a6 LOGOUT", sub: "" },
+  ]}
+/>
+
+### IMAP Protocol Structure
+
+Every IMAP command is prefixed with a **tag** (like `a1`, `a2`) — a unique identifier that allows the client to match responses to commands. The server can send **untagged responses** (prefixed with `*`) asynchronously — for example, notifying the client that new mail arrived while it was idle.
+
+**Sequence numbers vs UIDs**: IMAP can refer to messages by sequence number (position in the mailbox — changes when messages are deleted) or by UID (a permanent, monotonically increasing identifier that persists across sessions). UIDs are preferred for reliable synchronisation; sequence numbers are used for interactive commands.
+
+### IMAP Flags
+
+Message state is stored as flags on the server, visible to all clients:
+
+| Flag | Meaning |
+|------|---------|
+| `\Seen` | Message has been read |
+| `\Answered` | Message has been replied to |
+| `\Flagged` | Marked important (starred) |
+| `\Deleted` | Marked for deletion — not yet removed |
+| `\Draft` | Draft message |
+
+`\Deleted` does not immediately remove the message — the client must issue `EXPUNGE` to permanently remove all messages flagged `\Deleted`. This allows clients to batch deletions.
+
+### IMAP IDLE — Push Notifications
+
+Without IDLE, clients must poll for new mail (`CHECK` or `NOOP` on a timer). The `IDLE` command (RFC 2177) allows the client to tell the server "notify me when something changes." The server keeps the connection open and sends untagged responses immediately when new mail arrives, a flag changes, or a message is deleted. IMAP IDLE is the backbone of near-instant email push on mobile devices.
+
+### Server-Side Search
+
+IMAP includes a rich `SEARCH` command that runs on the server — the client does not need to download messages to search them:
+
+```
+SEARCH SINCE 1-Mar-2026 FROM "alice@example.com" SUBJECT "invoice"
+```
+
+Returns the sequence numbers of matching messages. The client then fetches only those messages.
+
+---
+
+## POP3 — Download and Delete
+
+POP3 is a much simpler protocol. It was designed when a user had one computer that was occasionally dialed in to retrieve mail. The model: connect, download everything new, disconnect, read offline.
+
+<FlowDiagram
+  parties={["Mail Client", "POP3 Server"]}
+  steps={[
+    { from: "Mail Client", to: "POP3 Server", label: "TCP Connect → port 995 (TLS)", sub: "" },
+    { from: "POP3 Server", to: "Mail Client", label: "+OK POP3 server ready", sub: "" },
+    { from: "Mail Client", to: "POP3 Server", label: "USER alice", sub: "" },
+    { from: "POP3 Server", to: "Mail Client", label: "+OK", sub: "" },
+    { from: "Mail Client", to: "POP3 Server", label: "PASS password", sub: "" },
+    { from: "POP3 Server", to: "Mail Client", label: "+OK 5 messages (120480 octets)", sub: "5 messages waiting" },
+    { from: "Mail Client", to: "POP3 Server", label: "LIST", sub: "List message sizes" },
+    { from: "POP3 Server", to: "Mail Client", label: "+OK 5 messages\n1 4512\n2 8903\n...", sub: "Message number and size in bytes" },
+    { from: "Mail Client", to: "POP3 Server", label: "RETR 1", sub: "Download message 1" },
+    { from: "POP3 Server", to: "Mail Client", label: "+OK 4512 octets\n<message data>", sub: "Full message" },
+    { from: "Mail Client", to: "POP3 Server", label: "DELE 1", sub: "Mark for deletion" },
+    { from: "Mail Client", to: "POP3 Server", label: "QUIT", sub: "Session ends — deletions committed" },
+  ]}
+/>
+
+POP3 has no folders, no server-side search, no synchronisation. The only state it tracks is which messages have been retrieved. `DELE` marks a message for deletion; deletions are committed when the session ends with `QUIT`.
+
+**POP3 with "leave on server"**: Most clients can be configured to leave messages on the server after downloading. This enables multi-device access, but the server has no way to synchronise read state across clients — every client sees every message as unread.
+
+---
+
+## Which Should You Use?
+
+**Use IMAP** for any human mailbox accessed from more than one device (phone, laptop, webmail). IMAP is the correct choice for all modern email setups.
+
+**POP3 is appropriate for**:
+- Automated email processing systems that download and archive mail locally
+- Environments with strict server storage limits where mail must be moved off-server
+- Compliance or legal hold scenarios requiring local, immutable copies
+- Legacy systems that predate IMAP support
+
+**In practice**: Consumer email providers (Gmail, Outlook, iCloud) support both. Corporate mail (Exchange, Dovecot) is almost always IMAP. If a user asks which to configure — IMAP.
+
+---
+
+## TLS for IMAP and POP3
+
+Both protocols have plaintext and TLS variants:
+
+- **IMAP with STARTTLS**: Connect to port 143, issue `STARTTLS` before authentication. Upgrades to TLS.
+- **IMAPS**: Connect to port 993 — TLS from the first byte. Preferred.
+- **POP3 with STARTTLS**: Connect to port 110, issue `STLS`.
+- **POP3S**: Connect to port 995 — TLS from the first byte. Preferred.
+
+Never use plain IMAP or POP3 for real mailboxes — passwords are transmitted in cleartext.
+
+---
+
+## References
+
+- [RFC 9051 — Internet Message Access Protocol (IMAP) Version 4rev2](https://www.rfc-editor.org/rfc/rfc9051)
+- [RFC 1939 — Post Office Protocol Version 3 (POP3)](https://www.rfc-editor.org/rfc/rfc1939)
+- [RFC 2177 — IMAP4 IDLE Command](https://www.rfc-editor.org/rfc/rfc2177)

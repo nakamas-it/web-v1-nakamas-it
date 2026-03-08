@@ -1,0 +1,175 @@
+---
+title: "TLS & SSL — The Handshake Behind HTTPS"
+layer: "application"
+protocol: "tls-ssl"
+summary: "How TLS establishes an encrypted, authenticated channel before a single byte of application data flows — the handshake, certificates, certificate authorities, and why SSL is dead but its name lives on."
+tags: ["application", "tls", "ssl", "https", "certificate", "pki", "handshake", "rfc8446"]
+order: 2
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Every HTTPS connection, every VPN tunnel, every modern mail server submission — they all rely on TLS. Transport Layer Security is the protocol that answers two fundamental questions before any application data flows: "Am I really talking to who I think I'm talking to?" and "Can anyone else read or modify this conversation?"
+
+TLS is not an application protocol — it sits between TCP and the application layer, providing a secure channel that any application protocol can use. HTTP, SMTP, IMAP, LDAP — all of them can be wrapped in TLS.
+
+**SSL (Secure Sockets Layer)** was the predecessor, developed by Netscape in the 1990s. SSL 2.0 and SSL 3.0 are both broken and should never be used. TLS 1.0 and TLS 1.1 are deprecated. **TLS 1.2** (RFC 5246) is widely deployed and still considered acceptable. **TLS 1.3** (RFC 8446, 2018) is the current standard and should be preferred — it is faster, simpler, and eliminates many attack surfaces present in earlier versions.
+
+Despite SSL being dead, the name persists everywhere: "SSL certificate", "SSL inspection", "SSL/TLS". When someone says SSL in 2026, they mean TLS.
+
+---
+
+## What TLS Provides
+
+**Confidentiality**: Data is encrypted using a symmetric cipher (AES-GCM in TLS 1.3). An observer capturing packets sees only ciphertext. The encryption key is negotiated fresh for each connection and never transmitted.
+
+**Authentication**: The server presents a digital certificate. The client verifies the certificate was signed by a trusted Certificate Authority, is not expired, and is issued for the domain being connected to. This proves the server's identity. Mutual TLS (mTLS) extends this to authenticate clients as well.
+
+**Integrity**: Every TLS record includes a Message Authentication Code (MAC) or AEAD tag. If a single bit is modified in transit, the integrity check fails and the connection is terminated. No silent modification is possible.
+
+**Forward secrecy** (TLS 1.3): Even if the server's private key is compromised in the future, past sessions cannot be decrypted. This is achieved by using ephemeral key exchange — the session keys are derived from values that are discarded after the handshake and never stored.
+
+---
+
+## TLS 1.3 Handshake
+
+TLS 1.3 reduced the handshake from 2 round trips (TLS 1.2) to **1 round trip** before application data can flow. For established connections, **0-RTT** allows application data in the very first message.
+
+<FlowDiagram
+  parties={["Client", "Server"]}
+  steps={[
+    { from: "Client", to: "Server", label: "ClientHello", sub: "TLS version, cipher suites, key share (ephemeral public key)" },
+    { from: "Server", to: "Client", label: "ServerHello", sub: "Selected cipher, server key share" },
+    { from: "Server", to: "Client", label: "Certificate + CertificateVerify", sub: "Server identity proof + signature" },
+    { from: "Server", to: "Client", label: "Finished", sub: "Handshake MAC — both sides derive session keys" },
+    { from: "Client", to: "Server", label: "Finished + Application Data", sub: "Handshake complete — encrypted data flows" },
+  ]}
+/>
+
+### Key Exchange — How Session Keys Are Derived
+
+TLS 1.3 uses **Diffie-Hellman Ephemeral (DHE)** or **Elliptic Curve Diffie-Hellman Ephemeral (ECDHE)** for key exchange. The math: client and server each generate a temporary key pair for the session. They exchange public keys. Each independently computes the same shared secret without ever transmitting it. An observer who sees both public keys cannot derive the shared secret without solving the discrete logarithm problem — computationally infeasible with current hardware.
+
+The shared secret is fed through HKDF (HMAC-based Key Derivation Function) to produce separate encryption keys for each direction. These keys exist only in memory during the session. This is what provides forward secrecy.
+
+### Cipher Suites in TLS 1.3
+
+TLS 1.3 reduced cipher suites to five well-vetted options (down from hundreds in TLS 1.2):
+
+| Cipher Suite | Key Exchange | Encryption | Hash |
+|-------------|-------------|-----------|------|
+| TLS_AES_256_GCM_SHA384 | ECDHE | AES-256-GCM | SHA-384 |
+| TLS_AES_128_GCM_SHA256 | ECDHE | AES-128-GCM | SHA-256 |
+| TLS_CHACHA20_POLY1305_SHA256 | ECDHE | ChaCha20-Poly1305 | SHA-256 |
+
+All use AEAD (Authenticated Encryption with Associated Data), which provides both encryption and integrity in a single operation.
+
+---
+
+## TLS Certificates
+
+A TLS certificate is a digital document that binds a public key to an identity (a domain name). It is signed by a Certificate Authority — a trusted third party that has verified the identity of the certificate holder.
+
+<PacketDiagram
+  label="X.509 Certificate — Key Fields"
+  fields={[
+    { name: "Version", bytes: 1 },
+    { name: "Serial Number", bytes: 4 },
+    { name: "Issuer (CA)", bytes: 6, highlight: true },
+    { name: "Validity Period", bytes: 4 },
+    { name: "Subject (domain)", bytes: 6, highlight: true },
+    { name: "Public Key", bytes: 6 },
+    { name: "Extensions (SANs)", bytes: 4 },
+    { name: "CA Signature", bytes: 6, highlight: true },
+  ]}
+/>
+
+### Certificate Fields
+
+**Subject / Common Name (CN)**: The entity the certificate was issued to — historically the domain name, now mostly informational. **Subject Alternative Names (SANs)** are the authoritative list of domains a certificate is valid for. Browsers check SANs, not CN.
+
+**Issuer**: The Certificate Authority that signed this certificate.
+
+**Validity Period**: Not Before and Not After dates. Certificates expire. Let's Encrypt certificates expire after 90 days (designed for automated renewal). Commercially issued certificates are typically 1–2 years.
+
+**Public Key**: The server's public key, used to verify signatures and (in older TLS versions) for key exchange.
+
+**CA Signature**: The CA's digital signature over all the other fields. This is what makes the certificate trustworthy — the CA has staked its trusted status on this assertion.
+
+### Certificate Types
+
+| Type | Validation Level | Description |
+|------|-----------------|-------------|
+| **DV (Domain Validated)** | Domain only | CA verifies you control the domain. Automated, minutes to issue. Let's Encrypt. |
+| **OV (Organization Validated)** | Domain + organization | CA verifies the organization's legal existence. Days to issue. |
+| **EV (Extended Validation)** | Full vetting | Rigorous verification of organization. Browser used to show green bar — now mostly equivalent to OV visually. |
+| **Wildcard** | One cert for subdomains | `*.nakamas-it.com` covers any single-level subdomain |
+| **Multi-SAN** | Multiple domains | One cert covers multiple unrelated domains |
+
+---
+
+## Certificate Authorities and the PKI
+
+A **Certificate Authority (CA)** is an organization whose public key is pre-installed in operating systems and browsers as a **trust anchor**. When a browser connects to a server, it builds a **certificate chain** from the server's certificate up to one of these pre-installed root CAs.
+
+```
+Root CA (in browser trust store)
+  └─ Intermediate CA (signed by Root)
+       └─ Server Certificate (signed by Intermediate)
+```
+
+Root CAs are kept offline for security. Intermediate CAs do the day-to-day signing. If an intermediate CA is compromised, its certificate can be revoked without touching the root.
+
+**Well-known public CAs**: DigiCert, Sectigo, GlobalSign, Google Trust Services, Let's Encrypt (free, automated, non-profit).
+
+### Certificate Revocation
+
+If a certificate's private key is compromised, the certificate needs to be revoked before it expires. Two mechanisms:
+
+**CRL (Certificate Revocation List)**: A periodically published list of revoked serial numbers. Large files, not always up-to-date.
+
+**OCSP (Online Certificate Status Protocol)**: Real-time query to the CA asking "is this certificate still valid?" Adds latency (another network request during the TLS handshake). **OCSP Stapling** solves this: the server periodically fetches a signed OCSP response from the CA and includes it in the TLS handshake — no client-side latency.
+
+---
+
+## Common TLS Attacks and Mitigations
+
+**Downgrade attacks**: An attacker intercepts the ClientHello and removes support for TLS 1.3, forcing the client to negotiate TLS 1.2 or lower where known vulnerabilities exist. TLS 1.3 includes a **downgrade sentinel** in ServerHello that previous versions cannot include, allowing TLS 1.3 clients to detect downgrade attempts.
+
+**BEAST, POODLE, CRIME, BREACH**: Classic attacks against TLS 1.0 and SSL 3.0. All resolved by using TLS 1.2+ and disabling compression.
+
+**Certificate misissuance**: A rogue CA (or a compromised one) issues a valid certificate for a domain it does not control. **Certificate Transparency (CT)** requires all publicly trusted CAs to log every certificate issued to public, append-only logs. Anyone can monitor these logs for unauthorized certificates for their domain.
+
+**HSTS (HTTP Strict Transport Security)**: Tells browsers to always use HTTPS for this domain, for a specified duration. Prevents SSL stripping attacks where an attacker downgrades the initial HTTP redirect to HTTPS.
+
+---
+
+## TLS Inspection (SSL Inspection)
+
+Many enterprise firewalls perform **TLS inspection**: they act as a man-in-the-middle, terminating the TLS connection from the client and establishing a new TLS connection to the server. The firewall can inspect the decrypted HTTP traffic for malware, data loss, or policy violations.
+
+For this to work without browser errors, the firewall's CA certificate must be installed in the client's trust store (typically via Group Policy in enterprise environments). Employees connecting through such a firewall have no TLS confidentiality from the firewall — all traffic is visible to the firewall operator.
+
+---
+
+## Key Concepts
+
+### TLS 1.3 removed everything that was broken in TLS 1.2
+
+TLS 1.2 accumulated decades of legacy baggage: RSA key exchange (no forward secrecy), weak cipher suites, optional compression (CRIME attack), CBC mode (BEAST/Lucky13), renegotiation vulnerabilities. TLS 1.3 removed all of it. If you control the server, enforce TLS 1.2 minimum and prefer TLS 1.3.
+
+### The certificate is not the security — the chain of trust is
+
+Having a certificate does not make a server secure. The security comes from the chain of trust: the CA verified domain ownership, the CA's own key is protected, and the browser trusts that CA. Any break in this chain — a compromised CA, a stolen private key, a misconfigured server — destroys the security guarantee.
+
+---
+
+## References
+
+- [RFC 8446 — The Transport Layer Security (TLS) Protocol Version 1.3](https://www.rfc-editor.org/rfc/rfc8446)
+- [RFC 5280 — Internet X.509 PKI Certificate and CRL Profile](https://www.rfc-editor.org/rfc/rfc5280)
+- [RFC 6960 — Online Certificate Status Protocol (OCSP)](https://www.rfc-editor.org/rfc/rfc6960)

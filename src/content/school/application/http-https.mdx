@@ -1,0 +1,204 @@
+---
+title: "HTTP & HTTPS — How the Web Works"
+layer: "application"
+protocol: "http-https"
+summary: "How browsers and servers exchange resources using HTTP request/response cycles, what every status code category means, and why HTTPS is a fundamentally different security model — not just HTTP with encryption bolted on."
+tags: ["application", "http", "https", "request", "response", "status-codes", "web", "rfc9110"]
+order: 1
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Every time a browser loads a web page, it speaks HTTP — Hypertext Transfer Protocol. HTTP is the language of the web: a simple, text-based request/response protocol where a client asks for a resource and a server responds with it. It is stateless (each request is independent), extensible (headers carry arbitrary metadata), and human-readable in its original form.
+
+**HTTPS** is HTTP transported over a TLS (Transport Layer Security) connection. The HTTP messages themselves are identical — the same request format, the same response format, the same status codes. What changes is that TLS encrypts and authenticates the connection before any HTTP traffic flows. HTTPS is not a different protocol; it is HTTP with a security layer underneath it.
+
+HTTP is defined across a family of RFCs. The current authoritative specification is RFC 9110 (HTTP Semantics), RFC 9111 (HTTP Caching), and RFC 9112 (HTTP/1.1). HTTP/2 is defined in RFC 9113; HTTP/3 in RFC 9114.
+
+---
+
+## The Request/Response Model
+
+HTTP is fundamentally a client-server protocol. The client (browser, curl, API consumer) sends a **request**; the server processes it and sends a **response**. There is no server-initiated communication in plain HTTP — the server can only respond to requests.
+
+<FlowDiagram
+  parties={["Browser", "Web Server"]}
+  steps={[
+    { from: "Browser", to: "Web Server", label: "HTTP Request", sub: "GET /index.html HTTP/1.1" },
+    { from: "Web Server", to: "Browser", label: "HTTP Response", sub: "200 OK — Content-Type: text/html" },
+    { from: "Browser", to: "Web Server", label: "HTTP Request", sub: "GET /style.css HTTP/1.1" },
+    { from: "Web Server", to: "Browser", label: "HTTP Response", sub: "200 OK — Content-Type: text/css" },
+  ]}
+/>
+
+---
+
+## HTTP Request Format
+
+An HTTP/1.1 request is plain text:
+
+```
+GET /school/layer3/dhcp HTTP/1.1
+Host: nakamas-it.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)
+Accept: text/html,application/xhtml+xml
+Accept-Encoding: gzip, deflate, br
+Connection: keep-alive
+```
+
+**Request Line**: `METHOD path HTTP/version`
+
+**Methods** (the most important):
+
+| Method | Purpose | Body? | Safe? | Idempotent? |
+|--------|---------|-------|-------|-------------|
+| GET | Retrieve a resource | No | Yes | Yes |
+| POST | Submit data, create a resource | Yes | No | No |
+| PUT | Replace a resource entirely | Yes | No | Yes |
+| PATCH | Partially update a resource | Yes | No | No |
+| DELETE | Remove a resource | Optional | No | Yes |
+| HEAD | Same as GET but no body returned | No | Yes | Yes |
+| OPTIONS | Ask server what methods are allowed | No | Yes | Yes |
+
+**Safe** means the method does not modify server state. **Idempotent** means calling it multiple times produces the same result as calling it once (important for retries).
+
+**Headers**: Key-value pairs carrying metadata. Critical ones:
+- `Host`: Required in HTTP/1.1 — tells the server which virtual host is being requested
+- `User-Agent`: Identifies the client software
+- `Accept`: Media types the client can handle
+- `Authorization`: Credentials for authentication
+- `Content-Type`: The format of the request body (for POST/PUT)
+- `Cookie`: Session cookies
+
+---
+
+## HTTP Response Format
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Content-Length: 8492
+Cache-Control: max-age=3600
+ETag: "abc123def456"
+Date: Sat, 08 Mar 2026 07:00:00 GMT
+
+<!doctype html>
+<html>...
+```
+
+**Status Line**: `HTTP/version STATUS_CODE Reason-Phrase`
+
+### Status Code Categories
+
+| Range | Category | Meaning |
+|-------|----------|---------|
+| 1xx | Informational | Request received, continuing process |
+| 2xx | Success | Request successfully received and processed |
+| 3xx | Redirection | Further action needed to complete request |
+| 4xx | Client Error | Request contains bad syntax or cannot be fulfilled |
+| 5xx | Server Error | Server failed to fulfil a valid request |
+
+**The codes every sysadmin knows:**
+
+| Code | Name | Common Cause |
+|------|------|-------------|
+| 200 | OK | Success |
+| 201 | Created | Resource created (POST/PUT response) |
+| 204 | No Content | Success, no body (DELETE response) |
+| 301 | Moved Permanently | URL changed forever — clients should update bookmarks |
+| 302 | Found | Temporary redirect |
+| 304 | Not Modified | Cached version is still valid — no body sent |
+| 400 | Bad Request | Malformed request syntax |
+| 401 | Unauthorized | Authentication required |
+| 403 | Forbidden | Authenticated but not authorized |
+| 404 | Not Found | Resource does not exist |
+| 405 | Method Not Allowed | Server understands the URL but not the method |
+| 429 | Too Many Requests | Rate limit exceeded |
+| 500 | Internal Server Error | Something broke on the server |
+| 502 | Bad Gateway | Proxy received invalid response from upstream |
+| 503 | Service Unavailable | Server temporarily unable to handle requests |
+| 504 | Gateway Timeout | Proxy timed out waiting for upstream |
+
+---
+
+## HTTP Versions
+
+### HTTP/1.1 (1997 — RFC 9112)
+
+The long-lived workhorse. Text-based, human-readable. One request per TCP connection (or pipelined, but pipelining was never widely used due to head-of-line blocking). **Keep-Alive** allows reusing TCP connections across multiple requests.
+
+Limitation: each response must complete before the next request can begin on the same connection (head-of-line blocking). Browsers work around this by opening 6 parallel TCP connections per host.
+
+### HTTP/2 (2015 — RFC 9113)
+
+Binary framing, multiplexed streams over a single TCP connection. Multiple requests and responses interleave freely — no head-of-line blocking at the HTTP layer. **Server push** allows the server to proactively send resources the client will need. Header compression (HPACK). Requires TLS in practice (browsers only implement HTTP/2 over TLS).
+
+### HTTP/3 (2022 — RFC 9114)
+
+HTTP/2 semantics over QUIC (UDP-based transport) instead of TCP. Eliminates TCP-level head-of-line blocking entirely. Built-in 0-RTT connection resumption. Connection migration (the session survives IP address changes, important for mobile).
+
+---
+
+## What HTTPS Actually Does
+
+HTTPS = HTTP over TLS. Before any HTTP request is sent, TLS establishes an encrypted, authenticated channel. This provides:
+
+**Confidentiality**: All HTTP traffic — headers, body, URLs — is encrypted. An observer on the network sees only that a TLS connection was made to an IP address, not what was requested or returned.
+
+**Authentication**: The server presents a TLS certificate signed by a trusted Certificate Authority (CA). The browser verifies the certificate is valid, not expired, and was issued for the domain being visited. This prevents impersonation — a fake server cannot present a valid certificate for `nakamas-it.com` unless it has the private key.
+
+**Integrity**: TLS's MAC (Message Authentication Code) ensures that data was not tampered with in transit. Every byte that arrives is verified to be exactly what the server sent.
+
+**What HTTPS does NOT guarantee**: That the website is legitimate or trustworthy. A certificate proves the server is who it says it is — not that the entity behind it is honest. A phishing site at `security-update-nakamas-it.com` can have a perfectly valid HTTPS certificate.
+
+### The Mixed Content Problem
+
+If an HTTPS page loads any resource (image, script, stylesheet) over plain HTTP, browsers block or warn about **mixed content**. A single HTTP image on an HTTPS page can allow a network attacker to inject content into what the user believes is a secure page. All subresources must be HTTPS for the security guarantee to hold.
+
+---
+
+## Important HTTP Headers
+
+### Security Headers
+
+| Header | Purpose |
+|--------|---------|
+| `Strict-Transport-Security` (HSTS) | Tells browsers to always use HTTPS for this domain — never downgrade to HTTP |
+| `Content-Security-Policy` (CSP) | Restricts which sources scripts, styles, and images can load from |
+| `X-Frame-Options` | Prevents the page from being embedded in an iframe (clickjacking protection) |
+| `X-Content-Type-Options: nosniff` | Prevents browser MIME type sniffing |
+| `Referrer-Policy` | Controls how much referrer information is sent with requests |
+
+### Caching Headers
+
+| Header | Purpose |
+|--------|---------|
+| `Cache-Control` | Directives for caching: `max-age`, `no-cache`, `no-store`, `private`, `public` |
+| `ETag` | A fingerprint of the resource version — used for conditional requests |
+| `Last-Modified` | When the resource was last changed |
+| `If-None-Match` | Client sends the ETag — server returns 304 if unchanged |
+
+---
+
+## Key Concepts
+
+### HTTP is stateless — cookies provide state
+
+Each HTTP request is completely independent. The server has no memory of previous requests. **Cookies** are the mechanism for maintaining state: the server sets a cookie in the response, and the browser sends it back with every subsequent request. Session IDs, authentication tokens, and user preferences are all stored in cookies.
+
+### 401 vs 403 — know the difference
+
+401 means the client is not authenticated — it needs to provide credentials. 403 means the client is authenticated but does not have permission. Returning 403 for unauthenticated users is technically incorrect (though common) and leaks information about whether a resource exists.
+
+---
+
+## References
+
+- [RFC 9110 — HTTP Semantics](https://www.rfc-editor.org/rfc/rfc9110)
+- [RFC 9112 — HTTP/1.1](https://www.rfc-editor.org/rfc/rfc9112)
+- [RFC 9113 — HTTP/2](https://www.rfc-editor.org/rfc/rfc9113)
+- [RFC 9114 — HTTP/3](https://www.rfc-editor.org/rfc/rfc9114)
