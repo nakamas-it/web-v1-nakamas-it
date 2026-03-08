@@ -38,11 +38,13 @@ const accent = accentMap[layer] ?? 'text-cyan-400';
   </nav>
 
   <header class="mb-12 pb-8 border-b border-slate-800">
-    <div class={`font-mono text-xs font-bold inline-block px-2 py-1 rounded border ${accent} border-current opacity-70 mb-4`}>
-      {protocol.toUpperCase()}
+    <div class="flex items-center justify-between gap-4 mb-3">
+      <h1 class="min-w-0 text-4xl font-bold text-slate-100">{title}</h1>
+      <span class={`font-mono text-xs font-bold shrink-0 px-2 py-1 rounded border border-current opacity-70 ${accent}`}>
+        {protocol.toUpperCase()}
+      </span>
     </div>
-    <h1 class="text-4xl font-bold text-slate-100 mb-3">{title}</h1>
-    <p class="text-slate-400 text-lg leading-relaxed max-w-2xl">{summary}</p>
+    <p class="text-slate-400 text-lg leading-relaxed text-justify">{summary}</p>
     <div class="flex flex-wrap gap-2 mt-5">
       {tags.map((tag: string) => (
         <span class="font-mono text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded">{tag}</span>
