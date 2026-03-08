@@ -1,0 +1,69 @@
+---
+import Layout from '../../../layouts/Layout.astro';
+import { getCollection, render } from 'astro:content';
+
+export async function getStaticPaths() {
+  const allArticles = await getCollection('school', ({ data }) => !data.draft);
+  return allArticles.map(entry => {
+    const [layer, slug] = entry.id.split('/');
+    return { params: { layer, slug }, props: { entry } };
+  });
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+const { title, summary, tags, layer, protocol } = entry.data;
+const base = import.meta.env.BASE_URL;
+
+const accentMap: Record<string, string> = {
+  layer2: 'text-violet-400',
+  layer3: 'text-cyan-400',
+  application: 'text-emerald-400',
+};
+const accent = accentMap[layer] ?? 'text-cyan-400';
+---
+
+<Layout title={title} description={summary}>
+
+  <nav class="font-mono text-sm text-slate-500 mb-8">
+    <a href={`${base}`} class="hover:text-slate-300 transition-colors">home</a>
+    <span class="mx-2">/</span>
+    <a href={`${base}school`} class="hover:text-slate-300 transition-colors">school</a>
+    <span class="mx-2">/</span>
+    <a href={`${base}school/${layer}`} class={`hover:text-slate-300 transition-colors ${accent}`}>{layer}</a>
+    <span class="mx-2">/</span>
+    <span class="text-slate-300">{protocol}</span>
+  </nav>
+
+  <header class="mb-12 pb-8 border-b border-slate-800">
+    <div class={`font-mono text-xs font-bold inline-block px-2 py-1 rounded border ${accent} border-current opacity-70 mb-4`}>
+      {protocol.toUpperCase()}
+    </div>
+    <h1 class="text-4xl font-bold text-slate-100 mb-3">{title}</h1>
+    <p class="text-slate-400 text-lg leading-relaxed max-w-2xl">{summary}</p>
+    <div class="flex flex-wrap gap-2 mt-5">
+      {tags.map((tag: string) => (
+        <span class="font-mono text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded">{tag}</span>
+      ))}
+    </div>
+  </header>
+
+  <article class="prose prose-invert prose-slate max-w-none
+    prose-headings:text-slate-100
+    prose-h2:text-2xl prose-h2:font-bold prose-h2:mt-12 prose-h2:mb-4 prose-h2:pt-8 prose-h2:border-t prose-h2:border-slate-800
+    prose-h3:text-lg prose-h3:font-semibold prose-h3:text-slate-200 prose-h3:mt-8 prose-h3:mb-3
+    prose-p:text-slate-400 prose-p:leading-relaxed
+    prose-a:text-cyan-400 prose-a:no-underline hover:prose-a:underline
+    prose-strong:text-slate-200
+    prose-code:text-cyan-300 prose-code:bg-slate-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-sm prose-code:font-mono prose-code:before:content-none prose-code:after:content-none
+    prose-pre:bg-slate-900 prose-pre:border prose-pre:border-slate-800 prose-pre:rounded-xl
+    prose-table:text-sm prose-table:border-collapse
+    prose-th:text-slate-300 prose-th:bg-slate-800 prose-th:px-4 prose-th:py-2 prose-th:font-mono prose-th:text-xs prose-th:uppercase prose-th:tracking-wide
+    prose-td:text-slate-400 prose-td:px-4 prose-td:py-2 prose-td:border prose-td:border-slate-800
+    prose-tr:border-b prose-tr:border-slate-800
+    prose-li:text-slate-400
+    prose-blockquote:border-l-cyan-400 prose-blockquote:text-slate-400">
+    <Content />
+  </article>
+
+</Layout>

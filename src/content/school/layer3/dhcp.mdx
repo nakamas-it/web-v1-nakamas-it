@@ -1,0 +1,195 @@
+---
+title: "DHCP — The DORA Flow"
+layer: "layer3"
+protocol: "dhcp"
+summary: "How a device goes from zero IP address to a fully configured host using DHCP's four-step DORA handshake."
+tags: ["dhcp", "ipv4", "udp", "broadcast", "rfc2131"]
+order: 1
+draft: false
+---
+
+## Overview
+
+DHCP (Dynamic Host Configuration Protocol) is defined in [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131). When a device connects to a network with no pre-assigned address, DHCP lets it automatically discover and lease an IP address, subnet mask, default gateway, DNS server, and other options — all without any manual configuration.
+
+The protocol runs over **UDP**: the client sends from port **68** and the server listens on port **67**.
+
+---
+
+## Topology
+
+The simplest DHCP scenario: client and server share the same Layer 2 broadcast domain (no relay agent involved).
+
+```
+┌──────────┐                        ┌─────────────┐
+│  Client  │◄──── 192.168.1.0/24 ──►│ DHCP Server │
+│ (no IP)  │                        │ 192.168.1.1 │
+└──────────┘                        └─────────────┘
+```
+
+> **DHCP Relay** (when client and server are on different subnets) is covered in a separate article.
+
+---
+
+## The DORA Flow
+
+DHCP uses a four-step exchange known as **DORA**:
+
+| Step | Message  | From   | To              | Src IP    | Dst IP          |
+|------|----------|--------|-----------------|-----------|-----------------|
+| 1    | DISCOVER | Client | Broadcast       | 0.0.0.0   | 255.255.255.255 |
+| 2    | OFFER    | Server | Broadcast\*     | 192.168.1.1 | 255.255.255.255 |
+| 3    | REQUEST  | Client | Broadcast       | 0.0.0.0   | 255.255.255.255 |
+| 4    | ACK      | Server | Broadcast\*     | 192.168.1.1 | 255.255.255.255 |
+
+\* The server still uses broadcast at this stage because the client has no confirmed IP yet and may not respond to unicast.
+
+---
+
+## Step 1 — DHCP DISCOVER
+
+The client has no IP address. It shouts onto the broadcast domain: *"Is there a DHCP server out there?"*
+
+### Layer 2 — Ethernet Frame
+
+| Field            | Value                       | Notes                                |
+|------------------|-----------------------------|--------------------------------------|
+| Destination MAC  | `FF:FF:FF:FF:FF:FF`         | Layer 2 broadcast — every device receives it |
+| Source MAC       | `AA:BB:CC:DD:EE:FF`         | Client's own MAC                     |
+| EtherType        | `0x0800`                    | IPv4                                 |
+
+### Layer 3 — IP Header
+
+| Field            | Value             | Notes                                          |
+|------------------|-------------------|------------------------------------------------|
+| Source IP        | `0.0.0.0`         | Client has no address yet                      |
+| Destination IP   | `255.255.255.255` | Limited broadcast — routers will not forward   |
+| Protocol         | `17` (UDP)        |                                                |
+| TTL              | `128`             |                                                |
+
+### Layer 4 — UDP Header
+
+| Field            | Value  | Notes                        |
+|------------------|--------|------------------------------|
+| Source port      | `68`   | DHCP client port             |
+| Destination port | `67`   | DHCP server port             |
+
+### Layer 7 — DHCP Payload
+
+| Field         | Value              | Notes                                                          |
+|---------------|--------------------|----------------------------------------------------------------|
+| op            | `1` (BOOTREQUEST)  | Client-to-server direction                                     |
+| htype         | `1`                | Ethernet                                                       |
+| hlen          | `6`                | MAC address length (bytes)                                     |
+| xid           | `0x3D1D`           | Transaction ID — random, used to match replies to this request |
+| ciaddr        | `0.0.0.0`          | Client IP — unknown                                            |
+| yiaddr        | `0.0.0.0`          | "Your" IP — server will fill this in OFFER                     |
+| chaddr        | `AA:BB:CC:DD:EE:FF`| Client MAC address                                             |
+| Option 53     | `1` (DISCOVER)     | DHCP message type                                              |
+| Option 55     | Parameter list     | Client requests: subnet mask, router, DNS, lease time          |
+
+---
+
+## Step 2 — DHCP OFFER
+
+The DHCP server receives the DISCOVER broadcast and responds with an IP address offer.
+
+### Layer 2 — Ethernet Frame
+
+| Field           | Value               | Notes                                                         |
+|-----------------|---------------------|---------------------------------------------------------------|
+| Destination MAC | `FF:FF:FF:FF:FF:FF` | Still broadcast — client is not yet reachable by unicast      |
+| Source MAC      | Server MAC          |                                                               |
+
+### Layer 3 — IP Header
+
+| Field          | Value             | Notes                              |
+|----------------|-------------------|------------------------------------|
+| Source IP      | `192.168.1.1`     | Server's IP                        |
+| Destination IP | `255.255.255.255` | Broadcast (client has no IP yet)   |
+
+### Layer 7 — DHCP Payload
+
+| Field     | Value              | Notes                                     |
+|-----------|--------------------|-------------------------------------------|
+| op        | `2` (BOOTREPLY)    | Server-to-client direction                |
+| xid       | `0x3D1D`           | Matches the DISCOVER transaction ID       |
+| yiaddr    | `192.168.1.100`    | The IP address being offered              |
+| siaddr    | `192.168.1.1`      | Server IP                                 |
+| Option 53 | `2` (OFFER)        | DHCP message type                         |
+| Option 51 | `86400` seconds    | Lease time (24 hours)                     |
+| Option 1  | `255.255.255.0`    | Subnet mask                               |
+| Option 3  | `192.168.1.1`      | Default gateway                           |
+| Option 6  | `8.8.8.8`          | DNS server                                |
+
+The server marks `192.168.1.100` as tentatively reserved but does not yet commit it.
+
+---
+
+## Step 3 — DHCP REQUEST
+
+The client may receive OFFERS from multiple servers. It picks one (usually the first) and broadcasts its acceptance — telling **all** servers which offer it chose, so the others can release their tentative reservations.
+
+### Why still a broadcast?
+
+The client still has no confirmed IP, and it needs all DHCP servers on the segment to see this message (not just the one it's accepting).
+
+### Layer 7 — DHCP Payload
+
+| Field     | Value             | Notes                                              |
+|-----------|-------------------|----------------------------------------------------|
+| op        | `1` (BOOTREQUEST) |                                                    |
+| xid       | `0x3D1D`          | Same transaction ID                                |
+| ciaddr    | `0.0.0.0`         | Still no confirmed address                         |
+| Option 53 | `3` (REQUEST)     | DHCP message type                                  |
+| Option 50 | `192.168.1.100`   | Requested IP — echoes back the offered address     |
+| Option 54 | `192.168.1.1`     | Server identifier — indicates which server was chosen |
+
+---
+
+## Step 4 — DHCP ACK
+
+The selected server confirms the lease. After receiving the ACK, the client configures its interface with the offered parameters.
+
+### Layer 7 — DHCP Payload
+
+| Field     | Value             | Notes                               |
+|-----------|-------------------|-------------------------------------|
+| op        | `2` (BOOTREPLY)   |                                     |
+| xid       | `0x3D1D`          | Same transaction ID                 |
+| yiaddr    | `192.168.1.100`   | Confirmed IP address                |
+| Option 53 | `5` (ACK)         | DHCP message type                   |
+| Option 51 | `86400` seconds   | Lease time confirmed                |
+| Option 1  | `255.255.255.0`   | Subnet mask                         |
+| Option 3  | `192.168.1.1`     | Default gateway                     |
+| Option 6  | `8.8.8.8`         | DNS server                          |
+
+Once the ACK is received, the client:
+1. Performs an **ARP probe** to verify no other device is already using `192.168.1.100`
+2. If no conflict, configures the interface
+3. Sets a timer to renew at 50% of the lease time (T1), and to rebind at 87.5% (T2)
+
+---
+
+## Lease Renewal
+
+When T1 expires (at 50% of lease time), the client sends a **unicast REQUEST** directly to the original server asking to renew. This is not a broadcast — the client now has a confirmed IP and knows the server's address.
+
+If the server is unreachable by T2 (87.5%), the client falls back to **broadcast REQUEST** trying any available server (rebinding).
+
+If the lease expires completely with no response, the client must restart the full DORA process from scratch.
+
+---
+
+## Key Things to Note
+
+- **xid (Transaction ID)**: all four messages carry the same randomly generated `xid`. This is how the client matches OFFERS and ACKs to its original DISCOVER — especially important when multiple DHCP servers are present.
+- **Broadcast throughout**: all four messages use IP broadcast (`255.255.255.255`). The server cannot unicast to the client until after the ACK because the client has no IP yet. Some implementations use the `broadcast flag` in the DHCP packet to signal this preference.
+- **UDP, not TCP**: DHCP is connectionless. Reliability comes from the client retrying DISCOVERs if no OFFER arrives.
+
+---
+
+## References
+
+- [RFC 2131 — Dynamic Host Configuration Protocol](https://www.rfc-editor.org/rfc/rfc2131)
+- [RFC 2132 — DHCP Options and BOOTP Vendor Extensions](https://www.rfc-editor.org/rfc/rfc2132)

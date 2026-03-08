@@ -1,0 +1,85 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { getCollection } from 'astro:content';
+
+const base = import.meta.env.BASE_URL;
+
+const allArticles = await getCollection('school', ({ data }) => !data.draft);
+
+const layerMeta: Record<string, { label: string; description: string; accent: string }> = {
+  layer2: {
+    label: 'Layer 2 — Data Link',
+    description: 'Ethernet frames, VLANs, STP, ARP, and how data travels within a broadcast domain.',
+    accent: 'text-violet-400 border-violet-800',
+  },
+  layer3: {
+    label: 'Layer 3 — Network',
+    description: 'IP addressing, DHCP, DNS, ICMP, and how packets are routed across networks.',
+    accent: 'text-cyan-400 border-cyan-800',
+  },
+  application: {
+    label: 'Application Layer',
+    description: 'HTTP, TLS, BGP, and the protocols that power the services we use every day.',
+    accent: 'text-emerald-400 border-emerald-800',
+  },
+};
+
+// Group articles by layer, preserving defined order
+const layers = Object.entries(layerMeta).map(([key, meta]) => ({
+  key,
+  ...meta,
+  articles: allArticles
+    .filter(a => a.data.layer === key)
+    .sort((a, b) => a.data.order - b.data.order),
+}));
+---
+
+<Layout title="School" description="A protocol library covering how networking really works — from packets to packet captures.">
+
+  <header class="mb-12">
+    <p class="font-mono text-cyan-400 text-sm mb-2">nakamas.it / school</p>
+    <h1 class="text-4xl font-bold text-slate-100 mb-4">The School</h1>
+    <p class="text-slate-400 max-w-2xl leading-relaxed">
+      A library of networking protocols explained from first principles — how packets travel,
+      what each header field means, and what it all looks like in Wireshark.
+    </p>
+  </header>
+
+  <div class="space-y-12">
+    {layers.map(layer => (
+      <section>
+        <a
+          href={`${base}school/${layer.key}`}
+          class={`inline-flex items-center gap-2 text-lg font-semibold mb-1 hover:underline underline-offset-4 ${layer.accent.split(' ')[0]}`}
+        >
+          {layer.label}
+          <span class="text-slate-500 text-sm font-normal">→</span>
+        </a>
+        <p class="text-slate-400 text-sm mb-5">{layer.description}</p>
+
+        {layer.articles.length === 0 ? (
+          <p class="text-slate-600 text-sm italic">Articles coming soon.</p>
+        ) : (
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {layer.articles.map(article => {
+              const [layerKey, slug] = article.id.split('/');
+              return (
+                <a
+                  href={`${base}school/${layerKey}/${slug}`}
+                  class={`bg-slate-900 border ${layer.accent.split(' ')[1]} hover:border-opacity-60 rounded-xl p-5 transition-colors group`}
+                >
+                  <h3 class={`font-semibold mb-1 group-hover:underline underline-offset-2 ${layer.accent.split(' ')[0]}`}>
+                    {article.data.protocol.toUpperCase()}
+                  </h3>
+                  <p class="text-slate-100 text-sm font-medium mb-1">{article.data.title}</p>
+                  <p class="text-slate-400 text-sm leading-relaxed">{article.data.summary}</p>
+                </a>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    ))}
+  </div>
+
+</Layout>

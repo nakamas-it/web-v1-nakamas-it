@@ -1,0 +1,89 @@
+---
+import Layout from '../../../layouts/Layout.astro';
+import { getCollection } from 'astro:content';
+
+export async function getStaticPaths() {
+  const allArticles = await getCollection('school', ({ data }) => !data.draft);
+  const layers = [...new Set(allArticles.map(a => a.data.layer))];
+  return layers.map(layer => ({
+    params: { layer },
+    props: {
+      articles: allArticles
+        .filter(a => a.data.layer === layer)
+        .sort((a, b) => a.data.order - b.data.order),
+    },
+  }));
+}
+
+const { layer } = Astro.params;
+const { articles } = Astro.props;
+const base = import.meta.env.BASE_URL;
+
+const layerMeta: Record<string, { label: string; description: string; accent: string }> = {
+  layer2: {
+    label: 'Layer 2 — Data Link',
+    description: 'Ethernet frames, VLANs, STP, ARP, and how data travels within a broadcast domain.',
+    accent: 'text-violet-400',
+  },
+  layer3: {
+    label: 'Layer 3 — Network',
+    description: 'IP addressing, DHCP, DNS, ICMP, and how packets are routed across networks.',
+    accent: 'text-cyan-400',
+  },
+  application: {
+    label: 'Application Layer',
+    description: 'HTTP, TLS, BGP, and the protocols that power the services we use every day.',
+    accent: 'text-emerald-400',
+  },
+};
+
+const meta = layerMeta[layer!] ?? { label: layer, description: '', accent: 'text-cyan-400' };
+---
+
+<Layout title={meta.label}>
+
+  <nav class="font-mono text-sm text-slate-500 mb-8">
+    <a href={`${base}`} class="hover:text-slate-300 transition-colors">home</a>
+    <span class="mx-2">/</span>
+    <a href={`${base}school`} class="hover:text-slate-300 transition-colors">school</a>
+    <span class="mx-2">/</span>
+    <span class={meta.accent}>{layer}</span>
+  </nav>
+
+  <header class="mb-12">
+    <h1 class={`text-4xl font-bold mb-3 ${meta.accent}`}>{meta.label}</h1>
+    <p class="text-slate-400 max-w-2xl leading-relaxed">{meta.description}</p>
+  </header>
+
+  {articles.length === 0 ? (
+    <p class="text-slate-500 italic">No articles yet — check back soon.</p>
+  ) : (
+    <div class="space-y-4">
+      {articles.map(article => {
+        const [layerKey, slug] = article.id.split('/');
+        return (
+          <a
+            href={`${base}school/${layerKey}/${slug}`}
+            class="flex items-start gap-5 bg-slate-900 border border-slate-800 hover:border-slate-600 rounded-xl p-6 transition-colors group"
+          >
+            <div class={`font-mono text-xs font-bold mt-0.5 px-2 py-1 rounded border ${meta.accent} border-current opacity-60 shrink-0`}>
+              {article.data.protocol.toUpperCase()}
+            </div>
+            <div>
+              <h2 class="font-semibold text-slate-100 group-hover:underline underline-offset-2 mb-1">
+                {article.data.title}
+              </h2>
+              <p class="text-slate-400 text-sm leading-relaxed">{article.data.summary}</p>
+              <div class="flex flex-wrap gap-2 mt-3">
+                {article.data.tags.map((tag: string) => (
+                  <span class="font-mono text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded">{tag}</span>
+                ))}
+              </div>
+            </div>
+          </a>
+        );
+      })}
+    </div>
+  )}
+
+</Layout>
