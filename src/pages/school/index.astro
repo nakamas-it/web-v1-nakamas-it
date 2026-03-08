@@ -83,7 +83,7 @@ const layers = Object.entries(layerMeta).map(([key, meta]) => ({
                   >
                     <div class="flex items-start justify-between gap-3 mb-2">
                       <p class="text-slate-100 text-sm font-semibold leading-snug group-hover:underline underline-offset-2">{article.data.title}</p>
-                      <span class={`font-mono font-bold text-xs shrink-0 mt-0.5 ${layer.accent.split(' ')[0]}`}>
+                      <span class={`font-mono text-xs font-bold shrink-0 mt-0.5 px-2 py-1 rounded border border-current opacity-60 ${layer.accent.split(' ')[0]}`}>
                         {article.data.protocol.toUpperCase()}
                       </span>
                     </div>
