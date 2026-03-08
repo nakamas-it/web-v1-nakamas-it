@@ -35,7 +35,7 @@ function isActive(path: string) {
     <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-10">
       <nav class="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
         <a href={base} class="font-mono font-bold text-lg text-cyan-400 hover:text-cyan-300 transition-colors">
-          nakamas.it
+          Nakamas IT
         </a>
         <div class="flex gap-8">
           <a
@@ -45,7 +45,7 @@ function isActive(path: string) {
             Home
           </a>
           <a
-            href={`${base}school`}
+            href={`${base}school/`}
             class={`text-sm font-medium transition-colors ${isActive(`${base}school`) ? 'text-cyan-400' : 'text-slate-400 hover:text-slate-100'}`}
           >
             School
@@ -60,7 +60,7 @@ function isActive(path: string) {
 
     <footer class="border-t border-slate-800 mt-16">
       <div class="max-w-5xl mx-auto px-6 py-8 flex items-center justify-between text-slate-500 text-sm">
-        <span class="font-mono">nakamas.it</span>
+        <span class="font-mono">Nakamas IT</span>
         <span>Built with Astro + Tailwind</span>
       </div>
     </footer>

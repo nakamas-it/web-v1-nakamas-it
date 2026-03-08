@@ -2,21 +2,64 @@
 import Layout from '../layouts/Layout.astro';
 
 const base = import.meta.env.BASE_URL;
+
+const experience = [
+  {
+    role: 'Internal IT — Team Lead',
+    company: 'Confidential',
+    period: '~2022 – present',
+    desc: `Partnered with my manager to build an IT department from the ground up, taking full ownership of everything the previous MSP had been handling — helpdesk, on-call, projects, NOC, and SOC. Implemented key platforms including N-Central (RMM), ITGlue (documentation), and Huntress (SOC/EDR), resulting in significant cost savings for the organization and a measurably stronger security posture.`,
+  },
+  {
+    role: 'Systems Administrator',
+    company: 'MSP',
+    period: '~2019 – 2022',
+    desc: `Promoted from support technician after one year. Led 100+ projects over three years including new office setups, Microsoft 365 and Google Workspace tenant builds, email migrations, cloud migrations (on-prem to cloud), server hardware refreshes, patch management, and incident response. Traveled across BC to onboard new clients and commission major network infrastructure on-site.`,
+  },
+  {
+    role: 'Support Technician',
+    company: 'MSP',
+    period: '~2018 – 2019',
+    desc: `First role in Canada at a Microsoft/Windows-focused MSP. Supported a portfolio of clients running Hyper-V, Windows Server, Active Directory, Group Policy, and Microsoft 365. Built foundational MSP experience before being promoted to Systems Administrator.`,
+  },
+  {
+    role: 'Software Developer',
+    company: 'EdTech Company',
+    period: '~2016 – 2017',
+    desc: `Built the HR module for a school management web application used by teachers, students, and parents. The module handled time-off requests according to school-specific rules. Stack: C#, ASP.NET MVC5, SQL Server.`,
+  },
+  {
+    role: 'IT Analyst — Computer Lab',
+    company: 'University',
+    period: 'During undergrad',
+    desc: `Supported the engineering faculty's computer lab while completing my degree. Responsibilities included Active Directory administration, laptop imaging and onboarding, and student support for lab access throughout the semester.`,
+  },
+];
+
+const certs = [
+  { label: 'CCNA', issuer: 'Cisco' },
+  { label: 'CCNP curriculum (SWITCH, ROUTE, TSHOOT)', issuer: 'Cisco' },
+  { label: 'MCSA — Windows Server', issuer: 'Microsoft' },
+  { label: 'M.Sc. Cybersecurity', issuer: 'University' },
+  { label: 'B.Sc. Computer Science', issuer: 'University' },
+];
 ---
 
-<Layout title="Home">
+<Layout title="Home" description="Gianfranco Cisneros — technology enthusiast, systems administrator, and networking geek based in Canada.">
 
   <!-- Hero -->
   <section class="mb-20">
     <p class="font-mono text-cyan-400 text-sm mb-3">Hello, I'm</p>
-    <h1 class="text-5xl font-bold text-slate-100 mb-4">Gustavo Cisneros</h1>
+    <h1 class="text-5xl font-bold text-slate-100 mb-2">Gianfranco Cisneros</h1>
+    <p class="font-mono text-slate-500 text-sm mb-6">aka "hackerman"</p>
     <p class="text-xl text-slate-400 max-w-2xl leading-relaxed">
-      Network engineer and IT enthusiast. I run <span class="text-slate-200 font-medium">Nakamas IT</span>,
-      a small managed services practice, and I document everything I learn along the way.
+      Technology enthusiast, systems administrator, and networking geek based in Canada.
+      I run <span class="text-slate-200 font-medium">Nakamas IT</span> and use this site
+      to share everything I've learned — from packet captures to production deployments.
     </p>
-    <div class="flex gap-4 mt-8">
+    <div class="flex flex-wrap gap-4 mt-8">
       <a
-        href={`${base}school`}
+        href={`${base}school/`}
         class="bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold px-6 py-3 rounded-lg transition-colors text-sm"
       >
         Browse the School
@@ -26,6 +69,14 @@ const base = import.meta.env.BASE_URL;
         class="border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-slate-100 font-medium px-6 py-3 rounded-lg transition-colors text-sm"
       >
         About me
+      </a>
+      <a
+        href="https://www.linkedin.com/in/gianfranco-cisneros-barreiro/"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-slate-100 font-medium px-6 py-3 rounded-lg transition-colors text-sm"
+      >
+        LinkedIn ↗
       </a>
     </div>
   </section>
@@ -38,9 +89,28 @@ const base = import.meta.env.BASE_URL;
     </h2>
     <div class="text-slate-400 space-y-4 leading-relaxed max-w-3xl">
       <p>
-        <!-- TODO: Write your bio here -->
-        Placeholder — tell the story of how you got into networking and IT.
-        What problems do you enjoy solving? What kind of environments have you worked in?
+        I started out with a Bachelor's in Computer Science — heavily programming-focused —
+        but quickly gravitated toward the infrastructure side of things. While still in university
+        I was running the engineering faculty's computer lab: imaging laptops, managing Active Directory,
+        and keeping students connected throughout the semester.
+      </p>
+      <p>
+        After graduating I moved to Canada, earned a Master's degree in Cybersecurity, and pursued
+        Cisco certifications — picking up the CCNA and working through the full CCNP curriculum
+        (SWITCH, ROUTE, and TSHOOT). Around the same time I got certified in Microsoft technologies
+        (MCSA Windows Server) and spent a lot of hours in Hyper-V labs building out Active Directory
+        forests, Group Policy structures, Certificate Authorities, and Storage Spaces.
+      </p>
+      <p>
+        That led to a career at a Microsoft-focused MSP, where I grew from support technician to
+        systems administrator and eventually took on more than 100 projects — from wiring up
+        brand-new offices across BC to migrating entire organizations to Microsoft 365 or the cloud.
+        After three years I moved into internal IT, where my manager and I built a department from
+        scratch, displaced the MSP entirely, and saved the company millions in the process.
+      </p>
+      <p>
+        This site — specifically the School section — is my way of documenting the things I wish
+        had been explained to me this clearly when I was starting out.
       </p>
     </div>
   </section>
@@ -51,11 +121,28 @@ const base = import.meta.env.BASE_URL;
       <span class="w-8 h-px bg-cyan-400 inline-block"></span>
       What I care about
     </h2>
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       {[
-        { icon: '🌐', label: 'Networking', desc: 'Protocols, packet analysis, and understanding how data actually moves.' },
-        { icon: '🔒', label: 'Security', desc: 'Defense-in-depth, zero trust, and making networks harder to break.' },
-        { icon: '🧪', label: 'Lab work', desc: 'EVE-NG simulations, Wireshark captures, and hands-on experimentation.' },
+        {
+          icon: '🌐',
+          label: 'Networking',
+          desc: 'Protocols, packet analysis, and understanding exactly how data travels across a network.',
+        },
+        {
+          icon: '🔒',
+          label: 'Cybersecurity',
+          desc: 'Defense-in-depth, SOC operations, EDR, and building security programs that actually work.',
+        },
+        {
+          icon: '☁️',
+          label: 'Microsoft / Cloud',
+          desc: 'Active Directory, Hyper-V, Microsoft 365, and moving workloads from on-prem to the cloud.',
+        },
+        {
+          icon: '🧪',
+          label: 'Lab work',
+          desc: 'EVE-NG simulations, Wireshark captures, and hands-on experimentation with real protocols.',
+        },
       ].map(item => (
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
           <div class="text-2xl mb-3">{item.icon}</div>
@@ -72,22 +159,8 @@ const base = import.meta.env.BASE_URL;
       <span class="w-8 h-px bg-cyan-400 inline-block"></span>
       Experience
     </h2>
-    <div class="space-y-6 max-w-3xl">
-      <!-- TODO: Replace with real entries -->
-      {[
-        {
-          role: 'Founder / Network Engineer',
-          company: 'Nakamas IT',
-          period: '2024 – present',
-          desc: 'Placeholder — describe what you do at Nakamas IT.',
-        },
-        {
-          role: 'Previous Role',
-          company: 'Previous Company',
-          period: '20XX – 20XX',
-          desc: 'Placeholder — describe a previous position.',
-        },
-      ].map(job => (
+    <div class="space-y-8 max-w-3xl">
+      {experience.map(job => (
         <div class="border-l-2 border-slate-700 pl-5">
           <div class="flex items-baseline justify-between gap-4 flex-wrap">
             <h3 class="font-semibold text-slate-100">{job.role}</h3>
@@ -95,6 +168,22 @@ const base = import.meta.env.BASE_URL;
           </div>
           <p class="text-cyan-400 text-sm mb-2">{job.company}</p>
           <p class="text-slate-400 text-sm leading-relaxed">{job.desc}</p>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <!-- Certifications -->
+  <section class="mb-16">
+    <h2 class="text-2xl font-bold text-slate-100 mb-6 flex items-center gap-3">
+      <span class="w-8 h-px bg-cyan-400 inline-block"></span>
+      Certifications & Education
+    </h2>
+    <div class="flex flex-wrap gap-3">
+      {certs.map(cert => (
+        <div class="bg-slate-900 border border-slate-800 rounded-lg px-4 py-3">
+          <p class="text-slate-100 text-sm font-medium">{cert.label}</p>
+          <p class="text-slate-500 text-xs font-mono mt-0.5">{cert.issuer}</p>
         </div>
       ))}
     </div>
