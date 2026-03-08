@@ -6,35 +6,39 @@ const base = import.meta.env.BASE_URL;
 
 const allArticles = await getCollection('school', ({ data }) => !data.draft);
 
-const layerMeta: Record<string, { label: string; description: string; accent: string }> = {
+const layerMeta: Record<string, { label: string; description: string; accent: string; border: string }> = {
   layer1: {
     label: 'Layer 1 — Physical',
     description: 'Cables, signals, encoding, and the raw electrical or optical pulses that carry every bit across the wire.',
-    accent: 'text-orange-400 border-orange-800',
+    accent: 'text-orange-400',
+    border: 'border-orange-800',
   },
   layer2: {
     label: 'Layer 2 — Data Link',
     description: 'Ethernet frames, VLANs, STP, ARP, and how data travels within a broadcast domain.',
-    accent: 'text-violet-400 border-violet-800',
+    accent: 'text-violet-400',
+    border: 'border-violet-800',
   },
   layer3: {
     label: 'Layer 3 — Network',
     description: 'IP addressing, DHCP, DNS, ICMP, and how packets are routed across networks.',
-    accent: 'text-cyan-400 border-cyan-800',
+    accent: 'text-cyan-400',
+    border: 'border-cyan-800',
   },
   layer4: {
     label: 'Layer 4 — Transport',
     description: 'TCP, UDP, ports, handshakes, flow control, and how data is reliably (or not) delivered end to end.',
-    accent: 'text-sky-400 border-sky-800',
+    accent: 'text-sky-400',
+    border: 'border-sky-800',
   },
   application: {
     label: 'Application Layer',
     description: 'HTTP, TLS, BGP, and the protocols that power the services we use every day.',
-    accent: 'text-emerald-400 border-emerald-800',
+    accent: 'text-emerald-400',
+    border: 'border-emerald-800',
   },
 };
 
-// Group articles by layer, preserving defined order
 const layers = Object.entries(layerMeta).map(([key, meta]) => ({
   key,
   ...meta,
@@ -42,11 +46,13 @@ const layers = Object.entries(layerMeta).map(([key, meta]) => ({
     .filter(a => a.data.layer === key)
     .sort((a, b) => a.data.order - b.data.order),
 }));
+
+const totalArticles = allArticles.length;
 ---
 
 <Layout title="School" description="A protocol library covering how networking really works — from packets to packet captures.">
 
-  <header class="mb-12">
+  <header class="mb-8">
     <h1 class="text-4xl font-bold text-slate-100 mb-4">The School</h1>
     <p class="text-slate-400 leading-relaxed">
       <span class="text-cyan-400 font-mono font-semibold">Wanted:</span> A straight answer about why the internet works.
@@ -57,12 +63,40 @@ const layers = Object.entries(layerMeta).map(([key, meta]) => ({
     </p>
   </header>
 
-  <div class="space-y-12">
+  <!-- Search bar -->
+  <div class="mb-10">
+    <div class="relative">
+      <svg class="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+      <input
+        id="school-search"
+        type="search"
+        placeholder={`Search ${totalArticles} articles... (press / to focus)`}
+        autocomplete="off"
+        spellcheck="false"
+        class="w-full bg-slate-900 border border-slate-700 hover:border-slate-600 rounded-xl px-4 py-3 pl-10 pr-10 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-800 focus:ring-1 focus:ring-cyan-900 font-mono text-sm transition-colors"
+      />
+      <button
+        id="search-clear"
+        aria-label="Clear search"
+        class="hidden absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-100 transition-colors w-5 h-5 flex items-center justify-center rounded"
+      >
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" class="w-4 h-4">
+          <path d="M18 6 6 18M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <p id="search-status" class="hidden mt-2 text-slate-500 text-xs font-mono pl-1"></p>
+  </div>
+
+  <!-- Article browser, grouped by layer -->
+  <div id="school-browser" class="space-y-12">
     {layers.map(layer => (
-      <section>
+      <section data-layer-section={layer.key}>
         <a
           href={`${base}school/${layer.key}`}
-          class={`inline-flex items-center gap-2 text-lg font-semibold mb-1 hover:underline underline-offset-4 ${layer.accent.split(' ')[0]}`}
+          class={`inline-flex items-center gap-2 text-lg font-semibold mb-1 hover:underline underline-offset-4 ${layer.accent}`}
         >
           {layer.label}
           <span class="text-slate-500 text-sm font-normal">→</span>
@@ -72,40 +106,103 @@ const layers = Object.entries(layerMeta).map(([key, meta]) => ({
         {layer.articles.length === 0 ? (
           <p class="text-slate-600 text-sm italic">Articles coming soon.</p>
         ) : (
-          <>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {layer.articles.slice(0, 2).map(article => {
-                const [layerKey, slug] = article.id.split('/');
-                return (
-                  <a
-                    href={`${base}school/${layerKey}/${slug}`}
-                    class={`bg-slate-900 border ${layer.accent.split(' ')[1]} hover:border-opacity-60 rounded-xl p-5 transition-colors group`}
-                  >
-                    <div class="flex items-center justify-between gap-3 mb-2">
-                      <p class="text-slate-100 text-sm font-semibold leading-snug group-hover:underline underline-offset-2">{article.data.title}</p>
-                      <span class={`font-mono text-xs font-bold shrink-0 px-2 py-1 rounded border border-current opacity-60 ${layer.accent.split(' ')[0]}`}>
-                        {article.data.protocol.toUpperCase()}
-                      </span>
-                    </div>
-                    <p class="text-slate-400 text-sm leading-relaxed">{article.data.summary}</p>
-                  </a>
-                );
-              })}
-            </div>
-            {layer.articles.length > 2 && (
-              <div class="mt-3 text-right">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {layer.articles.map(article => {
+              const [layerKey, slug] = article.id.split('/');
+              const searchText = [
+                article.data.title,
+                article.data.summary,
+                article.data.protocol,
+                ...article.data.tags,
+              ].join(' ').toLowerCase();
+              return (
                 <a
-                  href={`${base}school/${layer.key}`}
-                  class={`text-sm font-medium hover:underline underline-offset-4 ${layer.accent.split(' ')[0]}`}
+                  href={`${base}school/${layerKey}/${slug}`}
+                  data-article-card
+                  data-search-text={searchText}
+                  class={`bg-slate-900 border ${layer.border} hover:border-opacity-60 rounded-xl p-5 transition-colors group`}
                 >
-                  See all {layer.articles.length} articles →
+                  <div class="flex items-center justify-between gap-3 mb-2">
+                    <p class="text-slate-100 text-sm font-semibold leading-snug group-hover:underline underline-offset-2">{article.data.title}</p>
+                    <span class={`font-mono text-xs font-bold shrink-0 px-2 py-1 rounded border border-current opacity-60 ${layer.accent}`}>
+                      {article.data.protocol.toUpperCase()}
+                    </span>
+                  </div>
+                  <p class="text-slate-400 text-xs leading-relaxed">{article.data.summary}</p>
                 </a>
-              </div>
-            )}
-          </>
+              );
+            })}
+          </div>
         )}
       </section>
     ))}
   </div>
 
+  <!-- Empty state (shown when search has no results) -->
+  <p id="search-empty" class="hidden text-slate-500 text-center py-20 font-mono text-sm">
+    No articles match your search.
+  </p>
+
 </Layout>
+
+<script>
+  const input = document.getElementById('school-search') as HTMLInputElement;
+  const clearBtn = document.getElementById('search-clear') as HTMLButtonElement;
+  const statusEl = document.getElementById('search-status') as HTMLParagraphElement;
+  const emptyEl = document.getElementById('search-empty') as HTMLParagraphElement;
+  const sections = document.querySelectorAll<HTMLElement>('[data-layer-section]');
+
+  function applyFilter(q: string) {
+    const lower = q.toLowerCase().trim();
+    clearBtn.classList.toggle('hidden', !lower);
+
+    let totalMatches = 0;
+
+    sections.forEach(section => {
+      const cards = section.querySelectorAll<HTMLElement>('[data-article-card]');
+      let sectionMatches = 0;
+
+      cards.forEach(card => {
+        const text = (card.dataset.searchText ?? '');
+        const match = !lower || text.includes(lower);
+        card.style.display = match ? '' : 'none';
+        if (match) sectionMatches++;
+      });
+
+      totalMatches += sectionMatches;
+      section.style.display = (!lower || sectionMatches > 0) ? '' : 'none';
+    });
+
+    if (lower) {
+      statusEl.classList.remove('hidden');
+      statusEl.textContent = totalMatches === 0
+        ? 'No results.'
+        : `${totalMatches} article${totalMatches !== 1 ? 's' : ''} matching "${lower}"`;
+      emptyEl.classList.toggle('hidden', totalMatches > 0);
+    } else {
+      statusEl.classList.add('hidden');
+      emptyEl.classList.add('hidden');
+    }
+  }
+
+  input.addEventListener('input', () => applyFilter(input.value));
+
+  clearBtn.addEventListener('click', () => {
+    input.value = '';
+    applyFilter('');
+    input.focus();
+  });
+
+  // Press / anywhere on page to focus search (unless already in an input)
+  document.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === '/' && document.activeElement !== input && !(document.activeElement instanceof HTMLInputElement)) {
+      e.preventDefault();
+      input.focus();
+    }
+    if (e.key === 'Escape' && document.activeElement === input) {
+      input.value = '';
+      applyFilter('');
+      input.blur();
+    }
+  });
+</script>

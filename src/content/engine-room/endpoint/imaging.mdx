@@ -1,0 +1,287 @@
+---
+title: "Endpoint Imaging — Deploying Windows at Scale"
+category: "endpoint"
+topic: "imaging"
+summary: "Imaging is the process of deploying a pre-configured Windows installation to multiple machines. The toolchain has evolved from WDS (unicast/multicast network PXE boot) through MDT (task sequences, driver injection, application installation) to Windows Autopilot (cloud-first, no custom image required). Understanding the full stack explains why enterprises choose each approach and where they're headed."
+tags: ["endpoint", "imaging", "wds", "mdt", "autopilot", "wim", "pxe", "osd", "sysprep"]
+order: 2
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Why Imaging Exists
+
+Manually configuring a Windows workstation takes 30–90 minutes for an experienced technician — installing the OS, joining the domain, configuring settings, installing applications, applying updates. At 500 workstations, that is 250–750 person-hours, with every machine slightly different depending on who configured it and on what day.
+
+Imaging solves three problems simultaneously:
+
+- **Consistency**: every machine receives the same validated baseline configuration.
+- **Speed**: a network deployment to bare metal can complete in 15–30 minutes unattended.
+- **Compliance**: security settings, encryption, and software versions are enforced from first boot.
+
+The mechanisms have changed substantially over two decades, but the goal is the same: reproduce a known-good Windows state on arbitrary hardware, at scale, without manual intervention.
+
+---
+
+## Windows Image Format (WIM)
+
+WIM (Windows Imaging Format) is Microsoft's container format for Windows installation media. All Windows deployment tooling, from WDS to MDT to Autopilot's cloud reset, ultimately works with WIM files.
+
+### How WIM Works
+
+WIM uses single-instance storage: if the same file appears in multiple locations within a WIM (e.g., a DLL present in both `System32` and a software package), it is stored only once on disk. The WIM metadata tracks all references. This makes WIM files significantly smaller than equivalent raw disk images.
+
+A single WIM file can contain multiple images (indices). The Windows installation media (`install.wim` or `install.esd`) ships with all editions of Windows (Home, Pro, Enterprise) as separate indices in the same file.
+
+```
+# List images in a WIM file:
+dism /Get-WimInfo /WimFile:install.wim
+
+# Mount a specific image index for editing:
+dism /Mount-Wim /WimFile:install.wim /Index:3 /MountDir:C:\Mount
+
+# Apply updates or add drivers while mounted:
+dism /Image:C:\Mount /Add-Package /PackagePath:C:\Updates\KB5034441.msu
+dism /Image:C:\Mount /Add-Driver /Driver:C:\Drivers /Recurse
+
+# Commit changes and unmount:
+dism /Unmount-Wim /MountDir:C:\Mount /Commit
+
+# Discard changes (if something went wrong):
+dism /Unmount-Wim /MountDir:C:\Mount /Discard
+
+# Capture a running Windows installation as a new WIM:
+dism /Capture-Image /ImageFile:D:\Images\custom.wim /CaptureDir:C:\ /Name:"Custom W11" /Compress:max
+```
+
+### Boot Images
+
+In addition to install images, WIM is used for boot images — a minimal Windows PE (Preinstallation Environment) loaded into RAM before the OS is deployed. WinPE provides the shell, networking stack, and DISM tools needed to receive and apply a Windows image from a WDS server or MDT share.
+
+---
+
+## Sysprep — Generalising an Image
+
+A Windows installation is hardware-specific from the moment it runs. It records the hardware profile, assigns a unique Security Identifier (SID) to the local accounts and the machine, registers drivers for the specific chipset, and activates against a licence server.
+
+Before an installation can be captured and deployed to different hardware, it must be generalised — stripped of these hardware-specific and instance-specific identifiers. This is the function of Sysprep (System Preparation Tool).
+
+```
+# Run from within the Windows installation to be captured:
+C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown
+```
+
+**What Sysprep does**:
+- Resets the machine SID.
+- Removes the computer name (will be auto-generated or set by MDT on next boot).
+- Strips hardware-specific driver entries.
+- Sets the system to enter OOBE (Out-of-Box Experience) on next boot.
+- Optionally shuts down, leaving the system ready for WIM capture.
+
+**Sysprep limitations**:
+- Can only be run a limited number of times on a single Windows installation (official limit: 3 times for Vista-era; in practice, Windows 10/11 is more tolerant but still not unlimited).
+- Some applications do not survive Sysprep (they store hardware-specific data). Install such applications post-deployment, not in the reference image.
+- Windows Activation: VLSC/KMS-activated machines tolerate Sysprep. Retail activations do not.
+
+---
+
+## WDS — Windows Deployment Services
+
+WDS is a Windows Server role that hosts boot and install WIM images and serves them to clients over the network via PXE boot.
+
+### PXE Boot Process
+
+<FlowDiagram
+  parties={["Client", "WDS Server"]}
+  steps={[
+    { from: "Client", to: "WDS Server", label: "DHCP DISCOVER (with PXE options 60/66/67)", sub: "Client broadcasts; DHCP and WDS respond" },
+    { from: "WDS Server", to: "Client", label: "DHCP OFFER + TFTP server address + boot filename" },
+    { from: "Client", to: "WDS Server", label: "TFTP request: download bootmgr.exe + BCD", sub: "Trivial File Transfer Protocol (TFTP, UDP 69)" },
+    { from: "WDS Server", to: "Client", label: "Transfer WinPE boot image (boot.wim)" },
+    { from: "Client", to: "WDS Server", label: "WinPE boots; connects to WDS for install image list" },
+    { from: "WDS Server", to: "Client", label: "Transfer selected install.wim to client disk" },
+  ]}
+/>
+
+### WDS Multicast
+
+WDS supports multicast transmission: a single WDS server sends the WIM file once over the network; multiple clients receive the same stream simultaneously. Dramatically reduces network load when deploying to many machines at once. The WDS scheduler can be configured to start the multicast session when N clients are waiting, or on a timer.
+
+### WDS Limitations
+
+WDS manages image distribution and PXE boot but has no task sequencing, driver injection, or application installation capabilities. It is a transport mechanism. Most deployments use WDS in combination with MDT or SCCM OSD, with WDS serving the boot image and MDT/SCCM handling the actual deployment logic.
+
+---
+
+## MDT — Microsoft Deployment Toolkit
+
+MDT is a free Microsoft tool that provides task-based deployment automation on top of WDS (or USB/ISO boot media). It is the standard toolchain for mid-market and on-premises enterprise Windows deployments.
+
+### Task Sequences
+
+A task sequence is an ordered list of steps executed automatically by the MDT deployment environment. Each step is a discrete action:
+
+| Step Type | Example |
+|-----------|---------|
+| Disk preparation | Format and partition disk (BIOS/UEFI) |
+| Image application | Apply Windows WIM to the target partition |
+| Driver injection | Install drivers for detected hardware model |
+| Windows configuration | Set computer name, product key, time zone |
+| Application installation | Run silent installer for each bundled app |
+| Domain join | Join Active Directory domain |
+| Post-deployment script | Run custom PowerShell cleanup/configuration |
+| Restart | Reboot between stages (driver install, etc.) |
+
+### Driver Repository
+
+MDT maintains a driver repository — a structured folder of driver packages, typically organised by hardware model (make/model/OS version). MDT's Inject Drivers step uses a driver profile or WMI query to determine which driver package matches the current hardware:
+
+```
+// WMI query in MDT to match hardware model:
+SELECT * FROM Win32_ComputerSystem WHERE Model = "Latitude 5540"
+```
+
+The correct network adapter driver is critical — without it, MDT cannot communicate with the deployment share after applying the image. Include it in a separate "critical driver" injection step before the main driver profile.
+
+### MDT Deployment Share
+
+MDT stores everything in a deployment share — a network share (or local folder for USB deployments) containing:
+
+```
+DeploymentShare\
+  Applications\       — silent installer packages
+  Boot\               — LiteTouch boot WIM and ISO
+  Captures\           — captured reference images
+  Control\            — task sequences, deployment rules
+  Out-of-Box Drivers\ — driver packages
+  Operating Systems\  — imported WIM files
+  Scripts\            — built-in and custom MDT scripts
+```
+
+The CustomSettings.ini and Bootstrap.ini files control how MDT interrogates the deployment and what happens automatically (computer naming conventions, domain join credentials, time zone defaults).
+
+### Reference Image vs Deployment
+
+**Reference image build**: MDT task sequence that builds a clean Windows installation, installs common applications (Office, runtime libraries), runs Windows Update, runs Sysprep, and captures the result as a WIM.
+
+**Deployment task sequence**: starts from the captured reference WIM, injects drivers, installs additional applications, joins the domain, and configures final settings.
+
+Keeping the reference image lean (OS + universal software only) and doing model-specific or role-specific configuration in the deployment sequence minimises the number of reference images to maintain.
+
+---
+
+## SCCM OSD — Operating System Deployment
+
+SCCM (Configuration Manager) OSD extends the MDT model to enterprise scale, with tighter integration into the SCCM infrastructure:
+
+- **Hardware inventory**: SCCM knows the exact hardware of every managed machine before deployment.
+- **Driver catalog**: SCCM Auto Apply Drivers can inject drivers from a managed catalog matched to hardware IDs.
+- **Software distribution integration**: deployed machines are immediately known to SCCM and can receive software packages, patches, and compliance baselines.
+- **Reporting**: full visibility into deployment status, failure rates, and task sequence step timing.
+- **PXE via SCCM Distribution Points**: no separate WDS server required. Each DP can respond to PXE requests.
+
+SCCM OSD task sequences are structurally identical to MDT task sequences but run within the SCCM task sequence engine. MDT integration mode allows using MDT task sequence steps inside SCCM.
+
+For organisations already running SCCM, OSD is the natural choice for imaging. The operational overhead of SCCM (SQL database, site servers, distribution points) is only worthwhile at scale — typically 500+ managed devices.
+
+---
+
+## Windows Autopilot — Cloud-First, No Custom Image
+
+Autopilot represents the architectural shift away from custom images entirely.
+
+<FlowDiagram
+  parties={["Device / User", "Microsoft Cloud"]}
+  steps={[
+    { from: "Device / User", to: "Microsoft Cloud", label: "Device ships from OEM with stock Windows 11" },
+    { from: "Microsoft Cloud", to: "Device / User", label: "Autopilot profile delivered at OOBE", sub: "Device hash pre-registered by OEM or IT" },
+    { from: "Device / User", to: "Microsoft Cloud", label: "User authenticates with Entra ID credentials" },
+    { from: "Microsoft Cloud", to: "Device / User", label: "Entra ID join + Intune enrollment" },
+    { from: "Microsoft Cloud", to: "Device / User", label: "Intune pushes configuration profiles" },
+    { from: "Microsoft Cloud", to: "Device / User", label: "Required apps deployed via Intune" },
+    { from: "Device / User", to: "Microsoft Cloud", label: "Device reaches desired state — user productive" },
+  ]}
+/>
+
+**The key difference**: there is no custom WIM. The OEM ships a vanilla Windows 11 Pro or Enterprise installation. The Autopilot service transforms that stock installation into a configured corporate device by applying Intune policies and deploying Intune-managed applications.
+
+### What Autopilot Eliminates
+
+- No imaging server infrastructure (WDS/MDT servers).
+- No reference image maintenance cycle.
+- No driver management — OEM pre-loads correct drivers.
+- No on-site IT presence — device can be shipped directly to the user and provisioned over the internet.
+
+### What Autopilot Requires
+
+- All software deployable via Intune (no dependencies on on-premises software distribution).
+- Reliable internet connectivity during provisioning.
+- Apps packaged as Win32 (.intunewin) or available from the Windows Store.
+- Identity management in Entra ID (cloud-only or hybrid with Entra ID Connect).
+
+---
+
+## Image Strategy Comparison
+
+| Approach | Infrastructure Required | Custom Image | Driver Management | Cloud Dependency | Scale | Complexity |
+|----------|------------------------|--------------|------------------|-----------------|-------|------------|
+| WDS only | WDS server | Yes | Manual | None | High (multicast) | Low |
+| MDT + WDS | WDS + MDT server | Yes | Task sequence | None | Medium | Medium |
+| SCCM OSD | Full SCCM hierarchy | Yes | Auto Apply Drivers | None | Enterprise | High |
+| Autopilot + Intune | None (cloud) | No | OEM | Full (M365) | Any | Low–Medium |
+| Hybrid (SCCM + Autopilot) | SCCM + co-management | Minimal | Both | Partial | Enterprise | High |
+
+---
+
+## Image Philosophy: Thick vs Thin vs None
+
+### Thick Image
+
+A large reference image with Windows plus many applications pre-installed. Deployment is fast (one WIM contains everything), but maintenance is high — every application update requires a new capture cycle.
+
+**Drawbacks**: image rot (outdated software baked in from day one), large WIM files (10–20 GB+), multiple images needed for different roles.
+
+### Thin Image
+
+Windows plus drivers plus minimal universal software (runtime libraries, certificate store, basic configuration). All role-specific and business applications are installed post-deployment by MDT/SCCM task sequences or Intune.
+
+**Advantages**: one small image serves all hardware and roles; application updates do not require image recapture; deployment time is slightly longer but maintenance overhead is dramatically lower.
+
+### No Image (Autopilot)
+
+Stock OEM Windows, zero custom image. The entire desired state is defined as Intune policies and app deployments. The "image" is the combination of Intune configuration at the time of enrollment.
+
+**Advantages**: no imaging infrastructure; no image maintenance; works for any hardware anywhere in the world. **Disadvantages**: requires all software to be cloud-deployable; initial provisioning can take 60–90 minutes for complex app sets; requires network connectivity throughout.
+
+The modern enterprise direction is toward thin images or no images, with application delivery via Intune or SCCM software distribution post-deployment.
+
+---
+
+## DISM Reference
+
+DISM (Deployment Image Servicing and Management) is the underlying command-line engine for all WIM operations. It is available in full Windows, WinPE, and Windows Server.
+
+```
+# Offline driver injection into a WIM:
+dism /Image:C:\Mount /Add-Driver /Driver:C:\Drivers\NIC /Recurse
+
+# List all drivers in a mounted image:
+dism /Image:C:\Mount /Get-Drivers
+
+# Remove a specific driver:
+dism /Image:C:\Mount /Remove-Driver /Driver:oem5.inf
+
+# Add Windows features offline:
+dism /Image:C:\Mount /Enable-Feature /FeatureName:NetFx3 /All /Source:D:\Sources\sxs
+
+# Check image health:
+dism /Image:C:\Mount /ScanHealth
+dism /Image:C:\Mount /CheckHealth
+dism /Image:C:\Mount /RestoreHealth /Source:D:\Sources\install.wim
+
+# Export an image (reduce WIM size after edits):
+dism /Export-Image /SourceImageFile:custom.wim /SourceIndex:1 /DestImageFile:custom_clean.wim /Compress:max
+```
+
+After mounting and editing a WIM, always export it to a new file — the original WIM retains deleted/modified blocks and grows over time. The exported WIM contains only the current state.

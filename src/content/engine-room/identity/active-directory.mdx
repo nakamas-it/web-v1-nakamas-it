@@ -1,0 +1,248 @@
+---
+title: "Active Directory — How Windows Domains Work"
+category: "identity"
+topic: "active-directory"
+summary: "Active Directory is the identity and access management backbone of virtually every on-premises Windows enterprise environment. Understanding what a domain controller actually does, how forests and trusts work, and why AD relies on Kerberos and DNS explains the foundation that everything from file shares to VPN authentication is built on."
+tags: ["identity", "active-directory", "windows-server", "kerberos", "ldap", "dns", "domain-controller"]
+order: 1
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Active Directory is not a single service — it is a collection of services that together provide a centralised identity, authentication, and policy platform for a Windows network. At its core it is three things running on the same machine:
+
+- **An LDAP directory** — a hierarchical database of objects (users, computers, groups, printers, policies) that any application can query and update
+- **A Kerberos KDC** — the Key Distribution Center that issues tickets so domain members can authenticate to each other without passwords crossing the network
+- **A DNS server** — the naming system that domain members use to locate domain controllers and services
+
+Strip those three away and Active Directory is not much. Together they form the fabric that lets a user log into any domain-joined workstation with a single set of credentials, access a file server in a remote office, and have their desktop preferences follow them — without any of those systems ever asking for a password again after the initial logon.
+
+Active Directory was introduced with Windows 2000 Server and has been the standard for enterprise Windows identity management ever since. Its cloud counterpart, Entra ID (formerly Azure Active Directory), has a fundamentally different design and is covered in a separate article.
+
+---
+
+## The Logical Structure
+
+Active Directory organises objects in a three-tier logical hierarchy: **forest → domain → organisational unit**.
+
+### Forest
+
+The forest is the top-level security boundary. Every object in the directory exists within a single forest. Forests share a common schema (the definition of object types and their attributes) and a common Global Catalog. Trust between domains within the same forest is automatic and bidirectional. Objects from one forest cannot access resources in another without an explicit cross-forest trust.
+
+A forest contains one or more domains. The first domain created becomes the **forest root domain**, and its name forms the basis of the forest name.
+
+### Domain
+
+A domain is an administrative partition within the forest. It has its own:
+- Security policy (password policies, account lockout)
+- Set of domain controllers
+- Replication boundary (most AD data only replicates within a domain)
+
+Every domain has a DNS name (e.g., `corp.nakamas-it.com`) and a legacy NetBIOS name (e.g., `CORP`). Domains in the same forest share the schema and Global Catalog but are otherwise independently administered.
+
+### Organisational Unit (OU)
+
+OUs are containers within a domain used to organise objects and delegate administration. They are the attachment points for Group Policy Objects (GPOs). An OU can contain users, computers, groups, and other OUs (nested). The OU hierarchy mirrors the administrative or geographical structure of the organisation — not the network topology.
+
+The key distinction: **OUs are not security boundaries**. A domain administrator can read and modify objects in any OU within their domain. OUs are delegation and policy containers, not trust boundaries.
+
+---
+
+## Domain Controllers
+
+A domain controller (DC) is a server running Active Directory Domain Services (AD DS). It hosts the LDAP directory, runs the Kerberos KDC, and serves as an authoritative DNS server for the domain zone. Domain controllers are multi-master: every DC holds a writable copy of the domain's AD database (`ntds.dit`), and changes made to any DC are replicated to all others.
+
+### FSMO Roles
+
+Despite multi-master replication, five **Flexible Single Master Operations (FSMO)** roles exist for operations that must happen on exactly one DC at a time to avoid conflicts. Every domain has three of the five; two are per-forest.
+
+**Forest-wide roles (one per forest):**
+
+| Role | Function |
+|------|----------|
+| **Schema Master** | The only DC that can make changes to the AD schema — adding or modifying object classes and attributes. Schema changes are irreversible and replicate to every DC in the forest. |
+| **Domain Naming Master** | Controls adding and removing domains from the forest. Must be online when creating a new child domain or establishing a cross-forest trust. |
+
+**Domain-wide roles (one per domain):**
+
+| Role | Function |
+|------|----------|
+| **PDC Emulator** | The most operationally critical FSMO role. Handles password changes (acts as the authoritative source so lockouts propagate quickly), is the preferred target for GPO edits, acts as the NTP source for the domain, and provides backward compatibility with legacy clients. If this DC goes offline, password-related issues surface first. |
+| **RID Master** | Allocates pools of Relative Identifiers (RIDs) to other DCs. Every security principal (user, group, computer) gets a unique SID composed of the domain SID + a unique RID. The RID Master ensures no two DCs issue the same RID. |
+| **Infrastructure Master** | Maintains cross-domain object references — ensures that group memberships referencing users from other domains remain accurate as those objects are renamed or moved. In a single-domain forest this role is irrelevant. Should not be placed on a Global Catalog server in a multi-domain forest. |
+
+---
+
+## The AD Data Model
+
+The AD database stores **objects** — every user account, computer account, group, and policy is an object. Objects have **attributes** — fields defined by the schema. The schema is the directory's blueprint and defines every object class (what types of objects can exist) and every attribute (what data those objects can hold).
+
+Common object types:
+
+| Object Class | Description |
+|---|---|
+| `user` | Represents a person or service account. Key attributes: `sAMAccountName`, `userPrincipalName`, `mail`, `memberOf`, `pwdLastSet` |
+| `computer` | Represents a domain-joined machine. Has its own password (rotated automatically every 30 days by default). |
+| `group` | A collection of security principals. Used for access control (security groups) or distribution (distribution groups). |
+| `organizationalUnit` | Container object. Holds other objects and is the attachment point for GPOs. |
+| `groupPolicyContainer` | Stores GPO metadata in AD; the actual policy files live in SYSVOL. |
+
+### Group Types and Scopes
+
+Groups have both a **type** and a **scope**:
+
+**Type:**
+- **Security group** — used in access control lists (ACLs) to grant permissions to resources. Can also be used as a distribution list.
+- **Distribution group** — used only for email distribution lists (Exchange/Outlook). Cannot be used in ACLs.
+
+**Scope** (determines which objects can be members and where the group can be used):
+
+| Scope | Members can include | Can be used in ACLs |
+|-------|--------------------|--------------------|
+| **Domain Local** | Users/groups from any domain in the forest + external domains | Only within the domain where the group exists |
+| **Global** | Users/groups from the same domain only | In any domain in the forest |
+| **Universal** | Users/groups from any domain in the forest | In any domain in the forest |
+
+The recommended model for resource access is **AGDLP**: put **A**ccounts into **G**lobal groups, put Global groups into **D**omain **L**ocal groups, then apply **P**ermissions to the Domain Local group. This keeps access control flexible across domain boundaries.
+
+---
+
+## Authentication: Kerberos and NTLM
+
+### Kerberos (Primary)
+
+Kerberos v5 is the default authentication protocol for all modern AD environments. It is ticket-based: the client authenticates once to the KDC, receives a Ticket Granting Ticket (TGT), and then uses that TGT to obtain service tickets for individual resources — without sending the password again.
+
+<FlowDiagram
+  parties={["Client", "DC / KDC (AS)", "DC / KDC (TGS)", "Service"]}
+  steps={[
+    { from: "Client", to: "DC / KDC (AS)", label: "AS-REQ", sub: "Username + pre-authentication timestamp (encrypted with user's key)" },
+    { from: "DC / KDC (AS)", to: "Client", label: "AS-REP", sub: "TGT (encrypted with krbtgt hash) + session key (encrypted with user's hash)" },
+    { from: "Client", to: "DC / KDC (TGS)", label: "TGS-REQ", sub: "TGT + target SPN + authenticator (timestamp encrypted with session key)" },
+    { from: "DC / KDC (TGS)", to: "Client", label: "TGS-REP", sub: "Service Ticket (encrypted with service account hash) + service session key" },
+    { from: "Client", to: "Service", label: "AP-REQ", sub: "Service Ticket + authenticator" },
+    { from: "Service", to: "Client", label: "AP-REP (optional)", sub: "Mutual auth — service proves it decrypted the ticket" },
+  ]}
+/>
+
+The TGT is encrypted with the `krbtgt` account's password hash — only the KDC can read it. Service tickets are encrypted with the service account's password hash — only the target service can read them. The client never reads its own tickets; it just carries and presents them.
+
+Key security properties of Kerberos:
+- Passwords never cross the network after initial logon
+- Service authentication is offline — the service validates the ticket without contacting the KDC
+- Tickets are time-limited (default: 10 hours); replay protection relies on 5-minute clock skew tolerance
+- Mutual authentication is supported (service proves its identity to the client)
+
+### NTLM (Legacy Fallback)
+
+NTLM (NT LAN Manager) is the challenge-response authentication protocol that predates Kerberos in Windows. It is still used when Kerberos cannot be used — typically when accessing a resource by IP address instead of hostname (no SPN lookup possible), when the target is not domain-joined, or in some cross-forest scenarios.
+
+NTLM is a three-message challenge-response: the server issues a random challenge, the client computes a response using its NT hash, and the server (or a DC it contacts) verifies the response. Unlike Kerberos, NTLM requires the authenticating server to contact a DC to verify credentials (for domain accounts), making it more latency-sensitive and a single point of failure if DC connectivity is lost.
+
+NTLM is weaker than Kerberos: it does not support mutual authentication by default, is vulnerable to relay attacks (an attacker can intercept and forward NTLM auth to a different target), and has no concept of delegation. Blocking NTLM (via `LAN Manager Authentication Level` policy) is a security hardening goal in modern environments, though full elimination is difficult.
+
+---
+
+## AD Replication
+
+AD uses **multi-master replication** — every domain controller holds a writable copy of the directory, and any DC can accept writes. Changes propagate to other DCs through a pull-based replication mechanism.
+
+### How Replication Works
+
+Each object attribute has a metadata record containing the originating DC's GUID, the **Update Sequence Number (USN)** at the time of the change, and a timestamp. When a DC replicates, it asks its replication partners "give me everything with a USN higher than what I last received from you." This USN-based tracking ensures each change is replicated exactly once.
+
+To avoid replication loops (DC A replicates a change to DC B; DC B replicates it back to DC A), AD tracks the **Invocation ID** of the originating DC. A change is only applied if it originated from a different DC.
+
+### Site Topology
+
+AD uses the concept of **sites** — defined by IP subnet ranges — to optimise replication. Replication within a site (intrasite) is triggered immediately when a change occurs, with a 15-second notification delay to allow batching. Replication between sites (intersite) is scheduled, compressed, and uses site link objects to define the topology. The **KCC (Knowledge Consistency Checker)** automatically generates the replication topology — a ring of connections ensuring every DC can be reached within two hops.
+
+By default, intersite replication happens every 180 minutes. Reducing this interval increases replication traffic but improves consistency across sites.
+
+---
+
+## Trust Relationships
+
+Trusts define whether security principals from one domain can authenticate to resources in another. In Active Directory, trusts are directional: a trust from Domain A to Domain B means principals from B can access resources in A (A trusts B).
+
+| Trust Type | Direction | Transitivity | How Created |
+|---|---|---|---|
+| **Parent-Child** | Two-way | Transitive | Automatically when a child domain is created |
+| **Tree-Root** | Two-way | Transitive | Automatically when a new domain tree is added to the forest |
+| **Shortcut** | One or two-way | Transitive | Manual — accelerates auth across long trust paths |
+| **Forest** | One or two-way | Transitive within each forest | Manual — connects two separate forests |
+| **External** | One or two-way | Non-transitive | Manual — connects a domain to a domain in a different forest, or to a legacy Windows NT domain |
+| **Realm** | One or two-way | Configurable | Manual — connects an AD domain to a non-Windows Kerberos realm |
+
+**Transitivity** is important: if A trusts B and B trusts C, and the trusts are transitive, then A implicitly trusts C. All trusts within a forest are transitive; external trusts are not.
+
+All trusts within a forest are established automatically when domains are added. Cross-forest trusts require manual creation and are the recommended path when merging organisations — they allow resource sharing without collapsing the two forests into one.
+
+---
+
+## Functional Levels
+
+Active Directory functional levels control which features are available in a domain or forest and which DC operating systems are supported. Raising the functional level enables newer features but prevents adding DCs running older Windows Server versions.
+
+Functional levels exist at both the domain and forest level. The domain functional level must match or exceed the forest functional level. Features gated by functional level include: fine-grained password policies (domain FL 2008+), the AD Recycle Bin (forest FL 2008 R2+), and Protected Users security group enforcement.
+
+In modern environments (all DCs running Windows Server 2019 or 2022), functional levels should be at 2016 as the current maximum; 2019 and 2022 did not introduce new functional levels above 2016.
+
+---
+
+## Key Network Ports
+
+| Port | Protocol | Service |
+|------|----------|---------|
+| **88** | TCP/UDP | Kerberos authentication |
+| **389** | TCP/UDP | LDAP (directory queries) |
+| **636** | TCP | LDAPS (LDAP over TLS) |
+| **3268** | TCP | Global Catalog LDAP |
+| **3269** | TCP | Global Catalog LDAPS |
+| **445** | TCP | SMB (also used for AD replication, SYSVOL/NETLOGON access) |
+| **53** | TCP/UDP | DNS (critical — Kerberos and LDAP both depend on DNS) |
+| **135** | TCP | RPC Endpoint Mapper (used for replication and admin) |
+| **49152–65535** | TCP | Dynamic RPC ports (replication, DCE/RPC) |
+| **123** | UDP | NTP (time sync — required for Kerberos 5-minute skew tolerance) |
+
+All DC-to-DC communication and client-to-DC authentication relies on this set of ports. Firewall rules between sites must permit all of these for AD to function correctly.
+
+---
+
+## AD vs Workgroup: A Comparison
+
+| Capability | Active Directory Domain | Workgroup (Standalone) |
+|---|---|---|
+| **Authentication** | Centralised — one account for all domain resources | Local accounts only — separate account per machine |
+| **Password policy** | Domain-wide policy enforced from DC | Per-machine — each admin configures independently |
+| **Group Policy** | Centrally managed, pushed to all machines | No equivalent — manual configuration only |
+| **Single Sign-On** | Yes — Kerberos TGT works across all domain services | No — separate login per resource |
+| **Centralised directory** | LDAP — query users, computers, groups from any system | No directory — no central view |
+| **Scalability** | Thousands of machines, one identity infrastructure | Degrades rapidly beyond ~10 machines |
+| **Audit and logging** | Centralised event log forwarding, AD audit trail | Per-machine only |
+| **Software deployment** | GPO/SCCM/Intune push to all managed machines | Manual installation on each machine |
+
+---
+
+## Common Scenarios
+
+**User account provisioning**: An HR system (or admin) creates a user object in AD with the required attributes. The account is placed in the appropriate OU, added to relevant security groups (which control access to file shares, applications, and printers), and a GPO applies the correct desktop configuration at next logon.
+
+**Workstation authentication**: A domain-joined Windows machine contacts a DC at boot to refresh computer policy, then at logon to authenticate the user via Kerberos. The resulting TGT is cached and used transparently for all subsequent resource access during the session.
+
+**Resource access**: A user opens `\\fileserver\share`. Windows looks up the SPN `cifs/fileserver.domain.com` in DNS, contacts the KDC to exchange the TGT for a service ticket, and presents the ticket to the file server — all transparently, in milliseconds.
+
+**DC failure**: With multiple DCs, AD is resilient. Authentication, LDAP queries, and DNS continue from surviving DCs. Only FSMO-dependent operations (password changes directed to the PDC Emulator, RID allocation) are affected until the role is seized or the DC recovers.
+
+---
+
+## References
+
+- [Microsoft Docs — Active Directory Domain Services Overview](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/get-started/virtual-dc/active-directory-domain-services-overview)
+- [Microsoft Docs — FSMO Roles](https://learn.microsoft.com/en-us/troubleshoot/windows-server/identity/fsmo-roles)
+- [Microsoft Docs — How the Active Directory Replication Model Works](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2003/cc772726(v=ws.10))
+- [RFC 4120 — The Kerberos Network Authentication Service (V5)](https://www.rfc-editor.org/rfc/rfc4120)
+- [Microsoft Docs — Trust Technologies in Active Directory](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/understanding-active-directory-trust-technologies)

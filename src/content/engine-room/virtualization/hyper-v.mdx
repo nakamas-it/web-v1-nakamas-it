@@ -1,0 +1,340 @@
+---
+title: "Hyper-V — Microsoft's Hypervisor"
+category: "virtualization"
+topic: "hyper-v"
+summary: "Hyper-V is Microsoft's Type 1 hypervisor, built into Windows Server and Windows 10/11 Pro. Unlike ESXi which runs on dedicated hardware, Hyper-V integrates with Windows Server to provide virtualisation alongside the existing management infrastructure — Active Directory, SCOM, SCVMM. Understanding the parent/child partition model, virtual switches, and Failover Clustering explains how Windows-centric shops build resilient virtualised infrastructure."
+tags: ["virtualization", "hyper-v", "windows-server", "failover-clustering", "live-migration", "replica", "vhd"]
+order: 3
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Hyper-V occupies a specific architectural position that sets it apart from both ESXi and KVM. It is a Type 1 hypervisor — it runs directly on hardware and provides CPU-level isolation between VMs — but unlike ESXi, it does not replace the host operating system. Windows Server (or Windows 10/11 Pro) runs as a privileged **parent partition**, and the hypervisor mediates between it and the hardware alongside all guest VMs.
+
+This design makes Hyper-V a natural fit for organisations already invested in the Microsoft stack. The management plane is Windows — Active Directory integration, PowerShell automation, WSUS for patching, SCOM for monitoring. Failover Clustering, the high-availability mechanism, is a Windows Server feature that Hyper-V plugs into. There is no vCenter equivalent to purchase and deploy separately — the entire operational model lives in the same Windows infrastructure the organisation already operates.
+
+The trade-off is that the parent partition — the Windows host — is a full OS with its own vulnerability surface, memory footprint, and patching cycle. ESXi's VMkernel is far smaller and exposes far less attack surface. For mixed or Windows-centric environments, Hyper-V's integration advantages typically outweigh this concern. For dedicated virtualisation infrastructure, ESXi or KVM may be preferred.
+
+---
+
+## Architecture — The Partition Model
+
+Hyper-V introduces a strict hierarchy of **partitions** — isolated domains of execution that the hypervisor manages.
+
+### The Parent Partition (Root Partition)
+
+The **parent partition** is the first entity the hypervisor creates when it loads. It runs the Windows Server (or Windows 10/11) operating system, and it has a relationship with the hypervisor that no other partition has: it can directly access physical hardware through its own device drivers.
+
+When the Hyper-V role is enabled on Windows Server, the boot process changes. The bootloader starts Hyper-V first, which then boots Windows into the parent partition. From that point, Windows still has full hardware access — it runs drivers, manages the NIC, talks to the storage controller — but it is doing so under the hypervisor's supervision rather than running as the ultimate authority over hardware.
+
+The parent partition is responsible for:
+- Hosting the Hyper-V management stack (WMI provider, Virtual Machine Management Service — VMMS)
+- Providing I/O services to child partitions via VSPs (Virtualisation Service Providers)
+- Running the VM Worker Process (vmwp.exe) for each guest
+
+### Child Partitions (Guest VMs)
+
+Every VM created on Hyper-V runs as a **child partition**. Child partitions have no direct hardware access. All I/O — network, storage, video — goes through the **VMBus**, a high-speed, shared-memory inter-partition communication channel.
+
+The VMBus connects each child partition's **VSCs (Virtualisation Service Clients)** — drivers inside the guest OS — to the corresponding **VSPs (Virtualisation Service Providers)** in the parent partition. A network packet from a guest VM travels: guest networking stack → synthetic NIC VSC → VMBus → VSP in parent → Windows network stack → physical NIC.
+
+**Integration Services** (Hyper-V's equivalent of VMware Tools) must be installed in the guest for this VSC/VSP path to function. Without Integration Services, the guest falls back to emulated hardware — a legacy IDE controller and an emulated DEC 21140 NIC, both slow and limited to low throughput.
+
+### Why This Is Still Type 1
+
+A common confusion: if Windows is running as the parent partition, isn't Hyper-V actually Type 2? The distinction is that the hypervisor — not Windows — controls the hardware at the most fundamental level. Windows in the parent partition runs at a privilege level below the hypervisor. When Windows issues a privileged instruction, the hypervisor mediates it. The CPU's VMX non-root mode is not used for the parent partition (it runs in VMX root), but the hypervisor still sits between the firmware and all software, including Windows. By Popek-Goldberg criteria, it is Type 1.
+
+The practical consequence: if the parent partition Windows OS crashes (blue screen), all child partition VMs crash with it. In ESXi, a management plane failure does not crash running VMs — the VMkernel continues. Hyper-V's tighter coupling between host OS and hypervisor is an architectural trade-off.
+
+---
+
+## Virtual Machine Generations
+
+Hyper-V offers two VM generations, selected at creation time and immutable afterward.
+
+### Generation 1
+
+- BIOS firmware (SeaBIOS-derived)
+- Boot device options: IDE controller (CD-ROM, disk), legacy network (PXE)
+- Synthetic SCSI controller for additional data disks after boot
+- Supports any guest OS that has a standard BIOS-bootable image
+- Supports 32-bit and 64-bit guests
+- IDE disk controller has a maximum of 2 channels × 2 devices = 4 devices total
+- Boot disk must be on IDE; SCSI cannot boot
+
+Generation 1 is the compatibility choice. Every OS from Windows XP onward and most Linux distributions work without modification.
+
+### Generation 2
+
+- UEFI firmware (Microsoft UEFI)
+- Secure Boot enabled by default (configurable)
+- Boots exclusively from SCSI — no IDE emulation at all
+- Supports 64-bit guests only
+- Smaller firmware footprint — faster VM boot
+- Supports shielded VMs (encrypted with virtual TPM)
+- Network boot via UEFI PXE (IPv4 and IPv6)
+- Native VHDX-only; VHD not supported as boot disk
+
+Generation 2 is the default for modern Windows Server and Linux guests. The SCSI-only boot and UEFI requirement means the guest OS image must support UEFI boot — a non-issue for Windows Server 2012 R2+ and Linux distributions post-2015, but relevant for older appliance images.
+
+| Property | Generation 1 | Generation 2 |
+|---|---|---|
+| Firmware | BIOS | UEFI |
+| Secure Boot | No | Yes (optional) |
+| Boot controller | IDE | SCSI |
+| 32-bit guest support | Yes | No |
+| Disk format | VHD or VHDX | VHDX only |
+| Virtual TPM | No | Yes |
+| Typical use | Legacy OS, older appliances | All modern Windows/Linux |
+
+---
+
+## Virtual Disk Formats
+
+### VHDX
+
+**VHDX** is the current virtual disk format. It is purpose-built for production workloads:
+
+- **Maximum size**: 64 TB
+- **Block size**: 1 MB default (vs 512 KB for VHD) — better alignment for modern storage
+- **Power failure resilience**: Internal journaling protects the VHDX metadata. An ungraceful host shutdown will not corrupt the disk structure.
+- **TRIM support**: Passes TRIM/UNMAP commands through to the underlying storage, allowing thin-provisioned LUNs and SSDs to reclaim zeroed space.
+- **Sector size emulation**: Can emulate 512-byte or 4K native sector sizes.
+
+### VHD
+
+**VHD** is the legacy format carried over from Virtual Server 2005 and Virtual PC. Maximum size is 2 TB. It lacks VHDX's journaling protection and TRIM support. The only reason to use VHD today is compatibility with older tools or migration scenarios. New VMs should always use VHDX.
+
+### Disk Provisioning Types
+
+| Type | Description | Use Case |
+|---|---|---|
+| **Fixed** | Full capacity pre-allocated on host storage | Production I/O-intensive workloads; predictable performance |
+| **Dynamic (expanding)** | File grows as guest writes data | Dev/test; storage-efficient where peak utilisation is low |
+| **Differencing** | Stores only changes relative to a parent VHDX | Linked clones, lab templating |
+
+Fixed disks have substantially better I/O performance than dynamic disks in I/O-intensive scenarios — the metadata overhead of tracking allocated blocks in a dynamic disk shows up under sustained sequential and random writes. For SQL Server, Exchange, or any database workload, use fixed disks.
+
+---
+
+## Virtual Switch Types
+
+Hyper-V virtual switches connect VM virtual NICs to the network. Unlike VMware's vSwitch, Hyper-V virtual switches are configured in Windows via the Hyper-V Manager or PowerShell, and each switch type has distinct connectivity properties.
+
+### External Virtual Switch
+
+Bound to one or more physical network adapters on the host. VMs connected to an external switch can communicate with:
+- Each other
+- The parent partition (host)
+- The physical network (external machines, routers, internet)
+
+The physical NIC becomes a member of the Hyper-V virtual switch, and the parent partition accesses the network through a virtual NIC on the same switch. This is the standard switch type for production VM networking.
+
+**NIC Teaming** can be applied to the physical adapters before binding them to a Hyper-V external switch, providing link redundancy and optional load balancing.
+
+### Internal Virtual Switch
+
+Connects VMs to each other and to the parent partition, but provides no access to the physical network. The host gets a virtual network adapter connected to this switch; external traffic is isolated.
+
+Use cases: host-to-VM communication for management or testing; building isolated network segments within a host; nested virtualisation scenarios.
+
+### Private Virtual Switch
+
+Connects VMs to each other only. The parent partition has no adapter on this switch. The segment is completely isolated — no host access, no physical network access.
+
+Use cases: isolated multi-VM lab environments; security testing; scenarios requiring complete L2 isolation.
+
+---
+
+## Integration Services
+
+Integration Services (IS) is the collection of drivers and services that enable the VMBus communication path and guest OS management integration. Without IS, a guest falls back to emulated hardware.
+
+**Drivers provided by Integration Services:**
+
+| Component | Function |
+|---|---|
+| Synthetic NIC driver | High-throughput network via VMBus (replaces emulated DEC 21140) |
+| Synthetic SCSI driver | High-performance disk I/O via VMBus |
+| Balloon memory driver | Hypervisor can reclaim unused guest memory under host pressure |
+| VSS integration | Volume Shadow Copy Service hooks for application-consistent backup |
+| Time synchronisation | Guest clock synchronised with hypervisor (configurable) |
+| Heartbeat | Host knows the guest OS is running and responsive |
+| Guest shutdown | Host can cleanly shut down the guest OS |
+| Enhanced Session Mode | RDP over VMBus — clipboard, audio, USB redirect via VM console |
+
+Modern Windows Server and Windows 10/11 VMs have Integration Services built into the OS — no separate installation is needed. Linux guests require the `linux-hyperv` kernel modules (included in all major distributions' default kernels since around 2012) or the legacy `hv_utils`, `hv_vmbus`, `hv_storvsc`, `hv_netvsc` modules.
+
+Hyper-V without Integration Services is a legacy emulation environment and should never be intentionally deployed for production workloads.
+
+---
+
+## Live Migration
+
+Hyper-V Live Migration moves a running VM from one Hyper-V host to another with no downtime. Like VMware vMotion, it uses an iterative pre-copy approach.
+
+<FlowDiagram
+  parties={["Source Hyper-V", "Destination Hyper-V"]}
+  steps={[
+    { from: "Source Hyper-V", to: "Destination Hyper-V", label: "Establish migration connection", sub: "Negotiate live migration transport (SMB 3.0 or TCP)" },
+    { from: "Source Hyper-V", to: "Destination Hyper-V", label: "Transfer VM configuration", sub: ".vmcx file, device configuration" },
+    { from: "Source Hyper-V", to: "Destination Hyper-V", label: "Iterative memory copy", sub: "Dirty page tracking; re-copy written pages each round" },
+    { from: "Source Hyper-V", to: "Destination Hyper-V", label: "Final dirty pages + CPU state", sub: "VM paused briefly; remaining state transferred" },
+    { from: "Destination Hyper-V", to: "Source Hyper-V", label: "VM resumed on destination", sub: "Source VM state released" },
+  ]}
+/>
+
+**Two storage models for Live Migration:**
+
+**Shared storage Live Migration** — both hosts access the VM's VHDX from a Cluster Shared Volume (CSV) on a shared storage system. Only RAM and CPU state move during migration. This is the standard model in a Failover Cluster.
+
+**Shared Nothing Live Migration** — no shared storage. The VHDX is migrated simultaneously with the VM's running state, using SMB 3.0 to copy the disk to the destination host. Both the storage and the running state transfer at the same time. Slower than shared storage migration (the disk copy dominates), but requires no shared infrastructure — useful for rebalancing VMs between standalone hosts connected only by a network.
+
+Hyper-V Live Migration uses **SMB 3.0 with RDMA** (Remote Direct Memory Access) if RDMA-capable NICs (RoCE or iWARP) are present. RDMA transfers bypass the CPU and move data directly between host memory regions via the NIC hardware. For a 64 GB VM, this reduces migration time substantially compared to software-based TCP transfer.
+
+---
+
+## Failover Clustering
+
+**Windows Server Failover Clustering (WSFC)** combined with Hyper-V is Microsoft's HA solution. A Failover Cluster is a group of Hyper-V hosts connected by shared storage and a private cluster network. VMs on the cluster are **cluster roles** — they can fail over from one node to another automatically on host failure.
+
+### Cluster Shared Volumes (CSV)
+
+Cluster Shared Volumes allow multiple cluster nodes to access the same NTFS or ReFS volume simultaneously. Without CSV, a LUN can only be owned by one cluster node at a time — failover requires the new owner to take ownership of the disk, adding latency. With CSV, all nodes have concurrent read/write access via the CSV coordinator node, and VMs on any node can read/write their VHDXs without ownership transfer.
+
+VHDXs placed on a CSV can be live-migrated between cluster nodes without storage migration, and HA failover does not require disk ownership changes.
+
+### Quorum — Cluster Decision Making
+
+A Failover Cluster requires **quorum** to operate — a majority of voting members must agree the cluster is healthy before it allows resources to start or continue running. This prevents **split-brain**: a scenario where two halves of a cluster each believe the other half has failed, and both attempt to bring the same VMs online simultaneously, resulting in VHDX corruption.
+
+Quorum witness options:
+
+| Type | Description | Recommended When |
+|---|---|---|
+| **Disk Witness** | A small shared disk acts as the tiebreaker vote | On-premises cluster with reliable shared storage |
+| **File Share Witness** | UNC path to a file share (usually on a DC) | Clusters without a spare disk; multi-site clusters |
+| **Cloud Witness** | Azure Blob Storage holds the witness blob | Clusters with Azure connectivity; no on-premises third site |
+
+For a 2-node cluster (the most common SMB deployment): without a witness, each node is 1 vote — a network split gives each node 1/2 of votes, neither achieves quorum, and the cluster stops entirely. A witness gives a 2-node cluster a tiebreaker — one side gets 2 out of 3 votes (its own node plus the witness) and remains operational.
+
+### Failure Detection and Failover
+
+The cluster health service continuously monitors node health. When a node stops responding:
+
+1. Other nodes fail to reach the missing node via the cluster network for the configured threshold (default: 5 seconds of missed heartbeats, 5 second grace period — configurable).
+2. Remaining nodes verify quorum — do they hold a majority of votes?
+3. If quorum is maintained, VMs that were running on the failed node are restarted on surviving nodes.
+4. Storage ownership (if not using CSV) is transferred to the new owner node.
+
+The total failover time depends on VM boot speed and storage readiness. Typically 1–4 minutes for Windows VMs, less for Linux (faster boot).
+
+---
+
+## Hyper-V Replica
+
+**Hyper-V Replica** provides asynchronous VM replication from a primary site to a secondary site without requiring shared storage or a Failover Cluster. It is not a high-availability solution — it does not provide automatic failover. It is a **disaster recovery** solution: if the primary site is destroyed, the secondary site has a recent copy of each VM that can be manually failed over.
+
+### How Replica Works
+
+Replica tracks changes to the VM's VHDX using log files. At each replication interval, the change log is compressed and sent to the replica server over HTTP or HTTPS. The replica server applies the changes to its copy of the VHDX.
+
+**Replication intervals:**
+
+| RPO | Replication frequency | Network impact |
+|---|---|---|
+| 30 seconds | Every 30 seconds | High — continuous delta transfer |
+| 5 minutes | Every 5 minutes | Moderate |
+| 15 minutes | Every 15 minutes | Low |
+
+After failover (manual or planned), the replica VM is brought online at the secondary site. All VMs have recovery points (configurable 1–24 hours) — you can fail over to a point-in-time snapshot rather than the latest replica state, useful for recovering from ransomware or accidental deletion.
+
+**Extended replication** allows a second hop: primary site replicates to secondary site, which replicates to a tertiary site. Useful for geographically distributed DR with multiple recovery options.
+
+Hyper-V Replica is cost-free — it requires only Windows Server Hyper-V hosts at both ends. The RPO of 30 seconds is the maximum for any native Windows virtualisation DR solution without third-party tooling.
+
+---
+
+## Storage Spaces Direct (S2D)
+
+**Storage Spaces Direct** is Microsoft's hyperconverged storage solution — the Hyper-V equivalent of VMware vSAN. It pools local NVMe, SSD, and HDD devices across all cluster nodes into a single shared storage pool, creating CSVs that are accessible to all cluster nodes without external SAN hardware.
+
+### S2D Architecture
+
+Each cluster node contributes its local storage devices to the S2D pool. S2D manages data placement, fault tolerance, and caching:
+
+- **Cache tier**: Fast NVMe or SSD devices per node act as a write-back read cache. Writes land in the cache tier and are acknowledged to the guest; destaging to capacity occurs asynchronously.
+- **Capacity tier**: Larger capacity devices (NVMe, SSD, or HDD) hold the persistent data.
+- **ReFS (Resilient File System)**: S2D volumes are formatted with ReFS rather than NTFS. ReFS provides block cloning (instant VHDX clone operations), integrity streams, and is optimised for the large I/O patterns of hyperconverged storage.
+
+**Resiliency levels** (analogous to vSAN's FTT):
+
+| Level | Fault tolerance | Minimum nodes | Storage efficiency |
+|---|---|---|---|
+| Two-way mirror | 1 node/device failure | 2 | 50% |
+| Three-way mirror | 2 simultaneous failures | 3 | 33% |
+| Dual parity (RAID-6-like) | 2 simultaneous failures | 4 | ~50%+ depending on ratio |
+| Mirror-accelerated parity | 2 failures (hybrid) | 4 | Variable |
+
+**Minimum S2D cluster**: 2 nodes (with limitations — no dual parity, no three-way mirror). **Recommended minimum**: 4 nodes for all resiliency options. **Maximum**: 16 nodes per cluster.
+
+---
+
+## SCVMM — System Center Virtual Machine Manager
+
+**SCVMM (System Center Virtual Machine Manager)** is Microsoft's vCenter equivalent — the centralised management plane for Hyper-V infrastructure at scale. A single SCVMM instance can manage multiple Failover Clusters, hundreds of Hyper-V hosts, and thousands of VMs across multiple sites.
+
+Key SCVMM capabilities beyond what Failover Cluster Manager provides:
+
+- **VM templates and library** — standardised VM images with pre-configured hardware profiles, OS configuration, and application roles. Consistent provisioning at scale.
+- **Logical networks and VM networks** — abstract network definitions that map to physical uplinks differently in each datacentre location; portable VM configurations across sites.
+- **Service templates** — multi-VM application stacks deployed as a single unit (web tier, app tier, database tier).
+- **Cloud delegation** — carve out resource pools from physical infrastructure and delegate them to tenants or teams as self-service private clouds.
+- **Integration with System Center Operations Manager (SCOM)** — consolidated health monitoring across virtual and physical infrastructure.
+
+SCVMM is the differentiator for large Microsoft shops. Small-to-medium deployments (under 50 hosts) typically do without it — Windows Admin Center and Failover Cluster Manager are sufficient.
+
+---
+
+## Common Scenarios
+
+**Two-node SMB Hyper-V cluster**: Two Windows Server hosts, each with local NVMe storage pooled into S2D. A Cloud Witness (Azure Blob) provides quorum. VMs are stored on CSVs backed by two-way mirror volumes. If one host fails, the surviving host has quorum (its own vote + cloud witness = 2/3) and restarts all VMs. Total cluster cost: two servers plus a free Azure Blob Witness.
+
+**Live Migration for maintenance**: Host needs a Windows security update. Live Migrate all VMs to the other cluster node (Cluster Manager drains the node automatically). Apply updates, reboot. Live Migrate VMs back. Zero downtime.
+
+**DR with Hyper-V Replica**: Primary site has a 4-node S2D cluster. Secondary site has two standalone Hyper-V hosts. Each production VM is replicated to the secondary site every 5 minutes. Primary site datacenter power failure: administrator initiates planned failover in Hyper-V Manager. VMs start on secondary site hosts with at most 5 minutes of data loss. RPO: 5 minutes. RTO: minutes.
+
+**Windows-only guest fleet**: All VMs run Windows Server. Integration Services are built into the OS. Synthetic SCSI and synthetic NIC drivers are loaded automatically. No additional tooling to install or maintain. Cluster-aware patching with SCVMM or Windows Admin Center live-migrates VMs off each host in sequence, patches, reboots, and migrates back — full cluster patched without any VM downtime.
+
+---
+
+## Hyper-V vs ESXi Comparison
+
+| Property | Hyper-V | ESXi |
+|---|---|---|
+| Hypervisor type | Type 1 (parent partition model) | Type 1 (thin VMkernel) |
+| Host OS | Windows Server as parent partition | No host OS — VMkernel only |
+| Management plane | SCVMM, Windows Admin Center, Failover Cluster Manager | vCenter Server (VCSA) |
+| Live migration | Live Migration (shared or shared-nothing) | vMotion (shared storage or vSAN) |
+| HA | Windows Server Failover Clustering | vSphere HA |
+| Hyper-converged storage | Storage Spaces Direct | vSAN |
+| VM format | VHDX | VMDK |
+| Licensing | Included with Windows Server | Separate VMware/Broadcom licence |
+| Primary ecosystem | Windows Server, Azure, Microsoft stack | VMware stack, enterprise storage arrays |
+| Automation | PowerShell, WMI, SCVMM, Azure Arc | PowerCLI, vCenter API, Aria Suite |
+| Attack surface | Full Windows Server OS | Minimal VMkernel |
+| Ideal environment | Windows-centric shops; Azure hybrid | Mixed or heterogeneous enterprise; dedicated virtualisation |
+
+---
+
+## References
+
+- Microsoft. *Hyper-V on Windows Server Documentation*. [learn.microsoft.com](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/)
+- Microsoft. *Failover Clustering Overview*. [learn.microsoft.com](https://learn.microsoft.com/en-us/windows-server/failover-clustering/)
+- Microsoft. *Storage Spaces Direct Overview*. [learn.microsoft.com](https://learn.microsoft.com/en-us/windows-server/storage/storage-spaces/storage-spaces-direct-overview)
+- Microsoft. *Hyper-V Replica*. [learn.microsoft.com](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/hyper-v-server-2016-and-hyper-v-replica)
+- Microsoft. *System Center Virtual Machine Manager Documentation*. [learn.microsoft.com](https://learn.microsoft.com/en-us/system-center/vmm/)
+- Savill, J. *The Complete Guide to Hyper-V* — comprehensive technical reference. [ntfaq.com / YouTube: John Savill's Technical Training](https://www.youtube.com/@NTFAQGuy)

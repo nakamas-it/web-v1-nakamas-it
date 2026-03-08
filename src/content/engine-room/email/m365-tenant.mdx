@@ -1,0 +1,209 @@
+---
+title: "Microsoft 365 Tenant — The Cloud Workplace Foundation"
+category: "email"
+topic: "m365-tenant"
+summary: "An M365 tenant is the top-level organisational boundary in Microsoft's cloud — a dedicated instance of Entra ID plus a subscription to Microsoft services. Understanding what a tenant is, how licenses map to services, and what the admin centres actually control is the prerequisite for everything from deploying Exchange Online to configuring Teams telephony."
+tags: ["email", "microsoft-365", "tenant", "entra-id", "licenses", "teams", "sharepoint", "onedrive"]
+order: 2
+draft: false
+---
+
+## Overview
+
+Every organisation using Microsoft 365 operates within a single tenant. The tenant is not just an account — it is a dedicated instance of Microsoft's identity platform (Entra ID), provisioned with whichever cloud services the organisation has subscribed to: Exchange Online for email, SharePoint Online for document storage, Teams for collaboration, Intune for device management, and so on. All of these services share the same identity store, the same user directory, and the same administrative boundary.
+
+Understanding what a tenant is, and what it is not, matters because almost every M365 problem ultimately traces back to tenant-level configuration: a user's license does not include the service they need, a Conditional Access policy is blocking authentication, a domain was never verified, or an administrator is working from the wrong admin centre for the task at hand.
+
+---
+
+## What a Tenant Is
+
+When an organisation signs up for Microsoft 365, Microsoft provisions a new Entra ID directory scoped exclusively to that organisation. This directory is the tenant. It has a globally unique identifier (the Tenant ID — a GUID) and an initial domain name in the form `<organisationname>.onmicrosoft.com`.
+
+The `.onmicrosoft.com` name cannot be changed — it is the permanent identifier. All M365 services and APIs reference the tenant by Tenant ID or by this domain. It appears in SharePoint URLs (`nakamas-it.sharepoint.com`), in Teams meeting links, and in Exchange Online's internal routing name (`nakamas-it.mail.protection.outlook.com`).
+
+Verified custom domains are added on top of the `.onmicrosoft.com` default. Adding a domain requires proving DNS ownership — Microsoft generates a TXT record value and checks for it. Once verified, users can have UPNs and email addresses at the custom domain (`user@nakamas-it.com` rather than `user@nakamas-it.onmicrosoft.com`).
+
+A tenant is a flat, global construct. There is no inherent concept of offices, regions, or departments at the tenant level — those structures are represented through Entra ID objects (OUs do not exist in Entra ID; administrative units, groups, and dynamic groups serve similar purposes). One tenant encompasses all users, groups, devices, and data for the entire organisation, regardless of geography.
+
+---
+
+## Data Residency
+
+By default, M365 data is stored in the region where the tenant was provisioned — data provisioned in Europe stays in European datacentres; US tenants are served from US datacentres. Microsoft publishes which workload stores data in which region for the tenant's provisioned geography.
+
+For organisations with strict data sovereignty requirements (GDPR, sector regulations), Microsoft offers:
+
+- **EU Data Boundary**: a commitment that data for EU/EEA tenants remains in the EU/EEA at rest and in transit. Available for M365 and Azure.
+- **Multi-Geo** (E3/E5 and add-on): allows specific users' data (Exchange Online mailboxes, OneDrive files) to be stored in a satellite geography different from the tenant's primary location. Required for multinationals where employees in Australia need their data in the APAC region while the tenant was provisioned in Europe.
+
+Multi-Geo does not create a separate tenant — it is a single tenant whose data is distributed across geographies. Administration remains unified.
+
+---
+
+## License Architecture
+
+M365 licenses are assigned per-user and bundle access to a set of services. Microsoft sells several distinct license families targeting different organisation sizes and feature requirements.
+
+### Business Plans (up to 300 users)
+
+| Plan | Core Services | Desktop Apps | Security/Management |
+|---|---|---|---|
+| **M365 Business Basic** | Exchange Online Plan 1, SharePoint, Teams, OneDrive 1 TB | Web-only (Office for the web) | None beyond defaults |
+| **M365 Business Standard** | Exchange Online Plan 1, SharePoint, Teams, OneDrive 1 TB | Office desktop apps (5 devices per user) | None beyond defaults |
+| **M365 Business Premium** | Exchange Online Plan 1, SharePoint, Teams, OneDrive 1 TB | Office desktop apps | Intune, Defender for Business, Entra ID P1, Azure Information Protection P1 |
+
+Business Basic is the starting point for cloud-only email and collaboration. It covers every employee who needs email and Teams but does not need Office desktop applications. Business Premium is the recommended plan for SMBs needing device management and security — Intune's presence enables MDM/MAM policies, and Defender for Business provides endpoint detection and response (EDR) capabilities.
+
+### Enterprise Plans (no user cap)
+
+| Plan | Key Additions vs Business | Notable Email/Compliance Features |
+|---|---|---|
+| **M365 E3** | Enterprise compliance, eDiscovery, Exchange Online Plan 2, Purview Compliance P1 | Unlimited archiving, litigation hold, in-place eDiscovery, Azure RMS |
+| **M365 E5** | Defender for Office 365 P2, Defender for Identity, Defender for Endpoint P2, Purview Compliance P2, Power BI Pro | Advanced threat analytics, CASB (Defender for Cloud Apps), insider risk management |
+
+The jump from E3 to E5 is primarily a security and compliance story. E5 adds Microsoft Sentinel integration, full Defender XDR capabilities, and advanced Purview features (communication compliance, customer lockbox, privileged access management). For most organisations, E3 covers operational requirements; E5 covers regulated industries and organisations with mature security programmes.
+
+### Add-On Licenses
+
+Microsoft also sells capabilities as stand-alone add-ons that can be mixed with base plans:
+
+- **Exchange Online Plan 1 / Plan 2**: standalone email without other M365 services
+- **Microsoft Defender for Office 365 Plan 1 / Plan 2**: Safe Attachments, Safe Links, anti-phishing (Plan 1); automated investigation, threat explorer, attack simulator (Plan 2)
+- **Entra ID P1 / P2**: Conditional Access (P1); Privileged Identity Management, Identity Protection, access reviews (P2)
+- **Microsoft Teams Essentials**: Teams-only without Exchange Online
+
+---
+
+## Services in Microsoft 365
+
+A licensed M365 user has access to a suite of cloud services, all sharing the same identity. Each service has its own admin centre, its own quota, and its own set of features gated by license tier.
+
+### Exchange Online
+
+Email, calendar, and contacts. Covered in detail in the Exchange Online article. Comes in Plan 1 (50 GB mailbox) and Plan 2 (unlimited mailbox + archive). The primary resource that most administrators spend time managing.
+
+### SharePoint Online
+
+The document management and intranet platform underlying all file storage in M365. Every M365 group, every Teams team, and every user's OneDrive is backed by a SharePoint site collection. SharePoint provides:
+
+- **Document libraries**: versioned file storage with metadata, permissions, and check-in/check-out
+- **List apps**: structured data — the modern equivalent of Access databases or simple intranets
+- **Hub sites**: aggregates news, activity, and navigation from associated site collections into an intranet-style portal
+- **Permissions model**: site-level permissions independent of Entra ID groups (though best practice is to use M365 groups for access control rather than direct SharePoint permissions)
+
+SharePoint storage quota is pooled across the tenant (1 TB base + 10 GB per licensed user). Approaching the quota causes issues for OneDrive sync and file upload across the organisation — it is a shared resource.
+
+### OneDrive for Business
+
+Per-user file storage — 1 TB per user by default, expandable to 5 TB on request and unlimited on E3/E5. OneDrive is technically each user's personal SharePoint site collection. The sync client (OneDrive application) makes it look like a local drive; actual storage is in Microsoft's datacentres.
+
+Files shared from OneDrive are shared via SharePoint's sharing model — the file stays in OneDrive but a sharing link or direct permission grants access. The distinction between "OneDrive" and "SharePoint" is largely a UX convention; under the hood, they use the same storage infrastructure.
+
+### Microsoft Teams
+
+The unified communication and collaboration platform. Teams is built on top of Exchange Online (for meeting invites, calendar integration, and Group mailboxes) and SharePoint (every Team has a SharePoint site and document library for file storage in channels). The actual real-time messaging, calling, and meeting infrastructure is Teams-native.
+
+Teams features relevant for administrators:
+
+- **Channels**: standard channels (backed by SharePoint folders), private channels (separate SharePoint site), shared channels (connected to external tenants via B2B Direct Connect)
+- **Phone System** (license add-on): Teams as a PBX — direct routing (connect your own SIP trunk) or Microsoft Calling Plans (Microsoft provides the PSTN carrier)
+- **Guest access**: external users can be invited to Teams as guests using any email address; they authenticate via B2B collaboration (Entra External Identities)
+- **External access**: federated Teams communication between tenants — messages only, no channel membership
+
+### Entra ID (formerly Azure Active Directory)
+
+The identity and access management platform for the entire M365 tenant. Entra ID is not Exchange's LDAP — it is an OAuth 2.0 and OpenID Connect identity provider that every M365 service uses for authentication and authorisation.
+
+Every user, group, service principal (app registration), and device in M365 is an object in Entra ID. The features available depend on the license:
+
+- **Free tier** (included with M365): user and group management, MFA via Security Defaults, basic Conditional Access-equivalent via Security Defaults
+- **Entra ID P1** (included with M365 Business Premium, E3): full Conditional Access policies, self-service password reset, dynamic groups, Hybrid Entra Join, Entra ID Application Proxy
+- **Entra ID P2** (included with M365 E5): Privileged Identity Management (just-in-time role activation), Identity Protection (risk-based sign-in policies), access reviews
+
+### Intune (Microsoft Endpoint Manager)
+
+Mobile device management (MDM) and mobile application management (MAM) platform. Available from M365 Business Premium upward.
+
+- **MDM**: enrol devices (Windows, iOS, Android, macOS) and enforce compliance policies (require BitLocker, require PIN, require minimum OS version). Non-compliant devices can be blocked from accessing M365 via Conditional Access.
+- **MAM**: apply application-level policies without full device enrolment — restrict copy/paste from the Outlook mobile app to personal apps, enforce PIN on M365 apps even on unmanaged BYOD devices.
+- **Autopilot**: zero-touch Windows deployment — a new machine shipped directly to a user connects to Wi-Fi, authenticates with M365 credentials, and receives all configuration and applications automatically.
+
+---
+
+## Admin Centres
+
+Each M365 service has its own administration portal. Understanding which admin centre controls which setting avoids the frustration of looking in the wrong place.
+
+| Admin Centre | URL | Manages |
+|---|---|---|
+| **M365 Admin Center** | admin.microsoft.com | Users, licenses, billing, domains, service health, support |
+| **Exchange Admin Center** | admin.exchange.microsoft.com | Mailboxes, transport rules, connectors, mail flow, quarantine |
+| **Entra Admin Center** | entra.microsoft.com | Users (identity), groups, Conditional Access, app registrations, identity governance |
+| **Teams Admin Center** | admin.teams.microsoft.com | Teams policies, calling, meeting settings, phone numbers |
+| **SharePoint Admin Center** | `<tenant>`-admin.sharepoint.com | Site collections, storage quota, external sharing settings |
+| **Intune (Endpoint Management)** | intune.microsoft.com | Device compliance, configuration profiles, app deployment, Autopilot |
+| **Microsoft Purview** | compliance.microsoft.com | Retention policies, eDiscovery, data loss prevention, insider risk |
+| **Defender Portal** | security.microsoft.com | Safe Attachments, Safe Links, threat explorer, incidents, attack simulation |
+
+The M365 Admin Center is the entry point and contains shortcuts to the others. However, it is a thin layer — most detailed configuration happens in the service-specific admin centre. A common source of confusion: user account management at the identity level (UPN, group membership, MFA methods) happens in the Entra Admin Center; user mailbox management (shared mailbox permissions, email aliases, forwarding) happens in the Exchange Admin Center, even though both refer to the same user.
+
+---
+
+## Conditional Access and MFA
+
+Conditional Access is the policy engine in Entra ID that controls the conditions under which a user can authenticate to any M365 service. It evaluates signals — user identity, device compliance, network location, application being accessed, sign-in risk — and either grants access, grants access with requirements (MFA challenge, device enrolment), or blocks access.
+
+Conditional Access policies require Entra ID P1 or higher. Without P1, the only option is Security Defaults — a Microsoft-managed policy that enables MFA for all users (via the Microsoft Authenticator app or SMS) and blocks legacy authentication protocols.
+
+A well-structured Conditional Access framework for most SMBs covers:
+
+1. **Require MFA for all users** — baseline policy, no exceptions except break-glass accounts
+2. **Block legacy authentication** — disables protocols that do not support modern MFA (IMAP with Basic Auth, POP3 with Basic Auth, older SMTP AUTH)
+3. **Require compliant device for Exchange and SharePoint** — only Intune-enrolled and compliant devices can access corporate data
+4. **Block access from high-risk sign-ins** — requires Entra ID P2 (Identity Protection); automatically blocks or forces password reset on risky sign-ins
+
+Conditional Access policies apply at the token issuance point — when a user signs in and receives an OAuth access token. If a policy requirement is not met, the token is not issued and the application receives an authentication error. The user experience is a browser prompt (for web apps) or an error message in the app explaining what is required.
+
+---
+
+## Break-Glass Accounts
+
+Microsoft consistently recommends maintaining at least two break-glass global administrator accounts. These accounts exist to restore access in scenarios where normal administrative accounts are locked out — for example, if a Conditional Access policy is misconfigured and blocks all sign-ins, including administrators.
+
+Break-glass accounts are configured as follows:
+
+- **Cloud-only**: not synchronised from on-premises AD. If on-premises directory services fail or the sync relationship breaks, cloud-only accounts are unaffected.
+- **Global Administrator role**: the highest privilege level — able to modify any Conditional Access policy, reset any user's credentials, and access any service.
+- **MFA excluded from Conditional Access**: break-glass accounts must not be subject to any policy that could block their sign-in. They are explicitly excluded from all CA policies.
+- **Very strong, unique passwords**: stored securely offline — physically printed and stored in a safe, or stored in a hardware security module. Not stored in a password manager that itself requires M365 authentication.
+- **Monitoring**: sign-in events from break-glass accounts generate a high-severity alert (Azure Monitor + M365 Defender alert rule) so that any use — legitimate or illegitimate — is immediately visible.
+
+Break-glass accounts should never be used for routine administration. Their sign-ins are monitored precisely because any use is unusual.
+
+---
+
+## Service Health and SLAs
+
+Microsoft commits to a 99.9% uptime SLA for paid M365 plans. This translates to a maximum of approximately 8.7 hours of allowable downtime per year. The SLA covers the core services — Exchange Online, SharePoint Online, Teams. Service credits are available if Microsoft fails the SLA, though the credit process requires a support ticket.
+
+The **Service Health Dashboard** (in the M365 Admin Center under Health → Service Health) shows current and historical incidents. It distinguishes between:
+
+- **Advisory**: a degradation affecting some users or features; a fix is in progress
+- **Incident**: a broader impact; Microsoft is investigating
+
+Third-party monitoring (Downdetector, Microsoft 365 Status on X/Twitter `@MSFT365Status`) can provide faster notification than internal monitoring, particularly for large-scale outages where the admin centre itself may be affected.
+
+For critical workloads, do not rely solely on Microsoft's status page — monitor the services directly. A synthetic monitoring check that sends an email via SMTP to an Exchange Online mailbox and verifies receipt catches actual delivery failures regardless of what the status page says.
+
+---
+
+## References
+
+- [Microsoft Docs — Microsoft 365 service descriptions](https://learn.microsoft.com/en-us/office365/servicedescriptions/office-365-service-descriptions-technet-library)
+- [Microsoft Docs — Microsoft Entra ID overview](https://learn.microsoft.com/en-us/entra/fundamentals/whatis)
+- [Microsoft Docs — Conditional Access documentation](https://learn.microsoft.com/en-us/entra/identity/conditional-access/overview)
+- [Microsoft Docs — M365 Business Premium overview](https://learn.microsoft.com/en-us/microsoft-365/business-premium/m365bp-overview)
+- [Microsoft Docs — Microsoft Intune overview](https://learn.microsoft.com/en-us/mem/intune/fundamentals/what-is-intune)
+- [Microsoft Docs — Emergency access accounts (break-glass)](https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/security-emergency-access)
+- [Microsoft Docs — Multi-Geo capabilities in Microsoft 365](https://learn.microsoft.com/en-us/microsoft-365/enterprise/microsoft-365-multi-geo)

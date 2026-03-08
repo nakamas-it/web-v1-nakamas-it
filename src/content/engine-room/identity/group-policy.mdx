@@ -1,0 +1,278 @@
+---
+title: "Group Policy — Configuration at Domain Scale"
+category: "identity"
+topic: "group-policy"
+summary: "Group Policy Objects (GPOs) are the primary mechanism for pushing configuration to every Windows machine and user in an Active Directory domain — from password complexity requirements and mapped drives to software installation and security baselines. Understanding how GPO inheritance and the LSDOU processing order works explains why a setting on a laptop isn't behaving the way the admin intended."
+tags: ["identity", "group-policy", "gpo", "active-directory", "windows", "lsdou", "wmi-filter"]
+order: 4
+draft: false
+---
+
+## Overview
+
+Before Group Policy, configuring a Windows network meant touching every machine individually — or writing custom login scripts that grew increasingly fragile and undocumented. Group Policy Objects changed that. A GPO is a container for configuration settings that Active Directory links to sites, domains, or Organisational Units. When a domain-joined machine boots or a user logs on, Windows contacts a domain controller, determines which GPOs apply, and enforces every setting — automatically, silently, and with no user interaction required.
+
+The power of Group Policy is its scope: a single change to a GPO can affect every machine and user in a domain within 90 minutes, without anyone touching the endpoints. The same mechanism that enforces a 12-character minimum password across 5,000 workstations also maps a drive letter to the finance share, pushes a certificate to the machine store, configures Windows Firewall rules, and deploys a line-of-business application.
+
+Understanding Group Policy matters not just for administration but for troubleshooting and security. When a setting is not applying as expected, the root cause is almost always the processing order, a conflicting policy from a higher scope, a WMI filter that silently excludes the target machine, or a security filter that denies read access to the GPO.
+
+---
+
+## What a GPO Actually Is
+
+A Group Policy Object is a paired set of data stored in two places:
+
+**In Active Directory**: The **Group Policy Container (GPC)** — a small AD object under `CN=Policies,CN=System,DC=domain,DC=com` that stores the GPO's GUID, version numbers (used to detect when a machine's local cache is out of date), and links to WMI filters. The GPC is replicated to all DCs via normal AD replication.
+
+**In SYSVOL**: The **Group Policy Template (GPT)** — a folder hierarchy at `\\domain.com\SYSVOL\domain.com\Policies\{GPO-GUID}\`. This is where the actual configuration lives:
+
+```
+{GPO-GUID}\
+  GPT.ini               — version number, metadata
+  Machine\
+    Registry.pol        — registry-based policy settings (computer)
+    Scripts\            — startup/shutdown scripts
+    Applications\       — software installation packages
+    Microsoft\
+      Windows NT\
+        SecEdit\        — security settings (password policy, audit, rights)
+  User\
+    Registry.pol        — registry-based policy settings (user)
+    Scripts\            — logon/logoff scripts
+    Applications\       — per-user software installation
+```
+
+SYSVOL content is replicated between DCs using **DFS-R** (Distributed File System Replication) on Windows Server 2008 R2 and later (older environments used FRS — File Replication Service). SYSVOL replication is independent of AD replication; version mismatches between the GPC version number (in AD) and the GPT version number (in SYSVOL) are a common source of GPO processing failures.
+
+**ADMX/ADML templates** define what settings are available in the Group Policy Management Editor. ADMX files are the schema (available settings, registry paths, supported OS versions); ADML files provide the human-readable display strings in a specific language. The central store for ADMX files is `\\domain.com\SYSVOL\domain.com\Policies\PolicyDefinitions\` — placing files here makes custom settings available to all DCs without requiring local template installation.
+
+---
+
+## GPO Scope: LSDOU
+
+The fundamental question in Group Policy is: which GPOs apply to a given machine or user, and in what order? The answer is **LSDOU** — Local, Site, Domain, OU.
+
+When Group Policy processes:
+1. **Local** Group Policy Object — settings configured directly on the machine (`gpedit.msc` locally). Lowest precedence; always processed first.
+2. **Site** GPOs — linked to the AD site the machine's IP address maps to. Rarely used; site-linked GPOs apply to all objects in the site regardless of domain, which creates cross-domain management complexity.
+3. **Domain** GPOs — linked to the root of the domain. Typically used for baseline settings that apply to everything: password policy, audit policy, screensaver timeout.
+4. **OU** GPOs — linked to the OU containing the object, then to the parent OU, then its parent, up to the domain root. Processed from outermost (domain) to innermost (the OU directly containing the object).
+
+**Last-write wins** for most settings: if a computer is in an OU that has a GPO setting `Password minimum length = 8`, and that OU is inside a domain where the domain-level GPO sets `Password minimum length = 12`, the OU-level GPO is processed last and wins — the effective setting is 8. This surprises administrators who expect domain-level settings to "override" OU settings. For most policy settings it is the opposite: more specific (deeper in the hierarchy) wins.
+
+Multiple GPOs at the same level are processed in the order listed in the GPMC (Group Policy Management Console), from lowest priority to highest. The GPO with the highest link order at a given level wins conflicts.
+
+### A Concrete Example
+
+A computer object lives in `OU=Workstations,OU=London,DC=corp,DC=nakamas-it,DC=com`.
+
+The processing order is:
+1. Local GPO on the machine
+2. Site GPO (if any linked to the site this IP maps to)
+3. Domain GPO(s) linked at `DC=corp,DC=nakamas-it,DC=com`
+4. OU GPO(s) linked at `OU=London,DC=corp,DC=nakamas-it,DC=com`
+5. OU GPO(s) linked at `OU=Workstations,OU=London,DC=corp,DC=nakamas-it,DC=com`
+
+Settings from step 5 win any conflicts with steps 1–4.
+
+---
+
+## Blocking Inheritance and Enforcement
+
+Two mechanisms modify the default LSDOU processing order:
+
+### Block Inheritance
+
+Applied to an OU. Prevents GPOs from parent containers (domain and parent OUs) from applying to objects in this OU and its children. The OU essentially starts fresh — only GPOs linked directly to it (or below it) apply, plus the local GPO.
+
+Use cases: an OU for domain controllers that should not receive workstation-targeted settings; a test OU where experimental GPOs should not be overridden by production domain policies.
+
+### Enforced (No Override)
+
+Applied to a GPO link. An Enforced GPO always wins, regardless of where it sits in the hierarchy and regardless of Block Inheritance. An Enforced domain-level GPO will apply to every OU in the domain, even OUs that have Block Inheritance set.
+
+The interaction:
+- Normally: deeper (more specific) wins
+- Block Inheritance: parent GPOs are ignored for this OU
+- Enforced: the Enforced GPO wins regardless of depth or Block Inheritance
+
+Enforced should be used sparingly — it is the right tool for security baselines that must apply universally (e.g., a critical audit policy that must not be overridden by any OU admin). Overuse creates GPOs that cannot be overridden by legitimate business need, requiring escalation to domain admins for every exception.
+
+---
+
+## Security Filtering
+
+By default, a GPO applies to all **Authenticated Users** in the scope it is linked to. Security filtering replaces this default with an explicit ACL: only objects (users or computers) that have **Read** and **Apply Group Policy** permissions on the GPO object actually receive the settings.
+
+Security filtering is the mechanism for targeting a GPO to a specific subset of objects within a scope. For example: link a software deployment GPO to the domain, but set security filtering to only the `GRP-SoftwareX-Target` security group. Only members of that group receive the software — everyone else has the GPO in scope but cannot read it.
+
+The security filter is evaluated before any policy settings are applied. If a computer lacks Read + Apply Group Policy on the GPO, the GPO is skipped as if it were not linked. Removing Authenticated Users and adding specific groups is the correct pattern; **do not simply remove Apply Group Policy** without also removing Read, or the GPO still counts for processing overhead without applying settings.
+
+One subtlety: when a computer processes Computer Policy, the **computer account** must have Read + Apply Group Policy on the GPO, not the logged-in user. When processing User Policy, the **user account** must have those permissions. This distinction matters when targeting GPOs to machines vs users within the same OU.
+
+---
+
+## WMI Filters
+
+WMI (Windows Management Instrumentation) filters provide hardware and OS targeting. A WMI filter is a query in WQL (WMI Query Language) that runs on the client machine at GPO processing time. If the query returns `true`, the GPO applies; if `false`, the GPO is skipped — silently.
+
+Example WMI filters:
+
+```sql
+-- Apply only to Windows 11 machines
+SELECT Version FROM Win32_OperatingSystem
+WHERE Version LIKE "10.0.2%"
+
+-- Apply only to laptops (battery present)
+SELECT * FROM Win32_Battery
+WHERE BatteryStatus > 0
+
+-- Apply only to machines with more than 8 GB RAM
+SELECT TotalPhysicalMemory FROM Win32_ComputerSystem
+WHERE TotalPhysicalMemory > 8589934592
+```
+
+WMI filters run on the **client**, not the DC. They add processing time at GPO evaluation. Complex WMI queries noticeably slow logon on older hardware. A WMI filter that returns `false` produces no event log entry — the GPO is simply not applied, with no indication in the standard event logs that a filter evaluation occurred. This makes WMI filter mismatches a common silent troubleshooting dead-end (`gpresult` shows the GPO was filtered but not why, unless verbose logging is enabled).
+
+---
+
+## Computer Policy vs User Policy
+
+GPOs contain two separate policy trees: **Computer Configuration** and **User Configuration**. They are processed at different times by different components.
+
+**Computer Configuration** is applied:
+- At machine boot, before the logon screen appears
+- In the background every 90 minutes (± 30-minute random offset) while the machine is on
+- The policy applies to the **computer account** object in AD — not the logged-in user
+
+**User Configuration** is applied:
+- At user logon
+- In the background every 90 minutes (± 30-minute random offset) while the user is logged on
+- The policy applies to the **user account** object in AD — regardless of which machine they log into
+
+This separation means: computer policies follow the machine; user policies follow the user. A software installation GPO must be in Computer Configuration to install for all users of a machine. A mapped drive GPO must be in User Configuration to follow the user to any machine they log into.
+
+### Loopback Processing
+
+The default behaviour — computer policies based on the computer's OU, user policies based on the user's OU — breaks in kiosk and terminal server scenarios. A nurse logging into a clinical workstation should receive clinical desktop settings regardless of which OU their user account is in.
+
+**Loopback processing** addresses this. When enabled (Computer Configuration → Administrative Templates → System → Group Policy → Configure user Group Policy loopback processing mode):
+
+- **Merge mode**: user policy is applied normally, then the user policy sections of GPOs linked to the *computer's* OU are also applied (and processed last, so they win conflicts)
+- **Replace mode**: user policy from the user's OU is ignored entirely; only the user policy sections of GPOs linked to the *computer's* OU apply
+
+Replace mode is the right choice for kiosk machines and remote desktop servers where every user should have an identical, locked-down experience. Merge mode suits scenarios where you want to augment (not replace) the user's normal settings with site-specific additions.
+
+---
+
+## Processing Intervals and Background Refresh
+
+GPOs are not applied only at boot and logon. The Group Policy Client service runs on every domain-joined machine and periodically polls for policy changes:
+
+| Event | Default interval |
+|-------|-----------------|
+| Computer background refresh | 90 minutes ± 30-minute random offset |
+| User background refresh | 90 minutes ± 30-minute random offset |
+| Security settings background refresh | Every 16 hours (regardless of change state) |
+| Domain controllers | Every 5 minutes (DCs require faster policy convergence) |
+
+The random offset (± 30 minutes) staggers refresh requests across the domain to avoid thundering herd problems — if 5,000 workstations all polled simultaneously every 90 minutes, DC load would spike dramatically.
+
+Some setting categories **do not apply during background refresh** — they require a reboot (computer settings that cannot be applied to a running system, such as drive encryption policies) or a logoff/logon (software installation via GPO, folder redirection). The Group Policy Management Editor marks such settings as requiring a reboot or logoff/logon in the "Supported on" field.
+
+`gpupdate /force` triggers an immediate foreground refresh for both computer and user policy, equivalent to a boot + logon from a policy perspective. `gpupdate /force /boot` schedules a reboot after the refresh for settings that require it.
+
+---
+
+## Preference Items vs Policy Settings
+
+Group Policy has two distinct types of configuration: **Policy settings** and **Preference items**. The distinction is architectural and matters operationally.
+
+**Policy settings** (under Administrative Templates, Security Settings, etc.):
+- **Tattooed onto the registry** — the setting is written to a protected registry location (`HKLM\Software\Policies\` or `HKCU\Software\Policies\`) that standard user applications respect and non-administrators cannot modify
+- **Enforced**: when the policy is removed, the setting reverts to its default (or the previous non-policy value)
+- The user cannot override a policy setting through the normal UI
+
+**Preference items** (under Group Policy Preferences → Windows Settings → Drive Maps, Registry, Shortcuts, etc.):
+- Written to normal, non-protected registry locations — just like a manual configuration
+- **Manageable**: a user (or local admin) can override them; they persist after the GPO is removed (unless configured with `Remove this item when it is no longer applied`)
+- Support **Item-level targeting**: preferences can be targeted to specific users, computers, security groups, IP ranges, or OS versions — more granular than WMI filters, evaluated on the client
+
+Use policy settings for security requirements that must not be overridden. Use preference items for convenience configuration (mapped drives, desktop shortcuts, default printer) that should apply as a default but where users can deviate if needed.
+
+---
+
+## Key Built-in Policy Areas
+
+**Account Policies** (Domain-level only — account policies must be set at the domain, not OU level, to apply to domain logons):
+- Password Policy: minimum length, complexity, history, maximum age
+- Account Lockout Policy: threshold, duration, observation window
+- Kerberos Policy: ticket lifetime, service ticket lifetime, clock skew tolerance
+
+**Local Policies:**
+- Audit Policy: which events are logged (logon, account management, object access, policy change, privilege use, process tracking, system events)
+- User Rights Assignment: which accounts can log on locally, as a service, as a batch job, shut down the system, manage audit logs
+- Security Options: various machine-level security flags (LAN Manager auth level, SMB signing requirements, anonymous access restrictions)
+
+**Software Restriction / AppLocker:**
+- Software Restriction Policies (legacy): allow/deny application execution by path, hash, or certificate
+- AppLocker: successor to SRP — rule-based application control with publisher rules (allow anything signed by Microsoft), path rules, and hash rules; supports audit mode (log only, do not block)
+
+**Folder Redirection:**
+- Redirect user profile folders (Documents, Desktop, AppData) to network paths. Configured in User Configuration → Windows Settings → Folder Redirection. Combined with offline files, users get roaming documents without full roaming profiles.
+
+**Drive Maps:**
+- Under Preferences → Windows Settings → Drive Maps. Map network drives by UNC path with drive letter assignment. Item-level targeting allows mapping different drives to different groups.
+
+---
+
+## Troubleshooting Tools
+
+**`gpresult`** is the primary diagnostic tool. It generates a report of which GPOs applied, which were filtered, and what the resulting settings are.
+
+```cmd
+gpresult /r                  — summary: which GPOs applied to this machine and user
+gpresult /h report.html      — full HTML report with applied and denied GPOs, reasons
+gpresult /scope computer     — computer policy only
+gpresult /scope user         — user policy only
+gpresult /user DOMAIN\alice  — GPO results for a specific user on this machine
+```
+
+The HTML report (`/h`) is the most useful for troubleshooting — it shows every GPO that was in scope, whether it applied, and if not, why (security filter, WMI filter, or other reason). It also shows the winning value for each setting along with which GPO set it.
+
+**`gpupdate`** forces an immediate refresh:
+
+```cmd
+gpupdate /force              — force refresh of all policy (computer + user)
+gpupdate /force /boot        — force refresh then schedule reboot
+gpupdate /target:computer    — computer policy only
+gpupdate /target:user        — user policy only
+```
+
+**Event logs**: Group Policy events are logged to `Applications and Services Logs → Microsoft → Windows → GroupPolicy → Operational` (Event Viewer). Event ID 4016 (starting policy processing), 5312 (applied GPOs), 5313 (filtered GPOs), 7016 (slow GP processing warning) are the key IDs for diagnosing processing failures.
+
+---
+
+## Common Troubleshooting Scenarios
+
+| Symptom | Likely cause |
+|---------|-------------|
+| GPO is linked but settings do not appear in `gpresult` | Security filter excludes the user/computer — check Read + Apply Group Policy permissions on the GPO |
+| GPO shows as "Denied (WMI Filter)" in `gpresult` | WMI filter query returned false on this machine — test the WQL query locally with WMI tools |
+| GPO shows as applied but setting not effective | A GPO at a lower OU level (processed later) is overriding the setting — check LSDOU order |
+| Password policy GPO in OU not taking effect for domain logons | Account policies (password, lockout, Kerberos) only apply at the domain level — OU-linked account policy GPOs are ignored for domain accounts |
+| Software installation from GPO not deployed | Software installation requires a logoff/logon or reboot, not just a background refresh |
+| User receives a GPO in one OU when their account is in another | Loopback processing is enabled on the machine — check the Computer Configuration of the machine's OU GPOs |
+| SYSVOL path unreachable during policy processing | DFS-R or FRS replication failure between DCs — check SYSVOL health on the authenticating DC |
+| Settings apply at logon but revert within 90 minutes | A GPO is applying the setting then reverting it; or a non-policy setting (preference item) is being overwritten by local application defaults — check whether the setting is in a Policy or Preference container |
+
+---
+
+## References
+
+- [Microsoft Docs — Group Policy Overview](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/group-policy/group-policy-overview)
+- [Microsoft Docs — Group Policy Settings Reference for Windows](https://www.microsoft.com/en-us/download/details.aspx?id=25250)
+- [Microsoft Docs — Administer Group Policy in an AD DS domain](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/group-policy/administer-group-policy-in-an-active-directory-domain-services-domain)
+- [Microsoft Docs — ADMX Templates Central Store](https://learn.microsoft.com/en-us/troubleshoot/windows-client/group-policy/create-and-manage-central-store)
+- [Microsoft Docs — Use loopback processing of Group Policy](https://learn.microsoft.com/en-us/troubleshoot/windows-server/group-policy/loopback-processing-of-group-policy)
+- [Microsoft Docs — AppLocker](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/applocker/applocker-overview)

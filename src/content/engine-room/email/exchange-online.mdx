@@ -1,0 +1,304 @@
+---
+title: "Exchange Online — Microsoft 365 Email Architecture"
+category: "email"
+topic: "exchange-online"
+summary: "Exchange Online is the hosted email and calendaring component of Microsoft 365. It replaced on-premises Exchange Server for most organisations, but the underlying concepts — mailbox databases, transport pipeline, connectors, DAGs — are still relevant even if Microsoft now manages the infrastructure. Understanding Exchange Online's architecture explains why email delivery sometimes fails and how to fix it."
+tags: ["email", "exchange-online", "microsoft-365", "smtp", "transport", "connectors", "autodiscover", "mx"]
+order: 1
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Exchange Online is Microsoft's cloud-hosted email, calendar, and contacts platform. It is the email component of Microsoft 365 (formerly Office 365), running on Microsoft's global datacentre infrastructure rather than servers an organisation owns or manages. From the outside, the experience is identical to on-premises Exchange Server — the same Outlook client, the same SMTP endpoints, the same admin concepts — but the mailbox databases, transport agents, and availability infrastructure are entirely operated by Microsoft.
+
+This distinction matters for troubleshooting. When email does not arrive, the failure could be in DNS (wrong MX record), in transport routing (connector misconfiguration), in anti-spam policy (EOP blocked the message), in Autodiscover (Outlook cannot find the server), or in recipient configuration (shared mailbox delegation problem). Each of these maps to a distinct layer of Exchange Online's architecture. Understanding the pipeline means reading the right logs rather than guessing.
+
+---
+
+## Mailbox Types
+
+Exchange Online supports several mailbox types. They differ in licensing requirements, how they are accessed, and what features are available.
+
+| Mailbox Type | License Required | Access Model | Typical Use |
+|---|---|---|---|
+| **User mailbox** | Yes — M365 or Exchange Online plan | Directly by the assigned user | Every named employee |
+| **Shared mailbox** | No (up to 50 GB) | By delegation — multiple users access under their own credentials | `support@`, `info@`, team inboxes |
+| **Room mailbox** | No | Via calendar invite — booking managed automatically | Meeting rooms |
+| **Equipment mailbox** | No | Via calendar invite | Projectors, vehicles, shared equipment |
+| **Microsoft 365 Group mailbox** | No (group is licensed via members) | Shared inbox accessible to group members; tied to a Teams/SharePoint group | Project groups, Teams channels |
+| **Archive mailbox** | Exchange Online Plan 2 or M365 E3 | Via Outlook — appears as secondary mailbox tree | Long-term retention, litigation |
+
+Shared mailboxes become a common administration point. They cannot sign in directly (sign-in is blocked by default) and do not need individual licenses unless storage exceeds 50 GB or features like in-place hold are required. Access is granted via `Add-MailboxPermission` (Full Access) and optionally `Add-RecipientPermission` (Send As).
+
+---
+
+## The Transport Pipeline
+
+When a message is sent from any client to any recipient, it passes through a defined sequence of services before reaching a mailbox. The details differ between inbound and outbound paths, but the layered structure is the same.
+
+### Inbound Mail (External Sender → Exchange Online Mailbox)
+
+<FlowDiagram
+  parties={["External Sender", "Exchange Online"]}
+  steps={[
+    { from: "External Sender", to: "Exchange Online", label: "DNS MX lookup → <tenant>.mail.protection.outlook.com", sub: "Sender's MTA resolves the recipient domain's MX record" },
+    { from: "External Sender", to: "Exchange Online", label: "SMTP connection on port 25 (TLS)", sub: "Front End Transport Service accepts the connection" },
+    { from: "Exchange Online", to: "Exchange Online", label: "EOP anti-spam / anti-malware scan", sub: "IP reputation, SPF/DKIM/DMARC checks, content analysis, Safe Attachments" },
+    { from: "Exchange Online", to: "Exchange Online", label: "Transport rules evaluation", sub: "Mail flow rules (ETRs) applied — DLP, disclaimers, routing overrides" },
+    { from: "Exchange Online", to: "Exchange Online", label: "Mailbox Transport Delivery", sub: "Message written to recipient's mailbox database" },
+  ]}
+/>
+
+### Outbound Mail (Exchange Online Mailbox → External Recipient)
+
+<FlowDiagram
+  parties={["Exchange Online", "External Recipient"]}
+  steps={[
+    { from: "Exchange Online", to: "Exchange Online", label: "Client submits via SMTP (port 587) or MAPI/EWS", sub: "Submission service authenticates the sending user" },
+    { from: "Exchange Online", to: "Exchange Online", label: "Hub Transport — routing decision", sub: "Transport rules applied; outbound connector selected if configured" },
+    { from: "Exchange Online", to: "Exchange Online", label: "DKIM signing", sub: "Exchange Online adds DKIM signature to message headers" },
+    { from: "Exchange Online", to: "External Recipient", label: "DNS MX lookup → delivery on port 25", sub: "EOP sends via Microsoft's outbound IP pool unless routed via smart host connector" },
+  ]}
+/>
+
+### The Three Transport Services
+
+**Front End Transport** is the ingress and egress point. It terminates SMTP connections from external senders (port 25) and from clients submitting mail (port 587). It does not queue or process messages — it proxies connections to the Hub Transport service. This separation means external senders never connect directly to the mailbox backend.
+
+**Hub Transport** performs the actual message routing and processing: applying transport rules (Exchange Transport Rules, ETRs), routing the message to the correct destination, passing it through EOP anti-spam filters, enforcing DLP policies, and selecting the appropriate send connector for outbound delivery.
+
+**Mailbox Transport** handles the final step of writing to and reading from mailbox databases. It consists of two sub-services: the Mailbox Transport Submission service (picks up outbound messages from the mailbox database and passes them to Hub Transport) and the Mailbox Transport Delivery service (receives messages from Hub Transport and writes them to the destination mailbox).
+
+---
+
+## DNS Records
+
+Four DNS records are critical for Exchange Online to send and receive correctly. Misconfiguration of any one of them causes delivery failures.
+
+### MX Record
+
+The MX record tells external senders where to deliver mail for a domain:
+
+```
+nakamas-it.com.  MX  0  nakamas-it-com.mail.protection.outlook.com.
+```
+
+The hostname format is the verified domain name with dots replaced by hyphens, appended with `.mail.protection.outlook.com`. Priority 0 (or any single value) is standard when all MX records point to Exchange Online.
+
+If the MX record still points to an on-premises server or a third-party filter after cutover, inbound mail goes to the wrong destination. Message trace in the Exchange Admin Center or EOP is the first tool to check.
+
+### SPF Record
+
+SPF authorises the IP addresses permitted to send mail for a domain:
+
+```
+nakamas-it.com.  TXT  "v=spf1 include:spf.protection.outlook.com -all"
+```
+
+`include:spf.protection.outlook.com` covers all of Microsoft's outbound sending IP addresses. The `-all` qualifier causes a hard fail for any sender not listed. Using `~all` (soft fail) is more permissive and appropriate when transitioning.
+
+SPF only covers the SMTP `MAIL FROM` (envelope sender) — not the `From:` header visible in email clients. This distinction matters for DMARC alignment.
+
+### DKIM
+
+DKIM adds a cryptographic signature to outbound messages. Exchange Online signs mail automatically using a Microsoft-managed key for the `onmicrosoft.com` domain from day one. For custom domains, custom DKIM signing must be enabled explicitly via the Security & Compliance portal or PowerShell:
+
+```powershell
+# Enable DKIM signing for a custom domain
+New-DkimSigningConfig -DomainName nakamas-it.com -Enabled $true
+```
+
+Exchange Online then generates a 2048-bit RSA key pair. The public key is published at:
+
+```
+selector1._domainkey.nakamas-it.com  CNAME  selector1-nakamas-it-com._domainkey.nakamas-it.onmicrosoft.com
+selector2._domainkey.nakamas-it.com  CNAME  selector2-nakamas-it-com._domainkey.nakamas-it.onmicrosoft.com
+```
+
+Two selectors exist so Microsoft can rotate keys (key rotation activates the alternate selector without a gap in signing).
+
+### DMARC
+
+DMARC tells receiving servers what to do when SPF and DKIM checks fail, and where to send aggregate reports:
+
+```
+_dmarc.nakamas-it.com.  TXT  "v=DMARC1; p=quarantine; rua=mailto:dmarc@nakamas-it.com; pct=100"
+```
+
+- `p=none` — monitor only, no action on failures. Use during rollout.
+- `p=quarantine` — failing messages go to junk/spam.
+- `p=reject` — failing messages are rejected outright. The most protective setting once SPF and DKIM are confirmed working.
+
+Exchange Online evaluates DMARC on inbound mail. For outbound, EOP applies DMARC via the Composite Authentication result visible in message headers (`compauth=pass`).
+
+---
+
+## Autodiscover
+
+Autodiscover is the mechanism by which Outlook and other clients automatically discover their Exchange configuration — server names, EWS endpoints, ActiveSync settings — without requiring manual configuration by the user.
+
+When a user adds a Microsoft 365 account in Outlook, the client performs the following lookup sequence:
+
+1. `https://autodiscover.<domain>/autodiscover/autodiscover.xml`
+2. `https://<domain>/autodiscover/autodiscover.xml`
+3. DNS SRV record: `_autodiscover._tcp.<domain>`
+
+For Exchange Online, the required DNS record is a CNAME:
+
+```
+autodiscover.nakamas-it.com.  CNAME  autodiscover.outlook.com.
+```
+
+This redirects the client to Microsoft's Autodiscover service, which returns the correct MAPI/HTTP endpoint (`outlook.office365.com`), EWS endpoint, and mobile sync settings for the tenant. Without this record, Outlook will fail to configure automatically and users will need to enter server settings manually — or the client will fall back to an incorrect on-premises endpoint if one exists.
+
+In hybrid deployments, Autodiscover routing becomes more complex: on-premises Exchange must decide whether to return on-premises or Exchange Online settings depending on where the user's mailbox lives. The Hybrid Configuration Wizard handles this.
+
+---
+
+## Connectors
+
+Connectors define how Exchange Online routes mail to and from specific sources or destinations outside the standard path. They are configured in the Exchange Admin Center under Mail Flow → Connectors.
+
+### Inbound Connectors
+
+Inbound connectors accept mail from specific senders — typically an on-premises Exchange server or a third-party email security gateway (Proofpoint, Mimecast, Barracuda). The connector validates the source by IP address or certificate subject name and applies specific trust settings.
+
+Without an inbound connector, Exchange Online's EOP will still accept mail from any source — but the connector allows you to bypass certain spam checks for trusted sources, or to require that all inbound mail arrive via a specific gateway.
+
+### Outbound Connectors
+
+Outbound connectors route specific mail through an alternative path rather than directly from Exchange Online's outbound IP pool. Common uses:
+
+- **Smart host routing**: all outbound mail sent through an on-premises smart host or a third-party DLP/archiving service that needs to inspect outbound messages
+- **On-premises routing**: mail destined for on-premises recipients in a hybrid deployment is routed via the Hybrid connector to the on-premises Exchange server rather than delivered via SMTP directly
+
+Outbound connectors can be scoped by recipient domain (only route `@subsidiary.com` through the smart host) or used as the default route for all outbound mail.
+
+### Hybrid Connector
+
+Created automatically by the Hybrid Configuration Wizard (HCW). Consists of a pair of connectors (inbound and outbound) that establish an authenticated, encrypted channel between on-premises Exchange and Exchange Online. The HCW also configures OAuth trust, enabling features like calendar Free/Busy sharing, MailTips across environments, and message tracking across both systems.
+
+---
+
+## Exchange Online Protection (EOP)
+
+Every Exchange Online mailbox has EOP in front of it. EOP is the anti-spam and anti-malware filtering layer — it processes all inbound mail before it reaches any mailbox and applies anti-spam policy on outbound mail from the tenant.
+
+EOP capabilities included with all Exchange Online plans:
+
+- **Anti-spam**: sender IP reputation, bulk mail analysis, content filtering. Spam Confidence Level (SCL) scores determine disposition (deliver, junk, quarantine, reject).
+- **Anti-malware**: multi-engine malware scanning of attachments. Suspected malware goes to quarantine; a notification is sent to the sender and admin.
+- **Connection filtering**: IP allow list and block list; Safe List aggregation (honours end-user safe sender lists).
+- **Outbound spam filtering**: prevents tenant accounts from being used to send spam; enforces outbound limits.
+
+With **Microsoft Defender for Office 365 Plan 1** (included in M365 Business Premium):
+
+- **Safe Attachments**: attachments are detonated in a sandbox environment before delivery. Malicious attachments are blocked even if signatures are unknown. This adds delivery latency — typically 1–5 minutes.
+- **Safe Links**: URLs in emails and Office documents are rewritten to Microsoft's URL detonation proxy. Clicks are checked in real time against threat intelligence. Zero-hour auto purge (ZAP) can retroactively move delivered messages to junk if they are later determined to be malicious.
+
+---
+
+## Database Availability Groups (DAGs)
+
+In on-premises Exchange, a Database Availability Group is a high-availability cluster of mailbox servers that each host copies of one or more mailbox databases. Writes to the active copy are replicated synchronously or asynchronously to passive copies on other servers. If the active copy's server fails, a passive copy is automatically activated.
+
+Exchange Online uses the same DAG architecture internally, at a much larger scale, across multiple Microsoft datacentres within a geography. Every Exchange Online mailbox database has multiple copies — Microsoft publishes that there are at least four copies of every mailbox, spread across at least two geographically separated datacentres within a region.
+
+From an administrator's perspective, this is invisible — you cannot configure or observe the DAG topology. Its relevance is in the SLA: Microsoft's 99.9% uptime guarantee for Exchange Online is backed by this DAG architecture. True single-datacentre Exchange Online outages are rare; when Exchange Online has incidents, they typically affect specific features (free/busy, EAC access) rather than complete mail delivery loss.
+
+---
+
+## Retention and Compliance
+
+Exchange Online integrates with Microsoft Purview (formerly Microsoft Compliance Center) for data governance and legal hold.
+
+**Litigation Hold**: places a hold on all content in a mailbox — items the user deletes are retained in the Recoverable Items folder rather than permanently removed. Enabled via:
+
+```powershell
+Set-Mailbox -Identity user@nakamas-it.com -LitigationHoldEnabled $true
+```
+
+**Recoverable Items folder**: a hidden folder in every mailbox that stores deleted items, purged items, version history (if single item recovery is enabled), and items under hold. It has a separate quota (default 30 GB; unlimited under hold with archiving enabled). Content here is invisible to the user but accessible via eDiscovery searches.
+
+**Compliance/Retention Policies**: applied via Purview rather than Exchange Admin Center. Policies can retain content for a specified period (retain for 7 years), delete content after a period, or both. Applied to mailboxes, SharePoint sites, Teams chats, and OneDrive.
+
+**eDiscovery**: compliance teams can run searches across Exchange Online (email), SharePoint (documents), and Teams (chat messages) from the Purview portal. Results can be exported or placed in review sets.
+
+---
+
+## Hybrid Deployment
+
+A hybrid deployment connects on-premises Exchange Server with Exchange Online in the same organisation. It is the standard migration path — not a permanent end state — for organisations moving mailboxes from on-premises to Exchange Online gradually, though some organisations maintain hybrid permanently for compliance or application reasons.
+
+The HCW configures:
+
+- OAuth authentication trust between on-premises Exchange and Entra ID
+- Inbound and outbound Hybrid connectors (TLS-authenticated SMTP routing)
+- Federation trust for calendar Free/Busy sharing across the boundary
+- Autodiscover routing so clients are directed to the correct endpoint regardless of mailbox location
+- Hybrid Agent (optional): allows on-premises Exchange behind NAT or without inbound firewall ports to participate in hybrid by using a reverse-proxy agent that connects outbound to Exchange Online
+
+Mail routing in hybrid: by default, all outbound mail from Exchange Online to external recipients routes directly via EOP. Mail between on-premises and Exchange Online users routes via the Hybrid connectors. Centralised mail transport (routing all Exchange Online outbound through on-premises) is also possible via outbound connector configuration, though it adds an on-premises dependency.
+
+---
+
+## PowerShell Management
+
+Exchange Online is managed via the Exchange Online PowerShell module (EXO V3 — the current version). It uses REST-based APIs rather than remote PowerShell in its modern form, improving performance and removing the need for Basic Auth.
+
+```powershell
+# Install and connect
+Install-Module ExchangeOnlineManagement
+Connect-ExchangeOnline -UserPrincipalName admin@nakamas-it.com
+
+# Common operations
+Get-Mailbox -ResultSize Unlimited | Select DisplayName, PrimarySmtpAddress, RecipientTypeDetails
+Set-Mailbox -Identity user@nakamas-it.com -ProhibitSendQuota 49GB -ProhibitSendReceiveQuota 50GB
+Get-Mailbox -RecipientTypeDetails SharedMailbox | Select DisplayName, PrimarySmtpAddress
+
+# Message trace — invaluable for delivery troubleshooting
+Get-MessageTrace -RecipientAddress user@nakamas-it.com -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date) |
+  Select Received, SenderAddress, RecipientAddress, Subject, Status, FromIP
+
+# Transport rules
+Get-TransportRule | Select Name, Priority, State
+New-TransportRule -Name "Disclaimer" -ApplyHtmlDisclaimerText "<p>This email is confidential.</p>" -ApplyHtmlDisclaimerLocation Append
+
+# Shared mailbox delegation
+Add-MailboxPermission -Identity support@nakamas-it.com -User admin@nakamas-it.com -AccessRights FullAccess -AutoMapping $true
+Add-RecipientPermission -Identity support@nakamas-it.com -Trustee admin@nakamas-it.com -AccessRights SendAs
+```
+
+The Exchange Admin Center (EAC) at `admin.exchange.microsoft.com` provides a GUI for most of the above, but PowerShell is essential for bulk operations, scripted reporting, and any configuration that the EAC does not expose.
+
+---
+
+## Key Ports
+
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| **25** | TCP (TLS) | SMTP — inbound mail delivery from external MTAs |
+| **587** | TCP (STARTTLS) | SMTP submission — authenticated client or application relay |
+| **993** | TCP (TLS) | IMAPS — legacy IMAP clients |
+| **995** | TCP (TLS) | POP3S — legacy POP3 clients |
+| **443** | TCP (HTTPS) | MAPI over HTTP (Outlook), EWS, EAC, Autodiscover |
+| **443** | TCP (HTTPS) | ActiveSync (mobile clients) |
+
+Modern Outlook (desktop and mobile) uses MAPI over HTTP exclusively on port 443. Legacy protocols (IMAP, POP3, SMTP AUTH) can be disabled tenant-wide or per-mailbox as a security measure — disabling them removes attack surface for password spray attacks targeting these endpoints.
+
+---
+
+## References
+
+- [Microsoft Docs — Exchange Online documentation](https://learn.microsoft.com/en-us/exchange/exchange-online)
+- [Microsoft Docs — Mail flow and the transport pipeline in Exchange Online](https://learn.microsoft.com/en-us/exchange/mail-flow-best-practices/mail-flow-best-practices)
+- [Microsoft Docs — Set up DKIM for your custom domain](https://learn.microsoft.com/en-us/microsoft-365/security/office-365-security/email-authentication-dkim-configure)
+- [Microsoft Docs — Autodiscover for Exchange](https://learn.microsoft.com/en-us/exchange/architecture/client-access/autodiscover)
+- [Microsoft Docs — Connectors in Exchange Online](https://learn.microsoft.com/en-us/exchange/mail-flow-best-practices/use-connectors-to-configure-mail-flow/use-connectors-to-configure-mail-flow)
+- [Microsoft Docs — Exchange Online Protection overview](https://learn.microsoft.com/en-us/microsoft-365/security/office-365-security/eop-about)
+- [RFC 7208 — Sender Policy Framework (SPF)](https://www.rfc-editor.org/rfc/rfc7208)
+- [RFC 6376 — DomainKeys Identified Mail (DKIM)](https://www.rfc-editor.org/rfc/rfc6376)
+- [RFC 7489 — Domain-based Message Authentication, Reporting, and Conformance (DMARC)](https://www.rfc-editor.org/rfc/rfc7489)

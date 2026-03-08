@@ -1,0 +1,252 @@
+---
+title: "Microsoft Intune — Cloud-Based Endpoint Management"
+category: "endpoint"
+topic: "intune"
+summary: "Microsoft Intune is the cloud-based MDM and MAM platform that replaces on-premises SCCM for device management in modern Microsoft 365 deployments. It enrolls and manages Windows, macOS, iOS, and Android devices — pushing configuration, enforcing compliance, deploying apps, and wiping lost devices — without requiring a VPN or on-premises infrastructure."
+tags: ["endpoint", "intune", "mdm", "mam", "microsoft-365", "conditional-access", "autopilot", "compliance"]
+order: 1
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## What Intune Is
+
+Microsoft Intune is a cloud-native endpoint management platform delivered as part of Microsoft 365. It sits in the Microsoft Endpoint Manager (MEM) admin centre alongside Configuration Manager (SCCM) and provides two distinct management paradigms:
+
+- **MDM (Mobile Device Management)**: the organisation enrolls the entire device. Intune can push policies, deploy apps, enforce compliance, and wipe the device. Full visibility and control.
+- **MAM (Mobile Application Management)**: the organisation manages only specific applications on the device, not the device itself. Suitable for personal (BYOD) devices where full MDM is intrusive or legally problematic.
+
+The two modes are not mutually exclusive — Intune can manage both corporate-enrolled devices via MDM and personal devices via MAM simultaneously, with different policy sets for each.
+
+---
+
+## MDM vs MAM
+
+| Dimension | MDM | MAM |
+|-----------|-----|-----|
+| Device registration | Full Entra ID join / registration | App-only registration |
+| Scope of control | Entire device | Specified apps only |
+| Personal apps visible to IT | Yes (device inventory) | No |
+| Can remote wipe entire device | Yes | App data only (selective wipe) |
+| Suitable for BYOD | With privacy policy | Preferred for BYOD |
+| Suitable for corporate devices | Yes | Supplementary |
+| Configuration profiles apply to | Device | Per-app settings |
+| Conditional Access can require | Compliant device | Managed app |
+
+For corporate-owned devices, MDM is standard. For BYOD — particularly personal phones accessing corporate email — MAM-only (without device enrollment) is the preferred approach. The user retains full privacy on their personal device; the organisation can selectively wipe only its own app data.
+
+---
+
+## Enrollment Methods
+
+### Windows — Autopilot
+
+Windows Autopilot is the preferred zero-touch provisioning method for corporate Windows devices.
+
+<FlowDiagram
+  parties={["Device / User", "Intune / Entra ID"]}
+  steps={[
+    { from: "Device / User", to: "Intune / Entra ID", label: "Device powers on at OOBE", sub: "Hardware hash pre-registered in Autopilot service" },
+    { from: "Intune / Entra ID", to: "Device / User", label: "Autopilot profile returned", sub: "Skip pages, set tenant branding, deployment mode" },
+    { from: "Device / User", to: "Intune / Entra ID", label: "User authenticates with Entra ID credentials" },
+    { from: "Intune / Entra ID", to: "Device / User", label: "Entra ID join + Intune MDM enrollment", sub: "Certificate, device object created" },
+    { from: "Intune / Entra ID", to: "Device / User", label: "Configuration profiles applied", sub: "Apps, policies, certificates pushed" },
+  ]}
+/>
+
+**Hardware hash registration**: the OEM registers devices directly with the Autopilot service (Microsoft CSP programme), or IT can upload hardware hashes via CSV from the Intune portal.
+
+**Deployment modes**:
+- *User-driven*: user authenticates during OOBE; device joins Entra ID and enrolls in Intune. Hybrid join (also joins on-premises AD) is also supported.
+- *Self-deploying*: no user interaction. Device provisions itself via TPM attestation. Used for kiosks, shared workstations, digital signage.
+- *Pre-provisioning (white glove)*: IT or the reseller completes the device portion of provisioning ahead of time; the end user completes only the user portion at first login.
+
+### Windows — Bulk Enrollment
+
+A Provisioning Package (PPKG) created with Windows Configuration Designer. A USB drive containing the PPKG is inserted during OOBE. The device reads the package and enrolls automatically. Used for air-gapped environments or when Autopilot is not available.
+
+### macOS — ADE (Automated Device Enrollment)
+
+Requires Apple Business Manager (ABM). Devices are assigned to an MDM server (Intune) in ABM. On first boot, the device contacts ABM, discovers the assigned MDM server, and receives the enrollment profile. User authenticates with Entra ID via the Company Portal app (or PSSO — Platform Single Sign-On for macOS 13+).
+
+### iOS / iPadOS
+
+- **ADE via Apple Business Manager**: same model as macOS. Supervision status granted, allowing stricter policies.
+- **User-driven**: user installs Intune Company Portal, follows enrollment wizard.
+- **BYOD**: MAM-only via Company Portal without full device enrollment.
+
+### Android
+
+- **Android Enterprise Fully Managed**: corporate-owned, full device management. Device provisions via DPC identifier, NFC, QR code, or zero-touch enrollment (Google ZTE — similar to Autopilot).
+- **Android Enterprise Work Profile**: BYOD — creates a separate encrypted work profile on the device. Corporate apps and data live in the work profile; personal apps are invisible to IT.
+- **Android Enterprise Dedicated**: single-purpose/kiosk devices.
+
+---
+
+## Configuration Profiles
+
+Configuration profiles push settings to enrolled devices without user interaction. In Intune, profiles are assigned to Entra ID user or device groups.
+
+### Windows Profile Categories
+
+| Category | Examples |
+|----------|---------|
+| Device restrictions | Camera disabled, Bluetooth, USB storage |
+| Wi-Fi | SSID, authentication, EAP certificates |
+| VPN | Always-on VPN, per-app VPN profiles |
+| Certificates | SCEP/PKCS — push device or user certificates |
+| BitLocker | Enforce encryption, escrow recovery key to Entra ID |
+| Windows Hello for Business | PIN complexity, biometrics |
+| Microsoft Edge | Homepage, extensions, enterprise bookmarks |
+| Custom OMA-URI | Any MDM CSP not exposed natively in the UI |
+
+OMA-URI (Open Mobile Alliance Uniform Resource Identifier) is the underlying protocol for all Windows MDM settings. When the Intune UI does not expose a specific setting, you can write the CSP path directly. The full Windows MDM CSP documentation is the authoritative reference.
+
+### macOS Profile Categories
+
+| Category | Examples |
+|----------|---------|
+| FileVault | Enforce disk encryption, personal recovery key escrow |
+| Gatekeeper | Allow only App Store or approved developer apps |
+| System Preferences restrictions | Prevent specific preference panes |
+| Wi-Fi / VPN | Same pattern as Windows |
+| Kernel extensions (KEXT) | Approve legacy driver extensions |
+| System Extensions | Approve modern (non-kernel) extensions |
+
+---
+
+## Compliance Policies
+
+Compliance policies define what constitutes a compliant device. Intune evaluates each enrolled device against the applicable compliance policy and marks it compliant or non-compliant.
+
+### Common Compliance Requirements (Windows)
+
+| Setting | Example Value |
+|---------|--------------|
+| Minimum OS version | Windows 11 22H2 |
+| BitLocker required | Yes |
+| Secure Boot required | Yes |
+| Code integrity required | Yes |
+| Device threat level | Low (via Microsoft Defender for Endpoint) |
+| Screen lock timeout | 15 minutes or less |
+| Password complexity | Alphanumeric, 8+ characters |
+
+### Non-Compliance Actions
+
+When a device falls out of compliance, Intune can:
+- Mark the device non-compliant immediately, after a grace period, or after a configurable number of days.
+- Send an email notification to the user.
+- Send a push notification via Company Portal.
+- Retire or wipe the device after extended non-compliance.
+- Block access to corporate resources via Conditional Access integration.
+
+---
+
+## Conditional Access Integration
+
+Conditional Access (CA) is an Entra ID policy engine that evaluates identity + device + location + risk signals to make access decisions. Intune compliance integrates directly as a CA condition.
+
+A typical CA policy for M365:
+- **Assignments**: All users, All cloud apps (or specific apps like Exchange Online, SharePoint)
+- **Conditions**: Any device platform
+- **Grant controls**: Require device to be marked as compliant
+
+With this policy in place, a user trying to access Outlook Web or Teams from a personal device that is not enrolled and compliant will be blocked. The Conditional Access engine checks Intune's compliance state in real time.
+
+**The flow**: user authenticates to Entra ID → CA policy evaluates → CA checks Intune for device compliance state → if compliant, token issued → if non-compliant, access blocked with link to Company Portal to enroll or remediate.
+
+---
+
+## App Deployment
+
+Intune deploys applications to enrolled devices through the Intune deployment pipeline.
+
+### Windows App Types
+
+| App Type | Format | Notes |
+|----------|--------|-------|
+| Win32 app | `.intunewin` (wrapped with IntuneWinAppUtil.exe) | Most flexible; supports detection rules, dependencies |
+| MSI (line-of-business) | `.msi` | Simpler but less control than Win32 |
+| Microsoft Store | Store app ID | UWP apps from the Windows Store |
+| Microsoft 365 Apps | Built-in | Click-to-Run M365 deployment |
+| Web app | URL shortcut | Browser link in Company Portal |
+
+**Win32 app packaging** requires wrapping the installer with the IntuneWinAppUtil command-line tool:
+```
+IntuneWinAppUtil.exe -c "C:\AppSource" -s setup.exe -o "C:\Output"
+```
+
+Detection rules tell Intune whether the app is already installed: check for a file path, a registry key, or run a custom PowerShell script. Intune evaluates the detection rule before and after installation.
+
+### Assignment Intents
+
+| Intent | Behaviour |
+|--------|-----------|
+| Required | Forced installation; user cannot skip |
+| Available | Appears in Company Portal self-service |
+| Uninstall | Removes the app from assigned devices |
+| Available without enrollment | Accessible to MAM-only devices via Company Portal |
+
+---
+
+## Endpoint Security Policies
+
+Intune's Endpoint Security blade provides focused policies for security configuration without mixing them into broader configuration profiles:
+
+| Workload | Policies Available |
+|----------|-------------------|
+| Antivirus | Microsoft Defender Antivirus settings, exclusions, real-time protection |
+| Disk Encryption | BitLocker (Windows), FileVault (macOS) |
+| Firewall | Windows Firewall rules, Defender Firewall profiles |
+| Attack Surface Reduction | ASR rules, controlled folder access, exploit protection |
+| Endpoint Detection & Response | Onboard devices to Microsoft Defender for Endpoint |
+| Account Protection | Windows Hello for Business, credential guard |
+
+---
+
+## Intune vs SCCM — Co-Management
+
+SCCM (Configuration Manager) remains deployed in many enterprise environments for OS deployment (MDT/OSD task sequences), software distribution, and patch management. Intune and SCCM can run side-by-side through co-management.
+
+### Co-Management Workloads
+
+Co-management allows specific management workloads to be transferred from SCCM to Intune individually. Each workload is a slider: SCCM or Intune or Pilot (Intune for a subset of devices).
+
+| Workload | Can transfer to Intune |
+|----------|----------------------|
+| Compliance policies | Yes |
+| Device configuration | Yes |
+| Resource access (Wi-Fi, VPN, certs) | Yes |
+| Endpoint protection | Yes |
+| Client apps | Yes |
+| Office 365 click-to-run | Yes |
+| Windows Update policies | Yes |
+
+### Tenant Attach vs Co-Management
+
+These are related but distinct concepts:
+
+- **Tenant attach**: SCCM uploads device inventory data to Intune. Devices are visible in the Microsoft Endpoint Manager admin centre. Some Intune actions (remote wipe, script execution) are available for SCCM-managed devices. No workload transfer — SCCM still manages everything.
+- **Co-management**: devices are enrolled in both SCCM and Intune MDM. Specific workloads can be transferred to Intune. Requires the co-management agent in SCCM and Windows 10/11 devices.
+
+Tenant attach is the lower-commitment starting point; co-management is the path to full cloud management.
+
+---
+
+## Licensing
+
+Intune is included in the following Microsoft 365 licence bundles:
+
+| Licence | Intune Included |
+|---------|----------------|
+| Microsoft 365 Business Premium | Yes |
+| Microsoft 365 E3 | Yes |
+| Microsoft 365 E5 | Yes |
+| EMS E3 (Enterprise Mobility + Security) | Yes |
+| EMS E5 | Yes |
+| Intune Plan 1 standalone | Yes |
+| Intune Plan 2 (Intune Suite) | Advanced features (remote help, tunnel, etc.) |
+| Microsoft 365 Business Basic/Standard | No — requires add-on |
+
+Most M365 E3/E5 deployments include Intune. Verify licensing before enrollment, as non-licensed users will fail enrollment with an error.

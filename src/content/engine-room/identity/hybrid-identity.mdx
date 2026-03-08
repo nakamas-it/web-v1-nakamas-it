@@ -1,0 +1,209 @@
+---
+title: "Hybrid Identity — Bridging On-Premises AD and Entra ID"
+category: "identity"
+topic: "hybrid-identity"
+summary: "Most enterprise environments aren't purely on-premises or purely cloud — they're hybrid. Microsoft Entra Connect synchronises on-premises Active Directory identities to Entra ID so users can authenticate to both with the same credentials. Understanding the three sync modes and their security trade-offs determines whether a phished password can be used against cloud resources."
+tags: ["identity", "hybrid-identity", "entra-connect", "azure-ad-connect", "phs", "pta", "adfs", "sso"]
+order: 3
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Few enterprises live entirely in one world. The reality is a mix: legacy line-of-business applications that were never redesigned for the cloud, file servers that must remain on-premises for data sovereignty or latency reasons, and a growing portfolio of SaaS applications that live entirely in the cloud. Users in this environment need a single identity that works for both.
+
+This is the problem hybrid identity solves. Microsoft's approach is **Entra Connect** (formerly Azure AD Connect) — a synchronisation engine installed on-premises that reads objects from Active Directory and replicates them into Entra ID. The result: a user created in on-prem AD gets a corresponding cloud identity, and the two are kept in sync as attributes change. One username, one password, both on-premises resources and cloud applications.
+
+The critical architectural question in a hybrid deployment is not just *what* to sync, but *how authentication works*. Three distinct models exist, each with different security properties, operational complexity, and dependency on on-premises infrastructure availability.
+
+---
+
+## Entra Connect: The Sync Engine
+
+Entra Connect is a Windows application that runs on a domain-joined server (typically dedicated). It authenticates to both Active Directory (as a service account with read permissions across the domain) and Entra ID (as a service account with hybrid identity administrator rights), then performs a scheduled synchronisation cycle.
+
+### Sync Cycle
+
+Entra Connect runs two types of sync:
+
+- **Delta sync** (every 30 minutes by default): reads only changes since the last sync — new objects, modified attributes, deleted objects
+- **Full sync**: reads the entire directory from scratch; run manually or after configuration changes
+
+The sync pipeline has three stages:
+1. **Import**: read from the connected directory (AD or Entra ID)
+2. **Synchronisation**: apply attribute mapping rules, matching logic, and scoping filters
+3. **Export**: write changes to the target directory
+
+Changes flow primarily from AD to Entra ID (inbound sync). Some features enable **writeback** from Entra ID to AD — password writeback (SSPR changes propagate to on-prem), group writeback, device writeback.
+
+### Sync Scope and Filtering
+
+Not every OU in AD needs to be synced to the cloud. Entra Connect allows OU-level filtering — select which OUs are in scope. This is important for:
+- Excluding service accounts and admin accounts from cloud sync (reducing attack surface)
+- Excluding sensitive OUs (HR, executive) based on data handling policy
+- Phased rollout — sync one department at a time
+
+Attribute-level filtering further refines what data is sent to the cloud. Custom attribute mappings can transform values during sync (e.g., deriving `userPrincipalName` from `mail` rather than `sAMAccountName`).
+
+### Staging Mode
+
+Entra Connect supports a **staging mode** secondary server — it runs the full sync pipeline and maintains a local database of the directory state, but does not export changes to Entra ID. This provides disaster recovery: if the primary Entra Connect server fails, staging mode can be activated and the secondary becomes active within minutes, without needing to re-process the full directory.
+
+---
+
+## Authentication Modes
+
+### Mode 1 — Password Hash Sync (PHS)
+
+Password Hash Sync is the simplest and most resilient hybrid authentication model. When a user changes their password in Active Directory, the domain controller computes the NT hash, Entra Connect reads the hash through a dedicated API (not standard LDAP), transforms it through an additional salted hashing round (PBKDF2-SHA256 with a per-user salt), and writes the resulting hash to Entra ID.
+
+**Authentication flow**: When a user signs into a cloud application, Entra ID validates the credential directly against its own stored hash. No on-premises infrastructure is involved.
+
+<FlowDiagram
+  parties={["User", "Entra ID", "On-prem AD"]}
+  steps={[
+    { from: "User", to: "Entra ID", label: "Sign-in request", sub: "username@domain.com + password" },
+    { from: "Entra ID", to: "User", label: "Authentication result", sub: "Entra ID validates against local hash — no on-prem contact" },
+  ]}
+/>
+
+**Key properties:**
+- Authentication happens entirely in the cloud — no dependency on on-premises AD availability
+- If the on-premises AD is down, cloud authentication continues working
+- Password changes sync within 2 minutes by default
+- Entra ID Password Protection can push banned password lists to on-prem DCs, applying cloud-defined policies to on-prem password changes
+- Leaked credential detection (Identity Protection) can cross-reference synced hashes against known breach databases — users with exposed credentials are flagged even if the breach was years old
+
+**Security consideration**: With PHS, a version of the user's password hash exists in Entra ID. If the Entra ID tenant is compromised (e.g., a Global Administrator account is phished), the attacker has access to those hashes. In practice, the hashes in Entra ID are transformed and cannot be directly replayed against on-prem AD, but this represents a credential exposure that PTA and federation avoid.
+
+---
+
+### Mode 2 — Pass-Through Authentication (PTA)
+
+Pass-Through Authentication keeps the password validation on-premises. When a user signs into Entra ID, instead of validating the credential against a cloud-stored hash, Entra ID forwards the credential validation request to a lightweight agent running on-premises, which validates against the actual AD.
+
+**The PTA Agent**: A small Windows service installed on domain-joined servers (minimum two for redundancy). It connects outbound to Entra ID over HTTPS (port 443) and maintains a persistent outbound connection. There is no inbound firewall rule required — the agent polls for validation requests.
+
+<FlowDiagram
+  parties={["User", "Entra ID", "PTA Agent", "On-prem AD"]}
+  steps={[
+    { from: "User", to: "Entra ID", label: "Sign-in request", sub: "username + password" },
+    { from: "Entra ID", to: "PTA Agent", label: "Validation request", sub: "Encrypted credentials forwarded to on-prem agent" },
+    { from: "PTA Agent", to: "On-prem AD", label: "LDAP bind / NTLM auth", sub: "Validate credentials against AD" },
+    { from: "On-prem AD", to: "PTA Agent", label: "Success / Failure", sub: "Account status, password expiry, lockout state also returned" },
+    { from: "PTA Agent", to: "Entra ID", label: "Validation result", sub: "Encrypted response" },
+    { from: "Entra ID", to: "User", label: "Authentication result", sub: "Token issued or access denied" },
+  ]}
+/>
+
+**Key properties:**
+- Passwords never leave the on-premises environment — no hash stored in Entra ID
+- Account state is evaluated at sign-in: disabled accounts, locked-out accounts, and expired passwords are enforced immediately (unlike PHS, where a disabled account still has a valid hash in Entra ID until the next sync cycle)
+- Requires on-premises connectivity — if all PTA agents are unreachable, cloud authentication fails
+- Minimum two agents recommended; agents can be installed on any domain-joined Windows Server
+
+**Security consideration**: PTA enforces on-premises account controls in real time, but if a PTA agent is compromised, an attacker could potentially intercept plaintext credentials as they pass through for validation. Securing the agent servers (patching, EDR, limited admin access) is critical.
+
+---
+
+### Mode 3 — ADFS / Federation
+
+Active Directory Federation Services (ADFS) is an on-premises Security Token Service (STS) that issues signed tokens to applications. In a federated hybrid identity model, Entra ID is configured to trust ADFS — instead of validating credentials itself, Entra ID redirects authentication to the ADFS endpoint, where the user authenticates against on-premises AD and receives a SAML or WS-Federation token that Entra ID accepts.
+
+<FlowDiagram
+  parties={["User", "Entra ID", "ADFS", "On-prem AD"]}
+  steps={[
+    { from: "User", to: "Entra ID", label: "Sign-in request", sub: "Entra ID detects federated domain" },
+    { from: "Entra ID", to: "User", label: "Redirect", sub: "Redirect to ADFS federation endpoint" },
+    { from: "User", to: "ADFS", label: "Authenticate", sub: "Kerberos (domain-joined) or forms auth (username/password)" },
+    { from: "ADFS", to: "On-prem AD", label: "Validate identity", sub: "Kerberos ticket or LDAP bind" },
+    { from: "ADFS", to: "User", label: "SAML token", sub: "Signed assertion with claims" },
+    { from: "User", to: "Entra ID", label: "Present token", sub: "SAML assertion forwarded to Entra ID" },
+    { from: "Entra ID", to: "User", label: "Entra ID token", sub: "Session established — access granted" },
+  ]}
+/>
+
+**Key properties:**
+- Full control over authentication logic — custom MFA providers, smart card authentication, certificate-based authentication, custom claim rules
+- Can enforce on-premises policies that Entra ID does not natively support
+- Most complex to deploy and operate: ADFS requires farms (Web Application Proxy for external access), certificates, load balancers, and dedicated infrastructure
+- ADFS is a critical single point of failure — if ADFS is down, all cloud authentication for the federated domain stops
+
+**Why ADFS is declining**: Most of the use cases that required ADFS are now addressable with PTA + Entra ID MFA + Conditional Access + Certificate-Based Authentication (CBA). Microsoft's current guidance is to move from ADFS to PHS or PTA, using Entra ID's native capabilities for MFA and access control. The primary remaining justification for ADFS is environments requiring smart card authentication or highly customised claim issuance that Entra ID cannot replicate.
+
+---
+
+## Seamless SSO
+
+Regardless of whether PHS or PTA is used for authentication, **Seamless SSO** (also called Azure AD Seamless Single Sign-On) allows domain-joined Windows machines to authenticate to Entra ID without presenting credentials — transparently, using Kerberos.
+
+When Seamless SSO is configured, Entra Connect creates a computer account in AD (`AZUREADSSO`) and registers it as a service. When a domain-joined Windows machine accesses an Entra ID sign-in endpoint, the browser (Edge, Chrome with the Windows Accounts extension) obtains a Kerberos service ticket for the `AZUREADSSO` account from the domain controller and presents it to Entra ID. Entra ID verifies the Kerberos ticket (using the pre-shared key of the AZUREADSSO account) and issues tokens without prompting the user.
+
+The result: a user logs into their domain-joined laptop and can access Microsoft 365, Azure portal, and other OIDC/SAML apps without ever seeing a sign-in prompt.
+
+---
+
+## Device Identity States
+
+In hybrid environments, devices themselves have identity states that determine what policies apply and what they can access.
+
+| State | Description | Auth capability |
+|-------|-------------|-----------------|
+| **Entra Registered** | Personal device (BYOD) registered with Entra ID — typically via Settings > Accounts. No domain join. | Can authenticate to cloud apps; limited Conditional Access targets |
+| **Entra ID Joined** | Cloud-native join — device is managed by Entra ID / Intune. No on-prem domain join. Windows 10/11 sign-in authenticates to Entra ID directly. | Full Entra ID SSO; no on-prem Kerberos without additional config (Kerberos Cloud Trust) |
+| **Hybrid Entra ID Joined** | Device is both domain-joined to on-prem AD **and** registered in Entra ID. The on-prem domain join is primary; Entra ID registration is synced by Entra Connect. | Full Kerberos SSO to on-prem resources; Entra ID SSO for cloud; Conditional Access device compliance via Intune |
+
+Hybrid Entra ID Join is the transitional state most enterprises reach for — it preserves on-premises capabilities (GPO, Kerberos, SYSVOL scripts) while enabling cloud management and Conditional Access device compliance checks.
+
+---
+
+## Sync Limitations and Cloud-Only Gaps
+
+Objects synced from AD to Entra ID are **source-of-authority locked** — most attributes cannot be modified in Entra ID directly. Changes must be made in AD and synced. This creates operational delays (up to the 30-minute sync interval) for attribute changes.
+
+Entra ID has no OU structure. Synced objects appear flat in the Entra ID directory. Administrative Units can group objects for delegation purposes, but they are not hierarchical and do not support GPO.
+
+Group Policy does not extend to cloud resources. Intune configuration profiles fill this gap for device management, but the feature set differs significantly: GPO has thousands of configurable settings; Intune coverage is narrower and growing.
+
+Password policies in Entra ID (cloud-native users) are controlled by Entra ID settings, not the on-prem domain password policy. For synced users, the on-prem policy governs password requirements; cloud admins cannot override it without writeback.
+
+---
+
+## Authentication Mode Comparison
+
+| Dimension | PHS | PTA | ADFS |
+|---|---|---|---|
+| **Password stored in cloud** | Yes (transformed hash) | No | No |
+| **Requires on-prem connectivity** | No (auth in cloud) | Yes (PTA agents) | Yes (ADFS farm) |
+| **On-prem account controls** | Delayed (sync interval) | Real-time | Real-time |
+| **Leaked credential detection** | Yes (Identity Protection) | No | No |
+| **Smart card / cert auth** | No | No | Yes |
+| **Custom claims** | Limited | Limited | Full |
+| **Infrastructure complexity** | Low | Low–Medium | High |
+| **Resilience if on-prem is down** | High (cloud auth continues) | Low (auth fails) | Low (auth fails) |
+| **Microsoft recommended** | Yes (preferred) | Yes | No (migrate away) |
+
+---
+
+## Security Considerations
+
+**PHS and cloud exposure**: The transformed hashes in Entra ID are not directly usable against on-prem AD, but they represent a credential exposure surface in the cloud tenant. Compromising a Global Administrator account gives access to identity data that could assist in further attacks. This is why Privileged Identity Management (PIM) for Global Admin and break-glass procedures are critical with PHS.
+
+**PTA agent security**: PTA agents must be treated as tier-0 infrastructure — equivalent to domain controllers. An attacker with code execution on a PTA agent can intercept credentials in plaintext. Limit admin access, monitor closely, and keep the servers patched and isolated.
+
+**ADFS as a chokepoint**: ADFS is an attractive target because compromising it enables forging tokens for any user in the organisation. ADFS farm servers require the same tier-0 security posture as domain controllers, plus protection of the token-signing certificate (compromise of which allows arbitrary token forgery).
+
+**Staged rollout**: When migrating from ADFS to PHS or PTA, Entra Connect supports staged rollout — moving individual users or groups to the new authentication method while keeping the domain federated. This allows testing the new model without a hard cutover.
+
+---
+
+## References
+
+- [Microsoft Docs — What is Entra Connect?](https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/whatis-azure-ad-connect)
+- [Microsoft Docs — Password Hash Synchronisation](https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/whatis-phs)
+- [Microsoft Docs — Pass-Through Authentication](https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-pta)
+- [Microsoft Docs — ADFS and Entra ID](https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/whatis-fed)
+- [Microsoft Docs — Seamless Single Sign-On](https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-sso)
+- [Microsoft Docs — Hybrid Entra ID Join](https://learn.microsoft.com/en-us/entra/identity/devices/concept-hybrid-join)

@@ -28,6 +28,7 @@ const homeActive =
     : currentPath === base || currentPath === base.slice(0, -1);
 
 const schoolActive = currentPath.startsWith(`${base}school`);
+const engineRoomActive = currentPath.startsWith(`${base}engine-room`);
 
 // Only add hreflang on pages that have a translated alternate (home pages)
 const isHomePage =
@@ -83,6 +84,12 @@ const isHomePage =
               class={`text-sm font-medium transition-colors ${schoolActive ? 'text-cyan-400' : 'text-slate-400 hover:text-slate-100'}`}
             >
               {t('nav.school')}
+            </a>
+            <a
+              href={`${base}engine-room/`}
+              class={`text-sm font-medium transition-colors ${engineRoomActive ? 'text-amber-400' : 'text-slate-400 hover:text-slate-100'}`}
+            >
+              {t('nav.engineRoom')}
             </a>
           </div>
           <div class="flex font-mono text-xs border border-slate-700 rounded overflow-hidden">

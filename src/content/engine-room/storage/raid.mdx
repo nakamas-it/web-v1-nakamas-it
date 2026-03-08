@@ -1,0 +1,184 @@
+---
+title: "RAID — Redundant Array of Independent Disks"
+category: "storage"
+topic: "raid"
+summary: "RAID combines multiple physical disks into a logical unit to improve performance, redundancy, or both. Understanding what each RAID level actually does to your data — and what it doesn't protect against — prevents the most common mistake in storage: confusing RAID with backup."
+tags: ["storage", "raid", "raid0", "raid1", "raid5", "raid6", "raid10", "redundancy"]
+order: 1
+draft: false
+---
+
+## What RAID Is
+
+RAID — Redundant Array of Independent Disks — is a technology that presents multiple physical disks to an OS or controller as a single logical volume. The goal is one or both of two things:
+
+- **Performance** — spread I/O across multiple spindles or flash controllers so throughput scales with disk count.
+- **Redundancy** — keep data accessible even if one or more physical disks fail.
+
+The critical constraint: you cannot fully optimise both simultaneously. Every RAID level is a trade-off between these two goals, and between both of them and raw storage efficiency.
+
+---
+
+## The Two Primitives
+
+All RAID levels are built from two primitives:
+
+**Striping** splits data into fixed-size chunks and distributes them sequentially across disks. Disk 1 gets chunk 1, disk 2 gets chunk 2, and so on. Both reads and writes can parallelise. One disk failure = total data loss, because each disk holds only part of every file.
+
+**Mirroring** writes identical data to two or more disks simultaneously. Any single disk is a complete copy. Read speed can be improved by reading from whichever disk responds first. Write speed is bounded by the slowest disk in the mirror set — every disk must confirm the write.
+
+**Parity** is the mathematical compromise: instead of storing a full extra copy, store enough computed information to reconstruct any single missing disk. XOR parity across N data disks produces a parity value that lets you recompute any one of the N+1 values if it goes missing. This gives redundancy at the cost of write overhead (parity must be recalculated on every write) and without the full read-performance gains of mirroring.
+
+---
+
+## RAID Levels
+
+### RAID 0 — Striping, No Redundancy
+
+Data is striped across all disks with no redundancy information.
+
+- **Read/write throughput**: scales linearly with disk count (theoretical maximum: N × single disk).
+- **Fault tolerance**: zero. One disk failure destroys the entire array.
+- **Storage efficiency**: 100% — no overhead.
+- **Minimum disks**: 2.
+- **Use case**: scratch space, video editing working directories, caches, read-intensive workloads where data loss is acceptable and the data can be regenerated.
+
+RAID 0 is frequently misused. It is appropriate only when the data is either replaceable or backed up externally, and speed is the dominant requirement.
+
+---
+
+### RAID 1 — Mirroring
+
+Every write goes to all disks simultaneously. Each disk is a complete, independent copy.
+
+- **Read throughput**: can be doubled (OS or controller reads from whichever disk responds fastest, or splits reads across mirrors).
+- **Write throughput**: bounded by the slowest mirror. Roughly equivalent to a single disk.
+- **Fault tolerance**: survives failure of N-1 disks (with 2 disks: one can fail completely).
+- **Storage efficiency**: 1/N — with 2 disks, 50%.
+- **Minimum disks**: 2.
+- **Use case**: OS volumes, small databases, any dataset where redundancy is more important than capacity efficiency.
+
+---
+
+### RAID 5 — Distributed Parity
+
+Data and parity are striped across all disks. Parity is rotated across disks (not on a dedicated parity disk) to avoid a single write bottleneck.
+
+- **Read throughput**: good — reads can parallelise across all disks.
+- **Write throughput**: degraded by parity calculation overhead (read-modify-write cycle on every write).
+- **Fault tolerance**: survives exactly 1 disk failure. If a second disk fails before rebuild completes, data is lost.
+- **Storage efficiency**: (N-1)/N — with 4 disks, 75%.
+- **Minimum disks**: 3.
+- **Rebuild time**: hours to days depending on disk size and I/O load during rebuild. All surviving disks are read in full during rebuild, imposing maximum stress.
+
+**RAID 5 and the URE problem**: modern enterprise HDDs have an Unrecoverable Read Error (URE) rate of approximately 1 error per 10^14 bits read. Consumer drives are rated at 10^14 bits; some are 10^15. A 4 TB disk contains roughly 3.2 × 10^13 bits. During a RAID 5 rebuild, the controller reads every bit on every surviving disk. With a 4-disk array of 4 TB drives, the controller reads approximately 12 TB = ~9.6 × 10^13 bits. At a URE rate of 1 per 10^14 bits, the probability of hitting a URE during that single rebuild operation is roughly 96%. A URE during rebuild on RAID 5 = data loss.
+
+**RAID 5 is not recommended for HDDs larger than 2 TB** for this reason. Use RAID 6 or RAID-Z2 instead.
+
+---
+
+### RAID 6 — Dual Parity
+
+Two independent parity blocks per stripe, calculated with different algorithms (P+Q parity). Any two disks can fail simultaneously without data loss.
+
+- **Read throughput**: similar to RAID 5.
+- **Write throughput**: lower than RAID 5 — two parity calculations per write.
+- **Fault tolerance**: survives any 2 simultaneous disk failures.
+- **Storage efficiency**: (N-2)/N — with 6 disks, 67%.
+- **Minimum disks**: 4.
+- **Use case**: large arrays with HDDs > 2 TB, environments where rebuild time creates prolonged exposure.
+
+The rebuild process for RAID 6 is slower than RAID 5 due to dual parity recalculation, but the array remains operational and fault-tolerant (one disk can fail during rebuild without data loss).
+
+---
+
+### RAID 10 — Mirrored Stripes (1+0)
+
+RAID 10 nests RAID 1 mirror pairs, then stripes data across those pairs. It is not the same as RAID 0+1 (stripe, then mirror), though the distinction matters for fault tolerance.
+
+- **Read throughput**: high — can read from any disk in any mirror pair.
+- **Write throughput**: high — writes stripe across pairs, and within each pair the write is parallel to both mirrors.
+- **Fault tolerance**: can survive multiple failures as long as no mirror pair loses both members. With 4 disks (2 pairs), one disk can fail per pair simultaneously and the array survives.
+- **Storage efficiency**: 50% regardless of disk count.
+- **Minimum disks**: 4 (even number required).
+- **Use case**: OLTP databases, high-concurrency workloads, any environment where both performance and redundancy are non-negotiable.
+
+RAID 10 is the preferred choice for database storage when cost is not the primary constraint.
+
+---
+
+### RAID 50 and RAID 60
+
+Nested levels that stripe across multiple RAID 5 (RAID 50) or RAID 6 (RAID 60) sub-arrays.
+
+- **RAID 50**: stripes data across two or more RAID 5 arrays. Each sub-array can lose one disk. Higher read/write throughput than single RAID 5. Better rebuild performance.
+- **RAID 60**: stripes across two or more RAID 6 arrays. Each sub-array can lose two disks. Used in large-scale storage arrays.
+
+Rebuild complexity increases significantly. Primarily found in enterprise hardware RAID controllers and storage arrays.
+
+---
+
+## RAID Level Comparison
+
+| Level | Min Disks | Disks Tolerated Failed | Capacity Efficiency | Read Speed | Write Speed | Primary Use Case |
+|-------|-----------|------------------------|---------------------|------------|-------------|------------------|
+| RAID 0 | 2 | 0 | 100% | N × single | N × single | Speed, scratch space |
+| RAID 1 | 2 | N-1 | 1/N (50% with 2) | Up to 2× | ~1× | OS, small critical data |
+| RAID 5 | 3 | 1 | (N-1)/N | Good | Moderate | General storage (small HDDs, SSDs) |
+| RAID 6 | 4 | 2 | (N-2)/N | Good | Lower | Large HDD arrays |
+| RAID 10 | 4 | 1 per mirror pair | 50% | Excellent | Excellent | Databases, high I/O |
+| RAID 50 | 6 | 1 per sub-array | Varies | Very good | Good | Large arrays, enterprise |
+| RAID 60 | 8 | 2 per sub-array | Varies | Very good | Moderate | Very large HDD arrays |
+
+---
+
+## Hardware RAID vs Software RAID
+
+### Hardware RAID
+
+A dedicated RAID controller (Broadcom/LSI, Adaptec, Dell PERC) handles all RAID operations in firmware. The OS sees only the logical volume.
+
+- Dedicated cache (typically 512 MB – 4 GB) with a Battery Backup Unit (BBU) or flash-backed write cache. Allows write-back caching safely.
+- Consistent performance regardless of OS load.
+- Controller failure can be catastrophic — if a replacement controller uses different firmware or RAID metadata format, the array may not import. **Always document controller model, firmware version, and RAID configuration.**
+- Hot-spare disks managed automatically.
+
+### Software RAID
+
+RAID logic runs in the OS or filesystem layer.
+
+- **Linux `mdadm`**: mature, reliable. Supports RAID 0/1/4/5/6/10. Array metadata is stored on the disks themselves — portable across controllers.
+- **Windows Storage Spaces**: built into Windows Server. Supports two-way/three-way mirrors, parity. Supports tiering (SSD + HDD).
+- **ZFS RAID-Z**: fundamentally different from traditional RAID 5/6 in one critical way — RAID-Z uses variable-width stripes that match the actual I/O size. This eliminates the RAID 5 "write hole" (a partial-stripe write that leaves parity inconsistent if power is lost mid-write). ZFS RAID-Z1 (1 parity) / RAID-Z2 (2 parity) / RAID-Z3 (3 parity) are the ZFS equivalents of RAID 5/6/7.
+
+ZFS RAID-Z does not suffer from the RAID 5 write hole and has better data integrity guarantees, but it has its own constraints: you cannot add individual disks to a RAID-Z vdev (you must add whole new vdevs), and resilvering (rebuild) is slower than traditional RAID.
+
+---
+
+## Unrecoverable Read Errors — The Maths
+
+| Drive Size | URE Rate | Bits Read in Full Rebuild | Probability of URE During Rebuild |
+|------------|----------|---------------------------|-----------------------------------|
+| 2 TB | 1 per 10^14 | ~1.6 × 10^13 | ~14% |
+| 4 TB | 1 per 10^14 | ~3.2 × 10^13 | ~27% |
+| 8 TB | 1 per 10^14 | ~6.4 × 10^13 | ~47% |
+| 16 TB | 1 per 10^14 | ~1.3 × 10^14 | ~72% |
+
+These are per-disk URE probabilities during a single rebuild. In a RAID 5 array with 3 surviving disks, all three are read, so the probability compounds.
+
+**The implication**: on large-disk RAID 5 arrays, a second failure during rebuild is not an unlikely edge case — it is an expected event. RAID 6 or RAID-Z2 provides the second failure tolerance needed to survive a URE during rebuild.
+
+---
+
+## RAID Is Not Backup
+
+RAID protects against a specific failure mode: a physical disk dying. It does not protect against:
+
+- **Accidental deletion** — deletes replicate instantly to all mirrors/parity.
+- **Ransomware** — encrypted data overwrites replicate instantly.
+- **Controller or server failure** — if the controller corrupts writes before they hit the disks, parity is useless.
+- **Filesystem corruption** — logical errors propagate across the array.
+- **Site disaster** — fire, flood, theft.
+- **Operator error** — wrong disk pulled during maintenance.
+
+A RAID array is a high-availability mechanism for the storage layer — it keeps the array online when a disk fails, buying time for a replacement. It is not a substitute for a 3-2-1 backup strategy: three copies of data, on two different media types, with one copy off-site.

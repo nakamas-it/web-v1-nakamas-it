@@ -4,11 +4,13 @@ export const ui = {
   en: {
     'nav.home': 'Home',
     'nav.school': 'School',
+    'nav.engineRoom': 'Engine Room',
     'footer.tagline': 'there is no place like 127.0.0.1',
   },
   es: {
     'nav.home': 'Inicio',
     'nav.school': 'School',
+    'nav.engineRoom': 'Engine Room',
     'footer.tagline': 'there is no place like 127.0.0.1',
   },
 } as const;

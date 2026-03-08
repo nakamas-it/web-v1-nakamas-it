@@ -1,0 +1,207 @@
+---
+title: "Observability — Knowing What Your Infrastructure Is Doing"
+category: "monitoring"
+topic: "observability"
+summary: "Observability is the ability to understand the internal state of a system from its external outputs. In infrastructure terms, that means metrics, logs, and traces — the three pillars of observability. Understanding what each pillar tells you, and what it doesn't, is the difference between having monitoring and actually knowing what's wrong before your users do."
+tags: ["monitoring", "observability", "metrics", "logs", "traces", "snmp", "syslog", "prometheus", "grafana"]
+order: 1
+draft: false
+---
+
+## Overview
+
+Monitoring tells you that a system is up or down. Observability tells you why it is behaving the way it is — even for failure modes you did not anticipate when you built the monitoring. The distinction is important in practice. A system with only uptime checks will tell you that users cannot access the application. A system with observability will tell you that the database connection pool is exhausted because a runaway query is holding locks, which is being caused by a deployment that went out thirty minutes ago.
+
+The term comes from control theory: a system is observable if its current internal state can be determined from its external outputs alone. Applied to infrastructure, it means that your signals — metrics, logs, and traces — contain enough information that any failure mode can be diagnosed without SSH-ing into the box and running `top`. The goal is to move from reactive debugging ("something is broken, let me investigate") to proactive understanding ("I can see this is heading toward a problem before it gets there").
+
+In practice, most infrastructure teams start with metrics (easiest to collect and visualise), add logs when metrics alone are insufficient for diagnosis, and add distributed tracing only when running microservices architectures that require following a single request across multiple services.
+
+---
+
+## The Three Pillars
+
+### Pillar 1 — Metrics
+
+Metrics are numerical measurements sampled at regular intervals over time. CPU utilisation at 73%, memory at 12 GB of 16 GB, packets per second on an interface at 45,000, HTTP error rate at 0.3%. Each data point is: a value, a timestamp, and a set of labels (which host, which interface, which endpoint).
+
+Metrics are cheap to collect, cheap to store, and fast to query. A full year of 1-minute CPU measurements for 100 hosts is roughly 50 MB — trivially small. Time-series databases (Prometheus, InfluxDB, Graphite) are optimised for this access pattern: range queries over time, aggregations by label, rate calculations.
+
+What metrics tell you: *something is wrong, and approximately when it started*. A spike in HTTP error rate at 14:32 correlates with a deployment at 14:30. Memory utilisation climbing steadily over 14 days identifies a memory leak. Interface error counters incrementing at 1 Hz indicate a physical layer problem.
+
+What metrics do not tell you: *why* it is wrong. A CPU spike could be a runaway process, a batch job, a DDoS, or a kernel bug. Metrics narrow the search space; logs and traces complete the diagnosis.
+
+**Collection methods:**
+
+- **SNMP polling**: the network standard. The collector sends a GET or GETBULK request to the device's SNMP agent at a regular interval (typically 5 minutes for interface statistics, 1 minute for critical systems). The device responds with the current OID values — ifInOctets, ifOutOctets, sysUpTime, and so on. Works on almost every piece of network hardware and most servers.
+- **Prometheus scrape**: the modern application standard. Applications and exporters expose metrics at an HTTP endpoint (`/metrics`) in Prometheus text format. The Prometheus server scrapes these endpoints at a configurable interval (typically 15–60 seconds). No agents to manage on the target — the exporter runs on or alongside the target and exposes metrics; Prometheus pulls them.
+- **Push (Telegraf, collectd, statsd)**: agents running on the target push metrics to an aggregation endpoint (InfluxDB, Graphite, StatsD listener). Useful when scraping is impractical (short-lived processes, behind NAT) or when the target generates metrics faster than a scrape interval can capture (application-level counters).
+- **Windows Performance Counters**: the Windows equivalent of `/proc` — a hierarchical tree of counters exposed by the OS and applications. Collected by Telegraf, the Prometheus `windows_exporter`, or built-in tools like `typeperf`.
+
+**Counters vs Gauges:**
+
+A **gauge** is an instantaneous value — CPU percentage right now, current memory usage, number of active connections. It can go up or down. Displayed directly.
+
+A **counter** is a monotonically increasing total — total bytes received since boot, total requests served, total errors. It only goes up (unless the counter resets on restart). To make counters useful, you calculate the *rate of change*: bytes received per second, requests per second, errors per second. In Prometheus this is the `rate()` function; in SNMP polling tools it is typically handled automatically.
+
+### Pillar 2 — Logs
+
+Logs are timestamped records of discrete events. A firewall log entry when a connection is blocked. An application log line when an exception is thrown. An authentication log when a user signs in successfully or fails. A configuration management log when a change is applied.
+
+Logs are the richest source of diagnostic information — they tell you exactly what happened, with context. A metric tells you the error rate went from 0.1% to 15% at 14:32; the log tells you the error is `java.sql.SQLException: Connection refused` from `db01.internal:5432`, on thread `http-nio-8080-exec-47`, in method `UserRepository.findById`.
+
+The cost of this richness is volume. A moderately busy web server generates gigabytes of logs per day. Storing, indexing, and querying logs at scale is expensive. A log management strategy requires deciding what to keep, for how long, in what format, and how quickly it needs to be searchable.
+
+**Syslog:** the UNIX standard for log transport. Devices and servers send log messages to a centralised collector via UDP port 514 (unreliable, no delivery guarantee) or TCP port 514 (reliable) or TLS-encrypted TCP port 6514. Every syslog message has a **facility** (0–23, indicating the source: kernel, mail, auth, local0–7, etc.) and a **severity** (0–7):
+
+| Severity | Name | Meaning |
+|---|---|---|
+| 0 | Emergency | System is unusable |
+| 1 | Alert | Immediate action required |
+| 2 | Critical | Critical condition |
+| 3 | Error | Error condition |
+| 4 | Warning | Warning condition |
+| 5 | Notice | Normal but significant |
+| 6 | Informational | Informational message |
+| 7 | Debug | Debug-level message |
+
+Network devices (Cisco IOS, Juniper, Palo Alto) send syslog natively. Linux systems run `rsyslog` or `syslog-ng` as the local syslog daemon, which can both generate local log files and forward to a remote collector. Configure forwarding in `/etc/rsyslog.conf`:
+
+```
+# Forward all messages to central syslog server
+*.* @@192.168.100.50:514    # TCP (@@)
+# or
+*.* @192.168.100.50:514     # UDP (@)
+# TLS-encrypted
+*.* action(type="omfwd" target="192.168.100.50" port="6514" protocol="tcp"
+    StreamDriver="gtls" StreamDriverMode="1" StreamDriverAuthMode="x509/name")
+```
+
+**Windows Event Log:** Windows does not use syslog natively. Events go to the Windows Event Log (Application, Security, System, and custom provider logs). For centralisation, the options are:
+
+- **Windows Event Forwarding (WEF)**: a built-in Windows mechanism. A collector server runs the Windows Event Collector service; client machines are configured via GPO to forward specified event IDs to the collector over WinRM (HTTP/HTTPS). Free, no agent needed, but limited in filtering sophistication.
+- **Agent-based forwarding**: Elastic Agent, Splunk Universal Forwarder, or Winlogbeat read the Event Log and ship entries to a central SIEM or log platform. More flexible — can filter, enrich, and transform events before forwarding.
+
+**Structured vs free-text logging:** a log line like `Failed login for user jsmith from 10.0.1.42` is human-readable but machine-unfriendly. Extracting the username or IP requires a regex. JSON-structured logging:
+
+```json
+{"timestamp": "2026-03-08T14:32:17Z", "event": "login_failure", "user": "jsmith", "source_ip": "10.0.1.42", "attempts": 3}
+```
+
+This is directly queryable without regex parsing. Most modern applications and logging frameworks (Python's `structlog`, Java's `logstash-logback-encoder`, Node's `pino`) support structured logging. When onboarding legacy systems that produce free text, the log aggregation layer (Logstash, Vector, Fluentd) applies parsing rules — but structured logging at the source is always preferable.
+
+**Log retention planning:**
+
+| Tier | Duration | Storage Type | Purpose |
+|---|---|---|---|
+| Hot | 30–90 days | Fast SSD — indexed and searchable | Active investigations, alerting, dashboards |
+| Warm | 90 days–1 year | Slower/cheaper — still queryable | Compliance queries, periodic audits |
+| Cold | 1–7 years | Object storage (S3, Azure Blob) — archived | Legal hold, regulatory compliance, forensics |
+
+Plan storage before deploying log centralisation. A medium-sized network with 50 devices and 100 servers generating 1 KB of logs per second each produces roughly 13 TB per year — before compression. Most structured log data compresses at 5:1 to 10:1 ratios, bringing this to 1.3–2.6 TB/year — manageable on commodity storage.
+
+### Pillar 3 — Traces
+
+Distributed tracing follows a single request as it moves through multiple services in a distributed system. Each service that handles the request adds a span — a timed record of what that service did — and all spans are linked by a common trace ID. The result is a visual timeline showing exactly where a request spent its time.
+
+In a microservices architecture: a user's checkout request might go through the API gateway, the auth service, the order service, the inventory service, the payment service, and a notification service. If the checkout takes 4 seconds when it should take 200ms, a trace shows that 3.7 seconds was spent in the payment service — specifically in the call to the third-party payment API. Without tracing, you would know the checkout is slow; with tracing, you know exactly where.
+
+**OpenTelemetry** is the current open standard for distributed tracing (and increasingly for metrics and logs as well). Applications are instrumented with the OpenTelemetry SDK, which generates spans and exports them to a collector. Backends include Jaeger, Zipkin, Grafana Tempo, and commercial alternatives.
+
+For traditional infrastructure — servers, network devices, databases — tracing is largely irrelevant. It becomes essential when managing containerised workloads and microservices. If your environment consists of VMs running monolithic applications and a network of routers and switches, metrics and logs cover the observability surface completely.
+
+---
+
+## Metrics in Practice: Prometheus and Grafana
+
+The most widely adopted open-source metrics stack is Prometheus (collection and storage) + Grafana (visualisation and alerting) + Alertmanager (alert routing).
+
+Prometheus is a pull-based time-series database. The Prometheus server periodically scrapes HTTP endpoints exposed by exporters:
+
+- **node_exporter**: exposes Linux system metrics — CPU, memory, disk I/O, filesystem, network interface statistics. One instance per server.
+- **windows_exporter**: the Windows equivalent — Performance Counter data exposed as Prometheus metrics.
+- **snmp_exporter**: translates SNMP OIDs from network devices into Prometheus metrics. Configured with a module definition specifying which OIDs to collect from which device types.
+- **blackbox_exporter**: external probing — HTTP checks, ICMP ping, TCP connect, DNS resolution. Used for synthetic uptime monitoring.
+
+Prometheus stores metrics in a local time-series database (TSDB) with configurable retention (default 15 days). For longer retention, remote write to Thanos, Cortex, or Victoria Metrics extends the storage timeline without changing the Prometheus scrape configuration.
+
+Grafana queries Prometheus (and other data sources) and renders dashboards. A well-structured Grafana dashboard for a network device shows: interface utilisation (bandwidth in/out as a percentage of capacity), interface errors, device CPU and memory utilisation, ping latency, and BGP peer state — all on a single screen, with time-range selection and alerting thresholds overlaid.
+
+Alertmanager receives firing alerts from Prometheus (defined as PromQL queries that evaluate to true) and routes them to notification channels — email, PagerDuty, Slack, Teams. Critically, Alertmanager supports **inhibition** (suppress lower-priority alerts when a higher-priority alert is firing — if the core switch is down, suppress all the alerts from devices behind it) and **silences** (temporarily suppress alerts during a maintenance window).
+
+---
+
+## Network Visibility Beyond SNMP
+
+SNMP counters tell you how many bytes traversed an interface. They do not tell you which applications, protocols, or users are responsible for that traffic. Several complementary mechanisms address this gap.
+
+**NetFlow and IPFIX** export flow records from routers and switches to a collector — each record describing a five-tuple conversation (source IP, destination IP, source port, destination port, protocol) with byte and packet counts. At a glance: 60% of WAN traffic is to Microsoft 365, 20% is to the backup server, 10% is YouTube (during lunch hours). NetFlow is covered in detail in the NetFlow article.
+
+**sFlow** takes a different approach — packet sampling. The device captures one in every N packets (configurable; typically 1 in 1,000 to 1 in 10,000) and exports the raw packet header plus a sample of the payload to a collector. Because it samples rather than tracking flows, sFlow works at wire speed even on high-capacity interfaces where full NetFlow accounting would be impractical. The trade-off is accuracy: sFlow results are statistical approximations, acceptable for traffic profiling but not for billing.
+
+**SNMP traps** complement polling. While polling is periodic (you learn about a link failure at the next poll interval, up to 5 minutes later), an SNMP trap is a push notification from the device — sent immediately when an event occurs. Link up/down events, threshold breaches (CPU over 90% for 5 minutes), hardware failures (fan failure, power supply failure) — traps deliver these in near-real-time. Most monitoring systems (LibreNMS, Zabbix, PRTG) can receive traps and trigger alerts from them independently of the polling cycle.
+
+**Synthetic monitoring** (blackbox probing) complements all of the above with an end-user perspective. Rather than checking whether a server is up (which may or may not mean users can reach it), blackbox monitoring sends real requests — HTTP GET, SMTP EHLO, DNS A-record query — and measures whether they succeed and how long they take. A web server can be reporting healthy metrics while a misconfigured firewall rule blocks access from the outside. Synthetic monitoring from an external vantage point catches this; internal SNMP polling does not.
+
+---
+
+## What Good Alerting Looks Like
+
+Monitoring without alerting is archaeology — you discover what went wrong after the fact. Alerting is the mechanism that turns monitoring data into operational action. Designing alerts poorly is worse than having no alerts: alert fatigue numbs on-call engineers to notifications until they stop responding to all of them.
+
+**Alert on symptoms, not causes.** A web application serving HTTP 500 errors to users is a symptom. CPU at 85% may be a cause of that, or it may be completely benign batch work with no user impact. Alert on the thing that affects users: error rates, latency percentiles, successful transaction rates. Let the dashboards and logs explain the underlying cause once you are investigating.
+
+**Every alert must be actionable.** If the response to an alert is "check on it and close the alert if it resolved itself," the alert is noise. An alert should have a defined response: escalation steps, a runbook link, a decision tree. If you cannot write a runbook for an alert, it should not be an alert.
+
+**Define severity levels explicitly:**
+
+| Severity | Response | Typical Triggers |
+|---|---|---|
+| **P1 — Critical** | Page on-call immediately, 24/7 | Service completely down, data loss occurring, security breach in progress |
+| **P2 — High** | Notify during business hours, fix within SLA | Degraded service, redundancy failed (system running with no failover), approaching capacity limits |
+| **P3 — Medium** | Track in ticket, fix in next sprint | Non-critical component failed, trending toward a problem, intermittent issues |
+| **P4 — Low** | Backlog item | Documentation updates needed, minor inefficiencies, informational findings |
+
+**Tune aggressively.** Every false positive alert that fires reduces the team's trust in the alerting system. A newly deployed monitor should be observed in "watch mode" for a week before it is connected to paging. Apply minimum duration thresholds — a CPU spike that lasts 30 seconds should not page anyone; one that sustains for 5 minutes with no sign of recovery warrants attention.
+
+**Inhibition and grouping** prevent alert storms. A core switch failure can trigger alerts for every device downstream of it — potentially hundreds. Alertmanager's inhibition rules suppress child alerts when a parent alert (the switch) is firing. Grouping consolidates 50 similar alerts into a single notification with a count, rather than 50 separate pages.
+
+---
+
+## A Practical Monitoring Stack for SMBs
+
+Large enterprises have the resources for Splunk, Datadog, or a full ELK deployment. Most SMBs and small infrastructure teams need something they can stand up, maintain, and afford. The following stack covers the core observability requirements with open-source or low-cost tools.
+
+**Metrics and network monitoring:**
+
+- **LibreNMS** or **Zabbix**: both are mature, free open-source platforms. LibreNMS is particularly strong for network environments — it auto-discovers network devices via SNMP, generates dashboards and alerts, and requires minimal configuration for standard network hardware. Zabbix is more flexible and scales better to large environments but requires more initial setup. Either provides SNMP polling, dashboards, alerting, and a 90-day metrics history.
+- **Prometheus + Grafana** (optional layer on top): add Prometheus and Grafana for richer server metrics and custom application dashboards. Use `node_exporter` on Linux servers and `windows_exporter` on Windows. Grafana integrates with both Prometheus and LibreNMS/Zabbix data sources.
+
+**Log centralisation:**
+
+- **syslog-ng** or **rsyslog** as the receiver: accepts syslog from all network devices and Linux systems, writes to structured files or forwards to Graylog.
+- **Graylog** (community edition, free): ingests syslog, parses messages, provides a search interface, dashboards, and alerting. The community edition is sufficient for environments with fewer than a few hundred message sources. Alternative: OpenSearch with OpenSearch Dashboards (the open-source Elasticsearch/Kibana stack).
+
+**Uptime and synthetic monitoring:**
+
+- **Uptime Kuma** (self-hosted, free): simple synthetic monitoring for HTTP, TCP, ICMP, DNS. Provides status pages and notifications via email, Slack, Teams, and more. Minimal resource requirements — runs on any Linux VM.
+- **Pingdom** or **Better Uptime** (SaaS): external monitoring from multiple geographic vantage points — checks whether your services are reachable from outside your network. Worth the modest cost for externally-facing services.
+
+**Network traffic analysis:**
+
+- **ntopng** (community edition): NetFlow/IPFIX/sFlow collector and analysis platform. Provides top talkers, protocol breakdowns, and application classification. Runs on a Linux VM; network devices export flows to it.
+
+This stack — LibreNMS + syslog-ng/Graylog + Uptime Kuma + ntopng — covers metrics, logs, uptime, and traffic visibility for under $200/month in infrastructure costs (assuming self-hosted on existing hardware or a small VM).
+
+---
+
+## References
+
+- [Prometheus documentation](https://prometheus.io/docs/introduction/overview/)
+- [Grafana documentation](https://grafana.com/docs/grafana/latest/)
+- [LibreNMS documentation](https://docs.librenms.org/)
+- [Zabbix documentation](https://www.zabbix.com/documentation/)
+- [Graylog documentation](https://go2docs.graylog.org/)
+- [OpenTelemetry specification](https://opentelemetry.io/docs/)
+- [RFC 5424 — The Syslog Protocol](https://www.rfc-editor.org/rfc/rfc5424)
+- Beyer, B. et al. (2016). *Site Reliability Engineering: How Google Runs Production Systems*. O'Reilly. Chapters 6 (monitoring distributed systems) and 12 (being on-call) are directly applicable.
+- Limoncelli, T., Hogan, C., Chalup, S. (2016). *The Practice of Cloud System Administration*, Volume 2. Chapters on monitoring architecture and alerting philosophy.

@@ -1,0 +1,112 @@
+---
+import Layout from '../../../layouts/Layout.astro';
+import { getCollection } from 'astro:content';
+
+export async function getStaticPaths() {
+  const allArticles = await getCollection('engineRoom', ({ data }) => !data.draft);
+  const categories = [...new Set(allArticles.map(a => a.data.category))];
+  return categories.map(category => ({
+    params: { category },
+    props: {
+      articles: allArticles
+        .filter(a => a.data.category === category)
+        .sort((a, b) => a.data.order - b.data.order),
+    },
+  }));
+}
+
+const { category } = Astro.params;
+const { articles } = Astro.props;
+const base = import.meta.env.BASE_URL;
+
+const categoryMeta: Record<string, { label: string; description: string; accent: string; icon: string }> = {
+  identity: {
+    label: 'Identity & Directory',
+    description: 'Active Directory, Entra ID, Group Policy, hybrid identity — how organisations manage who can access what.',
+    accent: 'text-violet-400',
+    icon: '🔑',
+  },
+  virtualization: {
+    label: 'Virtualization',
+    description: 'Hypervisors, ESXi, Hyper-V, Proxmox — what a hypervisor actually does and how virtualised infrastructure is built.',
+    accent: 'text-blue-400',
+    icon: '📦',
+  },
+  storage: {
+    label: 'Storage',
+    description: 'RAID, NAS vs SAN, TrueNAS, ZFS — how enterprise storage is structured, protected, and shared.',
+    accent: 'text-amber-400',
+    icon: '💾',
+  },
+  endpoint: {
+    label: 'Endpoint Management',
+    description: 'Intune, Group Policy, imaging — how devices are deployed, configured, and kept compliant at scale.',
+    accent: 'text-green-400',
+    icon: '🖥️',
+  },
+  email: {
+    label: 'Email & Collaboration',
+    description: 'Exchange Online, Microsoft 365 tenant concepts — the plumbing behind every calendar invite and shared mailbox.',
+    accent: 'text-sky-400',
+    icon: '📧',
+  },
+  monitoring: {
+    label: 'Monitoring & Logging',
+    description: "SNMP, Syslog, NetFlow, observability — knowing what your infrastructure is doing before your users tell you it's broken.",
+    accent: 'text-rose-400',
+    icon: '📊',
+  },
+};
+
+const meta = categoryMeta[category!] ?? { label: category, description: '', accent: 'text-amber-400', icon: '⚙️' };
+---
+
+<Layout title={meta.label}>
+
+  <nav class="font-mono text-sm text-slate-500 mb-8">
+    <a href={`${base}`} class="hover:text-slate-300 transition-colors">home</a>
+    <span class="mx-2">/</span>
+    <a href={`${base}engine-room`} class="hover:text-slate-300 transition-colors">engine-room</a>
+    <span class="mx-2">/</span>
+    <span class={meta.accent}>{category}</span>
+  </nav>
+
+  <header class="mb-12">
+    <h1 class={`text-4xl font-bold mb-3 ${meta.accent}`}>
+      <span class="mr-2">{meta.icon}</span>{meta.label}
+    </h1>
+    <p class="text-slate-400 leading-relaxed">{meta.description}</p>
+  </header>
+
+  {articles.length === 0 ? (
+    <p class="text-slate-500 italic">No articles yet — check back soon.</p>
+  ) : (
+    <div class="space-y-4">
+      {articles.map(article => {
+        const [catKey, slug] = article.id.split('/');
+        return (
+          <a
+            href={`${base}engine-room/${catKey}/${slug}`}
+            class="block bg-slate-900 border border-slate-800 hover:border-slate-600 rounded-xl p-6 transition-colors group"
+          >
+            <div class="flex items-center justify-between gap-3 mb-2">
+              <h2 class="min-w-0 font-semibold text-slate-100 group-hover:underline underline-offset-2">
+                {article.data.title}
+              </h2>
+              <span class={`font-mono text-xs font-bold shrink-0 px-2 py-1 rounded border border-current opacity-60 ${meta.accent}`}>
+                {article.data.topic.toUpperCase()}
+              </span>
+            </div>
+            <p class="text-slate-400 text-sm leading-relaxed mb-3">{article.data.summary}</p>
+            <div class="flex flex-wrap gap-2">
+              {article.data.tags.map((tag: string) => (
+                <span class="font-mono text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded">{tag}</span>
+              ))}
+            </div>
+          </a>
+        );
+      })}
+    </div>
+  )}
+
+</Layout>

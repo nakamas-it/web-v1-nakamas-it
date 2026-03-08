@@ -1,0 +1,230 @@
+---
+title: "Hypervisors — What Virtualisation Actually Does"
+category: "virtualization"
+topic: "hypervisors"
+summary: "A hypervisor abstracts physical hardware so multiple operating systems can run simultaneously on a single machine — each believing it has dedicated hardware. Understanding how a Type 1 (bare-metal) hypervisor isolates CPU, memory, and I/O from guest VMs, and how it differs from Type 2 (hosted), is the foundation for working with any virtualised infrastructure."
+tags: ["virtualization", "hypervisor", "type1", "type2", "kvm", "vmx", "hardware-assisted"]
+order: 1
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Before virtualisation, the relationship between an operating system and hardware was one-to-one. One server ran one OS. If the OS needed 4 GB of RAM out of 64 GB physically installed, the remaining 60 GB sat idle. If a workload peaked for two hours a day, the CPU was at near-zero utilisation for the other twenty-two. Provisioning a new service meant ordering new hardware, racking it, cabling it, and waiting weeks. The server-to-application model was fundamentally wasteful.
+
+Virtualisation breaks that one-to-one constraint. A **hypervisor** is the software layer that sits between physical hardware and the operating systems running on top of it. It partitions the hardware — CPU time, RAM, storage I/O, network bandwidth — into isolated slices and presents each slice to a guest OS as if it were a complete, dedicated machine. The guest OS does not know it is sharing a physical host. It boots, loads drivers, runs applications, and responds to network traffic exactly as it would on bare metal.
+
+The practical consequences of this are significant: server consolidation ratios of 10:1 to 20:1 are routine in enterprise data centres, reducing hardware spend, power consumption, and physical footprint by the same factor. Provisioning a new server becomes a minutes-long software operation. Hardware failures become manageable through live migration rather than catastrophic single points of failure.
+
+---
+
+## The Problem the Hypervisor Solves
+
+An OS assumes it owns the hardware. When the Linux kernel boots, it configures the MMU (Memory Management Unit) with its own page tables, programs the interrupt controller, loads device drivers that directly address hardware I/O ports, and executes privileged instructions that modify processor state. These are **Ring 0** operations — instructions that the CPU only allows when the processor is in supervisor mode.
+
+If two operating systems ran simultaneously and both tried to execute Ring 0 instructions directly against the same hardware, the result would be immediate conflict and corruption. Both kernels would try to own the MMU. Both would try to configure the interrupt controller. There is no safe way to share privileged hardware access without a mediator.
+
+The hypervisor is that mediator. It runs at the highest privilege level (Ring -1 in Intel's virtualisation architecture) and intercepts every attempt by a guest OS to execute privileged operations. Instead of letting the guest modify the real hardware, the hypervisor traps the instruction, emulates the expected result in software, and returns control to the guest. The guest OS sees what it expects to see. The hardware state remains under the hypervisor's exclusive control.
+
+---
+
+## Type 1 — Bare-Metal Hypervisors
+
+A **Type 1 hypervisor** runs directly on the physical hardware. There is no host operating system beneath it. The hypervisor is the first software layer that executes after firmware (BIOS/UEFI) hands off control, and it takes exclusive ownership of all hardware resources.
+
+The hypervisor has its own kernel, its own scheduler, and its own memory manager. It creates and manages **virtual machines** (VMs), each of which is given a controlled view of virtual hardware: a set of virtual CPUs (vCPUs), a block of memory, virtual NICs, and virtual storage controllers. The hypervisor schedules vCPU execution time on physical CPU cores the same way an OS scheduler assigns process time — context-switching between VMs to give each the illusion of dedicated processing.
+
+Type 1 hypervisors are the standard in enterprise data centres and cloud infrastructure. The primary examples:
+
+- **VMware ESXi** — the market-dominant enterprise hypervisor. Runs a proprietary micro-kernel called VMkernel. Managed through vCenter. Covered in detail in a separate article.
+- **Microsoft Hyper-V** — built into Windows Server. Uses a different architecture where Windows itself runs as a privileged partition. Also available standalone as Hyper-V Server.
+- **KVM (Kernel-based Virtual Machine)** — technically a kernel module that transforms the Linux kernel itself into a hypervisor. When KVM is loaded, Linux gains the ability to host VMs directly. Combined with QEMU for device emulation. The foundation of most cloud infrastructure including AWS (Nitro), Google Cloud, and OpenStack deployments.
+- **Xen** — a thin hypervisor that runs beneath a privileged VM called dom0 (typically Linux), which handles I/O on behalf of unprivileged guest VMs (domU). Used historically by AWS EC2 and still found in Citrix Hypervisor.
+
+---
+
+## Type 2 — Hosted Hypervisors
+
+A **Type 2 hypervisor** runs as an application on top of an existing host operating system. The host OS — Windows, macOS, or Linux — owns the hardware and runs normally. The hypervisor is just another process from the host OS's perspective.
+
+When a guest VM needs CPU time, the request travels through the hypervisor application to the host OS scheduler, which then schedules it on a physical CPU. This double-scheduling adds latency at every level. When the guest needs to write to a virtual disk, the operation goes: guest → hypervisor → host OS filesystem driver → physical storage driver → disk. Every layer adds overhead.
+
+Type 2 hypervisors are primarily used for development workstations, testing, and lab environments where convenience matters more than performance. The primary examples:
+
+- **VMware Workstation / Fusion** — VMware's desktop product for Windows/Linux and macOS respectively. Higher performance than most Type 2 alternatives due to some paravirtualisation.
+- **VirtualBox** — Oracle's free, cross-platform hypervisor. Widely used for labs and development.
+- **QEMU without KVM** — pure software emulation. Slow but can emulate non-native CPU architectures (e.g., run ARM code on an x86 host). When paired with KVM, it gains near-native performance and effectively becomes Type 1.
+- **Parallels Desktop** — macOS-focused, notable for its optimised support of running Windows on Apple Silicon through dynamic binary translation.
+
+The performance gap between Type 1 and Type 2 narrows significantly when the host OS is Linux and KVM is available — QEMU+KVM on Linux blurs the distinction entirely.
+
+---
+
+## Hardware-Assisted Virtualisation
+
+Early hypervisors had to handle a fundamental problem: many x86 CPU instructions behave differently in Ring 0 versus Ring 3, but without hardware support, the CPU had no way to trap Ring 0 instructions executed by a guest OS running in Ring 3. The hypervisor had to statically scan guest code before execution, rewrite any privileged instructions into safe equivalents, and cache the result. This technique, called **binary translation**, was slow and complicated.
+
+Intel and AMD both shipped hardware extensions in 2005–2006 that solved this problem at the silicon level:
+
+- **Intel VT-x (VMX — Virtual Machine Extensions)** — introduces a new processor mode called VMX non-root mode for guest execution. Guest code runs normally until it hits a privileged instruction, at which point the CPU hardware automatically traps to the hypervisor (a **VM Exit**). The hypervisor handles the instruction and resumes the guest (a **VM Entry**). No binary translation required. Key instructions: `VMXON`, `VMLAUNCH`, `VMRESUME`, `VMREAD`/`VMWRITE` for the VMCS (Virtual Machine Control Structure) that stores per-VM state.
+- **AMD-V (SVM — Secure Virtual Machine)** — AMD's equivalent implementation. Introduces VMCBs (Virtual Machine Control Blocks) in place of VMCSs. Functionally equivalent from the hypervisor's perspective.
+
+Modern hypervisors require VT-x or AMD-V. Attempting to run ESXi or Hyper-V on a CPU without these extensions enabled (usually configurable in BIOS/UEFI under "Intel Virtualisation Technology" or "SVM Mode") will fail at boot with a capabilities check error.
+
+A CPU flag check on Linux reveals whether the extensions are present and enabled:
+
+```bash
+# Intel — look for 'vmx' flag
+grep -m1 vmx /proc/cpuinfo
+
+# AMD — look for 'svm' flag
+grep -m1 svm /proc/cpuinfo
+```
+
+---
+
+## Memory Virtualisation
+
+Memory is the most technically complex resource for a hypervisor to manage, because every operating system expects to control the MMU and manage its own virtual-to-physical address mappings.
+
+Without hardware assistance, the hypervisor must maintain a **shadow page table** for each guest — translating guest virtual addresses through guest physical addresses to host physical addresses in software. Every time the guest modifies its page tables, the hypervisor must intercept the write and update the shadow tables. This generates a very high density of VM Exits and is a significant performance bottleneck.
+
+Intel and AMD ship hardware MMU extensions that eliminate this:
+
+- **EPT — Extended Page Tables (Intel)** — the hardware MMU itself handles two levels of translation simultaneously: guest virtual → guest physical (managed by the guest OS's page tables) and guest physical → host physical (managed by the hypervisor's EPT structures). The CPU walks both tables in hardware on a TLB miss. No shadow page tables. No VM Exit on guest page table writes. Dramatically fewer VM Exits per unit of memory-intensive work.
+- **RVI — Rapid Virtualisation Indexing (AMD)** — AMD's equivalent, also called Nested Page Tables (NPT). Same two-level hardware walk, same performance benefit.
+
+With EPT/RVI enabled, the hypervisor sets up the guest-physical → host-physical mappings once when creating the VM. The guest OS manages its own guest-virtual → guest-physical tables without hypervisor involvement. Memory virtualisation overhead drops from a substantial fraction of overall performance to near-negligible.
+
+**Memory overcommitment** — allocating more virtual RAM across all VMs than is physically installed — is possible but requires active management. Hypervisors use several techniques:
+
+- **Memory ballooning** — a driver installed in the guest (the balloon driver) can be instructed by the hypervisor to allocate memory from the guest's perspective, forcing the guest to page to its virtual disk. This effectively reclaims host RAM from that guest and gives it to another.
+- **Transparent Page Sharing (TPS)** — identical memory pages across multiple VMs are deduplicated to a single host page with copy-on-write semantics. Effective when many VMs run the same OS and have identical kernel pages in memory.
+- **Swap to host swap** — last resort. Guest memory pages are written to a hypervisor-managed swap file on the datastore. High latency, significant performance impact.
+
+---
+
+## I/O Virtualisation
+
+Network and storage I/O can be virtualised in three ways, with dramatically different performance characteristics.
+
+### Emulated Devices
+
+The hypervisor presents the guest with a virtual device that mimics a specific, real piece of hardware — for example, an Intel e1000 NIC or an IDE disk controller. The guest loads its standard driver for that device. Every I/O operation the guest driver issues is intercepted by the hypervisor, translated into the appropriate operation on the underlying host hardware, executed, and the result returned to the guest.
+
+This is maximally compatible — any OS with a driver for the emulated device works out of the box — but also the slowest path. Each I/O operation crosses the VM boundary multiple times and involves the hypervisor's device emulation layer.
+
+### Paravirtualised Drivers
+
+In paravirtual I/O, the guest is aware it is running in a VM. It loads a special driver that communicates directly with the hypervisor using an efficient shared-memory interface, bypassing device emulation entirely.
+
+- **VMware** uses **VMware Tools** drivers: VMXNET3 (network) and PVSCSI (storage). A VM with VMware Tools installed uses these instead of the emulated e1000 NIC and LSI controller. Throughput and CPU efficiency improve substantially.
+- **KVM/QEMU** uses the **Virtio** framework — an open standard for paravirtual drivers. `virtio-net` for networking, `virtio-scsi` or `virtio-blk` for storage. All modern Linux kernels ship with Virtio drivers built in. Windows guests require the Virtio driver package from Red Hat.
+- **Xen** uses its own **PVOPS** (paravirtual operations) driver model in dom0/domU.
+
+The performance improvement of paravirtualised drivers over emulated devices is substantial — particularly for network-intensive workloads, where emulated NIC overhead can consume 20–30% of a CPU core for high-throughput traffic.
+
+### PCI Passthrough and SR-IOV
+
+At the far end of the performance spectrum, **PCI passthrough** gives a guest direct, exclusive access to a physical PCIe device. The hypervisor uses the CPU's IOMMU (Intel VT-d, AMD-Vi) to map the device's DMA transactions directly to the guest's physical memory range, preventing it from corrupting other VMs' memory.
+
+The guest loads the native driver for the device and communicates with it directly — zero hypervisor involvement in the data path. Performance is indistinguishable from bare metal.
+
+The limitation: the device is exclusive to one VM. For GPUs and high-frequency trading NICs this is acceptable. For general networking, sharing one physical NIC across many VMs through passthrough is impractical.
+
+**SR-IOV (Single Root I/O Virtualisation)** is the hardware solution to this sharing problem. An SR-IOV capable NIC (e.g., Intel X710, Mellanox ConnectX) exposes itself as multiple **Virtual Functions (VFs)** — lightweight PCIe devices that each have their own dedicated hardware queues but share the physical NIC's MAC circuitry and uplink. Each VF can be passed through to a separate VM. The result: near-native NIC performance across many VMs simultaneously, with the hypervisor completely out of the data path.
+
+---
+
+## NUMA Awareness
+
+Modern servers have multiple CPU sockets, each with its own local RAM. The NUMA (Non-Uniform Memory Access) topology means that a CPU core accesses its local RAM in roughly 60–80 ns, but accessing RAM attached to a different socket crosses an interconnect (Intel QPI/UPI, AMD Infinity Fabric) and takes 120–200 ns — a 2x–3x penalty.
+
+A hypervisor that ignores NUMA topology will routinely schedule a VM's vCPUs on one socket while its memory resides on another, cutting memory bandwidth roughly in half. Enterprise hypervisors (ESXi, Hyper-V, KVM) are NUMA-aware:
+
+- VMs are pinned to a NUMA node where possible — vCPUs and RAM allocated on the same physical socket.
+- Large VMs that span multiple NUMA nodes (e.g., a 48 vCPU VM on a 2-socket 28-core host) are interleaved deliberately across both nodes to balance the penalty.
+- vNUMA exposes the host's NUMA topology to the guest OS, allowing memory-intensive workloads (databases, JVMs) to optimise their own allocations.
+
+For any performance-sensitive VM (databases, in-memory caches, high-throughput network functions), NUMA alignment is worth verifying explicitly.
+
+---
+
+## Live Migration
+
+One of the highest-value capabilities enabled by hypervisors is the ability to move a running VM from one physical host to another without shutting it down. This underpins maintenance operations, load balancing, and disaster avoidance.
+
+The fundamental challenge is memory: the VM is running, modifying its own memory while the migration is in progress. A naive approach — pause the VM, copy all RAM, resume on the destination — causes downtime proportional to the VM's memory size. For a 64 GB VM on a 10 Gb/s link, that is roughly 51 seconds of downtime. Unacceptable.
+
+**Pre-copy migration** (the approach used by VMware vMotion, Hyper-V Live Migration, and KVM live migration):
+
+<FlowDiagram
+  parties={["Source Host", "Destination Host"]}
+  steps={[
+    { from: "Source Host", to: "Destination Host", label: "Iterative memory copy (rounds 1–N)", sub: "VM continues running; dirty pages tracked" },
+    { from: "Source Host", to: "Destination Host", label: "Send remaining dirty pages", sub: "VM paused briefly during final round" },
+    { from: "Source Host", to: "Destination Host", label: "Transfer CPU state, device state", sub: "VMCS/register state" },
+    { from: "Destination Host", to: "Source Host", label: "Migration complete — resume on destination", sub: "ARP announcement updates network" },
+  ]}
+/>
+
+1. **Warm-up phase**: Copy all guest memory pages to the destination while the VM keeps running. Track every page the running VM writes (dirty pages).
+2. **Iterative rounds**: In subsequent rounds, copy only the dirty pages — those written since the last copy. Each round is smaller if the VM's write rate is lower than network bandwidth.
+3. **Stop-and-copy**: When the dirty set is small enough (hypervisor-specific threshold, typically a few hundred MB), pause the VM, copy the remaining dirty pages, transfer CPU register state and device state.
+4. **Resume**: The VM starts on the destination. A gratuitous ARP updates the network fabric with the VM's MAC and new location.
+
+Total downtime is typically under 1 second — the duration of the final stop-and-copy phase.
+
+**Post-copy migration** reverses the approach: move the CPU state first and resume the VM on the destination immediately, then pull memory pages from the source on-demand as the VM faults on them. This minimises the blackout window to near-zero but makes the VM temporarily dependent on the network link to the source — a link failure during post-copy corrupts the VM.
+
+---
+
+## Common Scenarios
+
+**Maintenance with zero downtime**: An ESXi host needs a firmware update. DRS automatically vMotions all running VMs to other hosts in the cluster. The host enters maintenance mode. Update applied, host rebooted, VMs migrated back. No guest ever goes offline.
+
+**CPU overcommit**: 10 VMs each configured with 8 vCPUs on a host with 16 physical cores (32 threads). Total vCPUs: 80. The scheduler runs them round-robin, assigning physical CPU time to whichever vCPUs are actively executing. If the workloads are not CPU-saturated simultaneously — typical for application servers with periodic activity — this works fine. Under sustained simultaneous load, vCPU ready time rises and latency increases.
+
+**Memory pressure**: Total configured VM RAM exceeds physical RAM. The hypervisor invokes the balloon driver on the least-active VM, reclaiming 4 GB. Another VM is swapping to disk. The administrator identifies the swap storm via hypervisor metrics and either migrates a VM to a less-loaded host or adds RAM.
+
+**PCI passthrough for GPU**: A machine learning VM requires a dedicated NVIDIA A100. The GPU is passed through via IOMMU. The VM loads the NVIDIA driver and sees the GPU directly. vCPUs on the same NUMA node as the GPU's PCIe slot avoid cross-node DMA latency.
+
+---
+
+## Comparison
+
+### Type 1 vs Type 2
+
+| Property | Type 1 (Bare-Metal) | Type 2 (Hosted) |
+|---|---|---|
+| Hardware access | Direct | Via host OS |
+| Performance overhead | Very low (~1–3%) | Moderate (5–15%+) |
+| Boot sequence | Hypervisor loads from firmware | Host OS boots first |
+| VM isolation | Hardware-enforced | Host OS process isolation |
+| Primary use case | Production servers, cloud | Dev workstations, labs |
+| Examples | ESXi, KVM, Hyper-V, Xen | VirtualBox, VMware Workstation, QEMU (no KVM) |
+
+### KVM vs ESXi vs Hyper-V (High Level)
+
+| Property | KVM | ESXi | Hyper-V |
+|---|---|---|---|
+| Architecture | Linux kernel module | Proprietary VMkernel | Windows root partition |
+| Management plane | libvirt, oVirt, OpenStack, Proxmox | vCenter Server | SCVMM, Windows Admin Center |
+| Live migration | KVM live migration (shared storage) | vMotion (shared or vSAN) | Live Migration (cluster or S2D) |
+| Hyper-converged storage | Ceph, GlusterFS | vSAN | Storage Spaces Direct |
+| Licensing | Free (open source) | Paid (VMware/Broadcom) | Included with Windows Server |
+| Ecosystem | Linux/open source | Enterprise VMware stack | Microsoft/Windows ecosystem |
+| Typical environment | Cloud providers, Linux shops | Enterprise data centres | Windows Server shops |
+
+---
+
+## References
+
+- Intel. *Intel 64 and IA-32 Architectures Software Developer's Manual*, Volume 3C — System Programming Guide, VMX chapter. [intel.com](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
+- AMD. *AMD64 Architecture Programmer's Manual*, Volume 2 — System Programming, SVM chapter. [amd.com](https://www.amd.com/en/support/tech-docs)
+- Popek, G. J. & Goldberg, R. P. (1974). *Formal Requirements for Virtualizable Third Generation Architectures.* CACM 17(7). The theoretical foundation for hardware-assisted virtualisation.
+- VMware. *ESXi and vCenter Server Documentation*. [docs.vmware.com](https://docs.vmware.com/)
+- KVM. *Kernel-based Virtual Machine*. [linux-kvm.org](https://www.linux-kvm.org/)
+- Barham, P. et al. (2003). *Xen and the Art of Virtualization.* ACM SOSP '03. The original Xen paper covering paravirtualisation design.

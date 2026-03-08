@@ -1,0 +1,212 @@
+---
+title: "Entra ID — Microsoft's Cloud Identity Platform"
+category: "identity"
+topic: "entra-id"
+summary: "Entra ID (formerly Azure Active Directory) is Microsoft's cloud-based identity and access management service. It is not simply 'AD in the cloud' — it has a fundamentally flat structure with no OUs, uses OAuth 2.0 and OIDC instead of Kerberos, and is built around modern authentication concepts like conditional access and identity protection."
+tags: ["identity", "entra-id", "azure-ad", "oauth2", "oidc", "saml", "conditional-access", "mfa"]
+order: 2
+draft: false
+---
+
+## Overview
+
+Entra ID (rebranded from Azure Active Directory in 2023) is Microsoft's identity platform for the cloud era. It provides authentication and authorisation for Microsoft 365, Azure, and thousands of third-party SaaS applications. Virtually every organisation using Microsoft 365 has an Entra ID tenant, whether they know it or not.
+
+The most important thing to understand about Entra ID is what it is **not**: it is not a domain controller, it does not speak Kerberos to cloud applications, it cannot apply Group Policy, and it has no concept of Organisational Units. The architecture is fundamentally different from on-premises Active Directory, designed for a world where applications are accessed over HTTPS rather than SMB, and where identity must work across the public internet without a VPN.
+
+Where Active Directory was built around LDAP and Kerberos for an intranet, Entra ID is built around OAuth 2.0, OpenID Connect (OIDC), and SAML for the internet. The mental model shift: instead of a user proving identity to a domain controller and receiving a ticket to access a file server, a user proves identity to Entra ID and receives a token that a web application accepts.
+
+---
+
+## The Tenant
+
+The **tenant** is the top-level container in Entra ID — roughly analogous to a forest in on-premises AD, but without the nested domain structure. Every organisation gets exactly one tenant (identified by a globally unique GUID and one or more domain names). All users, groups, applications, and policies exist within a tenant.
+
+A tenant has one or more **verified domains**. The initial domain is always `<something>.onmicrosoft.com` — a Microsoft-managed domain. Organisations add their own domains (e.g., `nakamas-it.com`) and verify ownership via DNS TXT record. Once verified, users can sign in with `user@nakamas-it.com` instead of `user@nakamas-it.onmicrosoft.com`.
+
+Tenant isolation is a core security property: one tenant cannot see or access objects in another tenant without explicit cross-tenant configuration (B2B collaboration, cross-tenant sync, or external guest accounts).
+
+---
+
+## Directory Objects
+
+Entra ID stores several types of objects, each serving a distinct role in the identity model.
+
+### Users
+
+User objects represent people (members) or external collaborators (guests). Member users are created directly in the tenant or synced from on-premises AD. Guest users are invited from other tenants or external email addresses (B2B collaboration) — they authenticate with their home identity provider and receive limited access to the inviting tenant's resources.
+
+Key user attributes: `userPrincipalName` (the sign-in identifier), `displayName`, `mail`, `jobTitle`, `department`, `assignedLicenses`.
+
+### Groups
+
+Groups in Entra ID serve access control and license assignment. Two creation types: **Assigned** (membership managed manually or via API) and **Dynamic** (membership calculated automatically by a rule on user attributes, e.g., all users where `department eq "Engineering"`).
+
+As with on-premises AD: **Security groups** are used in access control; **Microsoft 365 groups** combine a security group with a shared mailbox, calendar, SharePoint site, and Teams workspace.
+
+### Service Principals
+
+A **Service Principal** is the runtime identity of an application within a specific tenant. When an application is registered in Entra ID (the App Registration), it creates an **Application object** — the global definition of the application. When that application is consented to by a tenant, a **Service Principal** is created in that tenant — the local identity the application uses to authenticate and request access.
+
+Think of it this way: the App Registration is the blueprint; the Service Principal is the instance.
+
+### Managed Identities
+
+A **Managed Identity** is a special type of service principal that Azure manages automatically — it has no password or certificate that a developer must rotate. There are two kinds:
+
+- **System-assigned**: tied to a specific Azure resource (VM, Function App, Logic App). Created and deleted with the resource.
+- **User-assigned**: an independent resource that can be assigned to one or more Azure resources. Lifecycle is independent of any single resource.
+
+Managed Identities eliminate the credential management problem for workloads running in Azure: a VM with a managed identity can authenticate to Key Vault, Storage, or any other Entra ID-protected resource without storing a secret.
+
+### App Registrations
+
+An **App Registration** defines an application's identity in Entra ID. It specifies:
+- The application's client ID (a UUID used to identify the app in auth flows)
+- Redirect URIs (where tokens are delivered after auth)
+- **API permissions**: what APIs the app can call, with what scopes
+- **Certificates and secrets**: credentials the app uses to authenticate to Entra ID as itself (for daemon/server flows)
+- **Token configuration**: which claims are included in issued tokens
+
+**Permissions** come in two kinds:
+- **Delegated permissions**: the app acts on behalf of a signed-in user. The effective access is the intersection of what the user is allowed and what the app requests.
+- **Application permissions**: the app acts as itself, with no signed-in user. Used for background services and daemons. Requires admin consent.
+
+**Consent** is the mechanism by which permissions are granted. Users can consent to delegated permissions that affect only their own data; admin consent is required for application permissions and for any delegated permission that affects all users in the tenant.
+
+---
+
+## Authentication Protocols
+
+Entra ID supports four authentication protocols, each suited to different application types and eras.
+
+### OAuth 2.0
+
+OAuth 2.0 is an authorisation framework, not an authentication protocol. It defines how an application can obtain an **access token** that grants it permission to call an API on behalf of a user (or as itself). The access token is a bearer token — whoever holds it can use it. Entra ID issues JWT (JSON Web Token) access tokens containing claims about the subject and the granted scopes.
+
+Common OAuth 2.0 flows used with Entra ID:
+- **Authorization Code Flow** (+ PKCE): for user-interactive apps (web apps, SPAs, mobile). The user signs in, an authorization code is returned to the app, the app exchanges the code for tokens. PKCE (Proof Key for Code Exchange) protects against code interception attacks.
+- **Client Credentials Flow**: for daemon/service-to-service scenarios with no signed-in user. The app authenticates with its own credentials and receives an access token for the target API.
+- **On-Behalf-Of Flow**: a middle-tier API receives a token from a client, then exchanges it for a token to call a downstream API on behalf of the original user.
+
+### OpenID Connect (OIDC)
+
+OIDC is a thin identity layer on top of OAuth 2.0. It adds the concept of an **ID token** — a JWT containing claims about the authenticated user (name, email, object ID, tenant). Where OAuth 2.0 answers "what is this app allowed to do?", OIDC answers "who is this user?"
+
+Modern web applications use the Authorization Code Flow with both OAuth 2.0 and OIDC simultaneously: the ID token establishes the user's identity in the app session; the access token is used to call APIs.
+
+### SAML 2.0
+
+SAML (Security Assertion Markup Language) is the older XML-based federation protocol that predates OAuth 2.0. It is widely used for enterprise SSO to applications that predate the modern OAuth ecosystem — Salesforce, ServiceNow, many on-premises applications fronted by a WAF.
+
+In a SAML flow, Entra ID acts as the **Identity Provider (IdP)** and the application is the **Service Provider (SP)**. The user's browser is redirected to Entra ID, authenticates, and is redirected back to the application with a signed XML assertion. The SP verifies the assertion's signature against Entra ID's public certificate.
+
+### WS-Federation
+
+WS-Federation is the Microsoft/IBM predecessor to SAML and is used primarily for legacy Microsoft applications and Active Directory Federation Services (ADFS) integration. Its usage is declining; new integrations should use OIDC or SAML.
+
+---
+
+## Conditional Access
+
+Conditional Access is Entra ID's policy engine — the mechanism by which an organisation applies access controls based on context. It operates on the principle: **evaluate signals, enforce controls**.
+
+A Conditional Access policy has two parts:
+
+**Assignments** — who and what the policy applies to:
+- Users or groups (include/exclude)
+- Cloud apps or actions (specific apps, all apps, user actions like device registration)
+- Conditions: sign-in risk level, user risk level, device platform, location (named IP ranges, compliant locations), client app type
+
+**Access controls** — what happens when the policy matches:
+- **Grant**: require MFA, require compliant device (Intune enrolled + compliant), require Entra ID joined device, require approved client app, require terms of use acceptance
+- **Block**: deny access entirely
+- **Session**: limit session duration, require sign-in frequency, apply app-enforced restrictions (e.g., block download in SharePoint from unmanaged devices)
+
+Policies are evaluated at sign-in time. Multiple policies can apply simultaneously — the most restrictive result wins. A single failed condition (e.g., device is not compliant) blocks access even if all other conditions are met.
+
+Common policy patterns:
+- Require MFA for all users when signing in from outside named corporate IP ranges
+- Block access from countries the organisation does not operate in
+- Require compliant device for access to sensitive SharePoint sites
+- Block legacy authentication protocols (SMTP AUTH, IMAP, POP3) that cannot perform MFA
+
+---
+
+## Identity Protection
+
+Entra ID Identity Protection (requires P2 licence) is a risk engine that continuously evaluates sign-in events and user behaviour for indicators of compromise. It produces two risk scores:
+
+**Sign-in risk**: the probability that a specific sign-in was not performed by the account owner. Signals include: atypical travel (sign-in from New York, then Tokyo 30 minutes later), anonymous IP address, malware-linked IP, unfamiliar sign-in properties (new ASN, device, location), leaked credentials detected in breach data.
+
+**User risk**: an aggregate score representing the probability that a user account is compromised. It accumulates over time — confirmed compromised credentials, multiple risky sign-ins, suspicious activity patterns.
+
+Risk levels are **Low**, **Medium**, and **High**. These risk signals can be consumed by Conditional Access policies:
+- Sign-in risk ≥ Medium → require MFA
+- User risk = High → require password reset before allowing access
+
+This creates a responsive, context-aware security posture: low-risk sign-ins from known devices in known locations proceed without friction; high-risk sign-ins are challenged or blocked in real time.
+
+---
+
+## Licences
+
+Entra ID features are gated by licence tier:
+
+| Tier | Included with | Key capabilities |
+|------|--------------|-----------------|
+| **Free** | Any Microsoft Online service | Basic user/group management, SSO to up to 10 apps per user, B2B collaboration, basic MFA (per-user), Entra ID Join |
+| **P1** | Microsoft 365 E3, EMS E3, or standalone | Conditional Access (all features), Seamless SSO, Self-Service Password Reset (SSPR) for cloud users, dynamic groups, hybrid identity (Entra Connect), SSPR writeback to on-prem AD |
+| **P2** | Microsoft 365 E5, EMS E5, or standalone | Everything in P1 + Identity Protection (risk-based CA), Privileged Identity Management (PIM), access reviews |
+
+The licence tier determines what is available at a policy level — for example, risk-based Conditional Access policies (sign-in risk ≥ Medium → require MFA) are a P2 feature. Without P2, you can still require MFA via CA, but not risk-responsive MFA.
+
+---
+
+## Entra ID Roles
+
+Entra ID has its own role-based access control system, separate from Azure RBAC (which governs Azure resources like VMs and storage accounts). Entra ID roles control who can manage the directory itself.
+
+Key built-in roles:
+
+| Role | Scope of permissions |
+|------|---------------------|
+| **Global Administrator** | Full control of all Entra ID features and all Microsoft 365 services. The highest-privilege role — should be minimally assigned and protected with PIM. |
+| **User Administrator** | Create and manage users and groups; reset passwords for non-admin users; manage licence assignments. |
+| **Authentication Administrator** | View and manage authentication methods for non-admin users; reset passwords; trigger re-registration of MFA. |
+| **Conditional Access Administrator** | Create, modify, and delete Conditional Access policies. |
+| **Application Administrator** | Manage all app registrations and enterprise applications (service principals). Can grant admin consent for application permissions. |
+| **Security Administrator** | Manage Identity Protection policies, Conditional Access, security reports, and Microsoft Defender. |
+| **Global Reader** | Read-only version of Global Administrator — can view all settings without modifying them. |
+
+Entra ID role assignments can be scoped to a single administrative unit (a subset of users/groups), reducing blast radius compared to tenant-wide assignment. Privileged Identity Management (PIM) allows just-in-time elevation — roles are assigned as eligible, and a user must explicitly activate the role (with MFA and optional justification) to use it, with a time-limited window.
+
+---
+
+## Entra ID vs On-Premises Active Directory
+
+| Dimension | On-Premises AD | Entra ID |
+|---|---|---|
+| **Primary protocol** | Kerberos + LDAP | OAuth 2.0 + OIDC + SAML |
+| **Hierarchy** | Forest → Domain → OU → Object | Tenant → (flat) → Object |
+| **Organisational units** | Yes — full OU tree for delegation and GPO | No OUs — administrative units are limited flat containers |
+| **Group Policy** | Yes — ADMX-based, applied at boot/logon via SYSVOL | No — replaced by Intune configuration profiles and compliance policies |
+| **Computer management** | GPO, scripts, SCCM | Intune MDM/Autopilot |
+| **Trust model** | Domain and forest trusts, Kerberos transitive trust | B2B guest access, cross-tenant sync, external identity providers |
+| **Authentication scope** | Domain-joined Windows systems and domain-aware apps | Any app that supports OAuth/OIDC/SAML over HTTPS |
+| **Self-service password reset** | Not built-in (requires third-party or writeback) | Built-in SSPR (P1+) |
+| **Conditional access** | AD FS claims rules (complex) | Entra CA policies (native, P1+) |
+| **MFA** | Requires AD FS or third-party | Native (free tier: per-user MFA; P1+: CA-based MFA) |
+| **Internet-facing by design** | No — requires VPN or AD FS to extend | Yes — designed for internet access |
+
+---
+
+## References
+
+- [Microsoft Docs — What is Microsoft Entra ID?](https://learn.microsoft.com/en-us/entra/fundamentals/whatis)
+- [Microsoft Identity Platform — OAuth 2.0 and OIDC](https://learn.microsoft.com/en-us/entra/identity-platform/v2-protocols)
+- [Microsoft Docs — What is Conditional Access?](https://learn.microsoft.com/en-us/entra/identity/conditional-access/overview)
+- [Microsoft Docs — What is Identity Protection?](https://learn.microsoft.com/en-us/entra/id-protection/overview-identity-protection)
+- [Microsoft Docs — Entra ID built-in roles](https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/permissions-reference)
+- [RFC 6749 — The OAuth 2.0 Authorization Framework](https://www.rfc-editor.org/rfc/rfc6749)
+- [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html)
