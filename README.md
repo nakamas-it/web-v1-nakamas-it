@@ -1,43 +1,70 @@
-# Astro Starter Kit: Minimal
+# Nakamas IT — Personal Website
 
-```sh
-npm create astro@latest -- --template minimal
+Personal site for [Gianfranco Cisneros](https://www.linkedin.com/in/gianfranco-cisneros-barreiro/), combining a professional profile with a networking protocol educational library ("the School").
+
+**Live site**: https://nakamas-it.github.io/web-v1-nakamas-it/
+
+## Stack
+
+- **[Astro](https://astro.build)** — static site generator with Content Collections
+- **[Tailwind CSS v4](https://tailwindcss.com)** — utility-first styling
+- **MDX** — protocol articles written in Markdown with support for embedded Astro components
+- **GitHub Actions** — automatic deploy to GitHub Pages on every push to `main`
+
+## Project Structure
+
+```
+src/
+  content/
+    school/
+      layer3/       ← one .mdx file per protocol article
+  layouts/
+    Layout.astro    ← shared HTML shell, nav, footer
+  pages/
+    index.astro                        ← home / about
+    school/
+      index.astro                      ← library index (grouped by layer)
+      [layer]/
+        index.astro                    ← layer index (e.g. /school/layer3/)
+        [slug].astro                   ← individual article (e.g. /school/layer3/dhcp/)
+  styles/
+    global.css
+  content.config.ts  ← Content Collections schema
+.github/
+  workflows/
+    deploy.yml      ← build + deploy to GitHub Pages
 ```
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+## Adding a Protocol Article
 
-## 🚀 Project Structure
+Create a new `.mdx` file under `src/content/school/<layer>/`:
 
-Inside of your Astro project, you'll see the following folders and files:
+```mdx
+---
+title: "DNS — Recursive Resolution"
+layer: "layer3"
+protocol: "dns"
+summary: "How a resolver walks the DNS hierarchy to turn a hostname into an IP."
+tags: ["dns", "udp", "layer3"]
+order: 2
+draft: false
+---
 
-```text
-/
-├── public/
-├── src/
-│   └── pages/
-│       └── index.astro
-└── package.json
+## Overview
+...
 ```
 
-Astro looks for `.astro` or `.md` files in the `src/pages/` directory. Each page is exposed as a route based on its file name.
+The page will be available at `/school/layer3/dns/` automatically — no routing changes needed.
 
-There's nothing special about `src/components/`, but that's where we like to put any Astro/React/Vue/Svelte/Preact components.
+Valid `layer` values: `layer2`, `layer3`, `application`.
+Set `draft: true` to exclude an article from the production build.
 
-Any static assets, like images, can be placed in the `public/` directory.
+## Commands
 
-## 🧞 Commands
+Run from this directory (`site/`):
 
-All commands are run from the root of the project, from a terminal:
-
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `npm install`             | Installs dependencies                            |
-| `npm run dev`             | Starts local dev server at `localhost:4321`      |
-| `npm run build`           | Build your production site to `./dist/`          |
-| `npm run preview`         | Preview your build locally, before deploying     |
-| `npm run astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `npm run astro -- --help` | Get help using the Astro CLI                     |
-
-## 👀 Want to learn more?
-
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+| Command | Action |
+|---|---|
+| `npm run dev` | Start dev server at `localhost:4321` |
+| `npm run build` | Build to `./dist/` |
+| `npm run preview` | Preview production build locally |
