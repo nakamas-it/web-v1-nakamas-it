@@ -5,43 +5,64 @@ const base = import.meta.env.BASE_URL;
 
 const experience = [
   {
-    role: 'Internal IT — Team Lead',
-    company: 'Confidential',
-    period: '~2022 – present',
-    desc: `Partnered with my manager to build an IT department from the ground up, taking full ownership of everything the previous MSP had been handling — helpdesk, on-call, projects, NOC, and SOC. Implemented key platforms including N-Central (RMM), ITGlue (documentation), and Huntress (SOC/EDR), resulting in significant cost savings for the organization and a measurably stronger security posture.`,
+    company: 'Nakamas IT',
+    type: 'Permanent Full-time',
+    location: 'Vancouver, BC, Canada',
+    roles: [
+      { title: 'Hackerman', period: 'Jan 2026 – Present' },
+    ],
   },
   {
-    role: 'Systems Administrator',
-    company: 'MSP',
-    period: '~2019 – 2022',
-    desc: `Promoted from support technician after one year. Led 100+ projects over three years including new office setups, Microsoft 365 and Google Workspace tenant builds, email migrations, cloud migrations (on-prem to cloud), server hardware refreshes, patch management, and incident response. Traveled across BC to onboard new clients and commission major network infrastructure on-site.`,
+    company: "Nature's Path Foods",
+    type: 'Permanent Full-time',
+    location: 'Hybrid · BC, Canada',
+    roles: [
+      { title: 'IT Operations Manager', period: 'Mar 2026 – Present' },
+      { title: 'Systems Administrator', period: 'Nov 2024 – Mar 2026' },
+    ],
   },
   {
-    role: 'Support Technician',
-    company: 'MSP',
-    period: '~2018 – 2019',
-    desc: `First role in Canada at a Microsoft/Windows-focused MSP. Supported a portfolio of clients running Hyper-V, Windows Server, Active Directory, Group Policy, and Microsoft 365. Built foundational MSP experience before being promoted to Systems Administrator.`,
+    company: 'Quicktech',
+    type: 'Permanent Full-time',
+    location: 'Vancouver, BC, Canada',
+    roles: [
+      { title: 'Systems Administrator', period: 'Jan 2022 – Nov 2024' },
+      { title: 'Support Technician', period: 'Nov 2020 – Jan 2022' },
+    ],
   },
   {
-    role: 'Software Developer',
-    company: 'EdTech Company',
-    period: '~2016 – 2017',
-    desc: `Built the HR module for a school management web application used by teachers, students, and parents. The module handled time-off requests according to school-specific rules. Stack: C#, ASP.NET MVC5, SQL Server.`,
+    company: 'British Columbia Institute of Technology',
+    type: 'Contract Part-time',
+    location: 'Vancouver, BC, Canada',
+    roles: [
+      { title: 'Course Instructor', period: 'Jan 2023 – Apr 2023' },
+      { title: 'Teacher Assistant', period: 'Oct 2022 – Jan 2023' },
+    ],
   },
   {
-    role: 'IT Analyst — Computer Lab',
-    company: 'University',
-    period: 'During undergrad',
-    desc: `Supported the engineering faculty's computer lab while completing my degree. Responsibilities included Active Directory administration, laptop imaging and onboarding, and student support for lab access throughout the semester.`,
+    company: 'Temenos',
+    type: 'Permanent Full-time',
+    location: 'Quito, Ecuador',
+    roles: [
+      { title: 'Technical Consultant', period: 'Mar 2018 – Dec 2018' },
+    ],
   },
-];
-
-const certs = [
-  { label: 'CCNA', issuer: 'Cisco' },
-  { label: 'CCNP curriculum (SWITCH, ROUTE, TSHOOT)', issuer: 'Cisco' },
-  { label: 'MCSA — Windows Server', issuer: 'Microsoft' },
-  { label: 'M.Sc. Cybersecurity', issuer: 'University' },
-  { label: 'B.Sc. Computer Science', issuer: 'University' },
+  {
+    company: 'Conectividad Global SA',
+    type: 'Permanent Full-time',
+    location: 'Quito, Ecuador',
+    roles: [
+      { title: 'Full Stack Developer', period: 'Aug 2017 – Dec 2018' },
+    ],
+  },
+  {
+    company: 'Pontificia Universidad Católica del Ecuador',
+    type: 'Contract Part-time',
+    location: 'Ecuador',
+    roles: [
+      { title: 'IT Technical Assistant', period: 'Jan 2015 – Jun 2017' },
+    ],
+  },
 ];
 ---
 
@@ -51,7 +72,9 @@ const certs = [
   <section class="mb-20">
     <p class="font-mono text-cyan-400 text-sm mb-3">Hello, I'm</p>
     <h1 class="text-5xl font-bold text-slate-100 mb-2">Gianfranco Cisneros</h1>
-    <p class="font-mono text-slate-500 text-sm mb-6">aka "hackerman"</p>
+    <p class="font-mono text-slate-500 text-sm mb-6">
+      Hackerman, of House Nakamas IT. First of his name. Admin of the systems, and the techs, and protector of the realm.
+    </p>
     <p class="text-xl text-slate-400 max-w-2xl leading-relaxed">
       Technology enthusiast, systems administrator, and networking geek based in Canada.
       I run <span class="text-slate-200 font-medium">Nakamas IT</span> and use this site
@@ -89,28 +112,21 @@ const certs = [
     </h2>
     <div class="text-slate-400 space-y-4 leading-relaxed max-w-3xl">
       <p>
-        I started out with a Bachelor's in Computer Science — heavily programming-focused —
-        but quickly gravitated toward the infrastructure side of things. While still in university
-        I was running the engineering faculty's computer lab: imaging laptops, managing Active Directory,
-        and keeping students connected throughout the semester.
+        Nakamas IT started as a personal project to understand how IT actually works in a business
+        context — not just in theory, but by deploying and running the same types of workloads that
+        organizations rely on every day.
       </p>
       <p>
-        After graduating I moved to Canada, earned a Master's degree in Cybersecurity, and pursued
-        Cisco certifications — picking up the CCNA and working through the full CCNP curriculum
-        (SWITCH, ROUTE, and TSHOOT). Around the same time I got certified in Microsoft technologies
-        (MCSA Windows Server) and spent a lot of hours in Hyper-V labs building out Active Directory
-        forests, Group Policy structures, Certificate Authorities, and Storage Spaces.
+        What began as a home lab has gradually evolved into something closer to a small production
+        environment. That shift has been one of the most valuable learning experiences I've had,
+        because running something for real — with real consequences when it breaks — teaches you
+        things that no textbook lab ever could.
       </p>
       <p>
-        That led to a career at a Microsoft-focused MSP, where I grew from support technician to
-        systems administrator and eventually took on more than 100 projects — from wiring up
-        brand-new offices across BC to migrating entire organizations to Microsoft 365 or the cloud.
-        After three years I moved into internal IT, where my manager and I built a department from
-        scratch, displaced the MSP entirely, and saved the company millions in the process.
-      </p>
-      <p>
-        This site — specifically the School section — is my way of documenting the things I wish
-        had been explained to me this clearly when I was starting out.
+        This site is the natural extension of that. The School section exists to share what I've
+        learned through those real-world deployments, explained in a way that connects the dots
+        between how a protocol works on paper and what you actually see in a packet capture or a
+        production incident.
       </p>
     </div>
   </section>
@@ -162,28 +178,19 @@ const certs = [
     <div class="space-y-8 max-w-3xl">
       {experience.map(job => (
         <div class="border-l-2 border-slate-700 pl-5">
-          <div class="flex items-baseline justify-between gap-4 flex-wrap">
-            <h3 class="font-semibold text-slate-100">{job.role}</h3>
-            <span class="font-mono text-xs text-slate-500 shrink-0">{job.period}</span>
+          <div class="flex items-baseline justify-between gap-4 flex-wrap mb-1">
+            <h3 class="font-semibold text-slate-100">{job.company}</h3>
+            <span class="font-mono text-xs text-slate-500 shrink-0">{job.type}</span>
           </div>
-          <p class="text-cyan-400 text-sm mb-2">{job.company}</p>
-          <p class="text-slate-400 text-sm leading-relaxed">{job.desc}</p>
-        </div>
-      ))}
-    </div>
-  </section>
-
-  <!-- Certifications -->
-  <section class="mb-16">
-    <h2 class="text-2xl font-bold text-slate-100 mb-6 flex items-center gap-3">
-      <span class="w-8 h-px bg-cyan-400 inline-block"></span>
-      Certifications & Education
-    </h2>
-    <div class="flex flex-wrap gap-3">
-      {certs.map(cert => (
-        <div class="bg-slate-900 border border-slate-800 rounded-lg px-4 py-3">
-          <p class="text-slate-100 text-sm font-medium">{cert.label}</p>
-          <p class="text-slate-500 text-xs font-mono mt-0.5">{cert.issuer}</p>
+          <p class="text-slate-500 text-xs font-mono mb-3">{job.location}</p>
+          <div class="space-y-2">
+            {job.roles.map(role => (
+              <div class="flex items-baseline justify-between gap-4 flex-wrap">
+                <span class="text-cyan-400 text-sm font-medium">{role.title}</span>
+                <span class="font-mono text-xs text-slate-500 shrink-0">{role.period}</span>
+              </div>
+            ))}
+          </div>
         </div>
       ))}
     </div>
