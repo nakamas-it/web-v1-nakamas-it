@@ -2,19 +2,19 @@
 
 Personal site for [Gianfranco Cisneros](https://www.linkedin.com/in/gianfranco-cisneros-barreiro/), combining a professional profile with a networking protocol educational library called **The School**.
 
-**Live site**: https://nakamas-it.github.io/web-v1-nakamas-it/
+**Live site**: https://nakamas-it.com
 
 ---
 
 ## What's Inside
 
-### Home (`/`)
-Bio, work experience, interests, and a contact form backed by Formspree.
+### Home (`/` and `/es/`)
+Bio, work experience, interests, and a contact form backed by Formspree. Available in English (`/`) and Spanish (`/es/`).
 
 ### The School (`/school/`)
 A protocol library covering how networking actually works — from the physics of copper and fiber at Layer 1 up through TCP, RTP, and application-layer signalling. Each article walks through packet structure, protocol mechanics, and real-world behaviour. Articles use custom Astro components (`PacketDiagram`, `FlowDiagram`) to render packet field diagrams and message-sequence charts inline.
 
-**Current coverage — 31 articles:**
+**Current coverage — 42 articles:**
 
 | Layer | Articles |
 |-------|----------|
@@ -22,15 +22,17 @@ A protocol library covering how networking actually works — from the physics o
 | Layer 2 — Data Link | Ethernet Frame, MAC Addressing, ARP, VLANs, STP, EtherChannel, CDP & LLDP, PPP |
 | Layer 3 — Network | IPv4, DHCP, Subnetting, DNS, ICMP, Static Routing, RIP, OSPF, BGP, NAT & PAT, IGMP |
 | Layer 4 — Transport | TCP, UDP, TCP vs UDP, Ports & Sockets, RTP |
+| Application Layer | HTTP & HTTPS, TLS & SSL, FTP/SFTP/FTPS, SSH, SMTP, IMAP & POP3, SNMP, NTP, LDAP, RADIUS, Syslog |
 
 ---
 
 ## Stack
 
-- **[Astro v5](https://astro.build)** — static site generator with Content Collections
+- **[Astro v5](https://astro.build)** — static site generator with Content Collections and built-in i18n
 - **[Tailwind CSS v4](https://tailwindcss.com)** + `@tailwindcss/typography` — utility-first styling with prose support for articles
 - **MDX** — protocol articles in Markdown with embedded Astro components
 - **[Formspree](https://formspree.io)** — contact form (no backend required)
+- **[Cloudflare](https://cloudflare.com)** — DNS, CDN, and TLS for `nakamas-it.com`
 - **GitHub Actions** — automatic deploy to GitHub Pages on every push to `main`
 
 ---
@@ -50,22 +52,27 @@ site/
         layer2/
         layer3/
         layer4/
-        application/       ← reserved for future articles
+        application/
     content.config.ts      ← Content Collections schema (validates frontmatter)
+    i18n/
+      ui.ts                ← EN/ES UI string translations
     layouts/
-      Layout.astro         ← shared HTML shell, sticky nav, footer
+      Layout.astro         ← shared HTML shell, sticky nav + EN/ES toggle, footer
     pages/
-      index.astro                        ← home page
+      index.astro                        ← home page (English, /)
+      es/
+        index.astro                      ← home page (Spanish, /es/)
       school/
         index.astro                      ← library index (2 cards per layer + "See all")
         [layer]/index.astro              ← layer index  e.g. /school/layer3/
         [layer]/[slug].astro             ← article page e.g. /school/layer3/dhcp/
     styles/
       global.css           ← Tailwind import + global text-align: justify
-  public/                  ← static assets (favicon, logo)
+  public/
+    CNAME                  ← nakamas-it.com (persists custom domain across deploys)
   .github/workflows/
     deploy.yml             ← build + deploy to GitHub Pages
-  astro.config.mjs         ← site base URL, Tailwind, MDX integrations
+  astro.config.mjs         ← site URL, base, i18n, Tailwind, MDX integrations
 ```
 
 ---
