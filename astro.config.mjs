@@ -6,8 +6,8 @@ import mdx from '@astrojs/mdx';
 
 // https://astro.build/config
 export default defineConfig({
-  site: 'https://nakamas-it.github.io',
-  base: '/web-v1-nakamas-it/',
+  site: 'https://nakamas-it.com',
+  base: '/',
 
   vite: {
     plugins: [tailwindcss()]
