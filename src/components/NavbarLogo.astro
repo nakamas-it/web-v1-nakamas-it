@@ -1,0 +1,198 @@
+---
+const base = import.meta.env.BASE_URL;
+---
+
+<a href={base} class="navbar-logo" aria-label="Nakamas IT — Home">
+  <!-- ── SHIP ICON (inline SVG keeps animations alive) ── -->
+  <svg
+    class="logo-ship"
+    width="52"
+    height="52"
+    viewBox="0 0 100 100"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    aria-hidden="true"
+  >
+    <defs>
+      <radialGradient id="nl-rBg" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="#00D4F5" stop-opacity="0.1"/>
+        <stop offset="100%" stop-color="#00D4F5" stop-opacity="0"/>
+      </radialGradient>
+      <linearGradient id="nl-hull" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#00D4F5" stop-opacity="0.28"/>
+        <stop offset="100%" stop-color="#00D4F5" stop-opacity="0.05"/>
+      </linearGradient>
+      <linearGradient id="nl-sailGold" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#F5A623"/>
+        <stop offset="100%" stop-color="#A05E00" stop-opacity="0.5"/>
+      </linearGradient>
+      <linearGradient id="nl-sailCyan" x1="1" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#00D4F5"/>
+        <stop offset="100%" stop-color="#005F75" stop-opacity="0.4"/>
+      </linearGradient>
+      <filter id="nl-glow">
+        <feGaussianBlur stdDeviation="1.5" result="b"/>
+        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+
+    <!-- circle bg -->
+    <circle cx="50" cy="50" r="48" fill="url(#nl-rBg)"/>
+    <circle cx="50" cy="50" r="48" fill="none" stroke="#182035" stroke-width="1.5"/>
+
+    <g transform="translate(4,1) scale(0.96)">
+      <!-- waves -->
+      <path d="M0,96 Q12,90 24,96 Q36,102 48,96 Q60,90 72,96 Q84,102 96,96"
+            stroke="#00D4F5" stroke-width="1.2" fill="none" opacity="0.45"/>
+
+      <!-- hull -->
+      <path d="M10,72 L16,92 Q33,100 48,100 Q63,100 80,92 L86,72 Z"
+            fill="url(#nl-hull)" stroke="#00D4F5" stroke-width="1.7"/>
+      <line x1="10" y1="72" x2="86" y2="72" stroke="#00D4F5" stroke-width="1.4" opacity="0.65"/>
+      <!-- prow -->
+      <path d="M80,92 L92,80 L86,72"
+            fill="#00D4F5" fill-opacity="0.1" stroke="#00D4F5" stroke-width="1.2"/>
+      <!-- portholes -->
+      <circle cx="30" cy="83" r="3"  fill="#06090F" stroke="#00D4F5" stroke-width="1.3"/>
+      <circle cx="30" cy="83" r="1.1" fill="#00D4F5"/>
+      <circle cx="48" cy="83" r="3"  fill="#06090F" stroke="#00D4F5" stroke-width="1.3"/>
+      <circle cx="48" cy="83" r="1.1" fill="#00D4F5"/>
+      <circle cx="66" cy="83" r="3"  fill="#06090F" stroke="#00D4F5" stroke-width="1.3"/>
+      <circle cx="66" cy="83" r="1.1" fill="#00D4F5"/>
+
+      <!-- mast -->
+      <line x1="48" y1="12" x2="48" y2="72" stroke="#00D4F5" stroke-width="2" opacity="0.75"/>
+
+      <!-- crow's nest -->
+      <rect x="40" y="60" width="16" height="6" rx="2"
+            fill="#06090F" stroke="#00D4F5" stroke-width="1.3"/>
+      <circle class="nl-ping1" cx="48" cy="63" r="2"
+              fill="none" stroke="#00D4F5" stroke-width="1.1"/>
+      <circle class="nl-ping2" cx="48" cy="63" r="2"
+              fill="none" stroke="#00D4F5" stroke-width="1.1"/>
+      <circle cx="48" cy="63" r="2" fill="#00D4F5" filter="url(#nl-glow)"/>
+
+      <!-- main sail (gold) -->
+      <path class="nl-sail-gold" d="M48,14 L84,32 L84,62 L48,62 Z"
+            fill="url(#nl-sailGold)" stroke="#F5A623" stroke-width="1.4" opacity="0.8"/>
+      <line x1="57" y1="30" x2="76" y2="38" stroke="#F5A623" stroke-width="0.75" opacity="0.5"/>
+      <line x1="57" y1="41" x2="76" y2="49" stroke="#F5A623" stroke-width="0.75" opacity="0.5"/>
+      <line x1="57" y1="52" x2="76" y2="58" stroke="#F5A623" stroke-width="0.75" opacity="0.5"/>
+
+      <!-- fore sail (cyan) -->
+      <path class="nl-sail-cyan" d="M48,20 L16,36 L16,62 L48,62 Z"
+            fill="url(#nl-sailCyan)" stroke="#00D4F5" stroke-width="1.2" opacity="0.65"/>
+      <line x1="39" y1="34" x2="22" y2="42" stroke="#00D4F5" stroke-width="0.7" opacity="0.5"/>
+      <line x1="39" y1="45" x2="22" y2="51" stroke="#00D4F5" stroke-width="0.7" opacity="0.5"/>
+
+      <!-- yard arm -->
+      <line x1="16" y1="36" x2="84" y2="36" stroke="#00D4F5" stroke-width="1" opacity="0.25"/>
+
+      <!-- flag -->
+      <g class="nl-flag">
+        <path d="M48,12 L68,16 L62,21 L48,21 Z" fill="#F5A623" opacity="0.95"/>
+      </g>
+
+      <!-- antenna -->
+      <line x1="48" y1="3" x2="48" y2="12" stroke="#00D4F5" stroke-width="1.2" opacity="0.55"/>
+      <circle cx="48" cy="3" r="2.2" fill="#06090F" stroke="#F5A623" stroke-width="1.5"/>
+      <circle class="nl-beacon" cx="48" cy="3" r="0.9" fill="#F5A623" filter="url(#nl-glow)"/>
+    </g>
+  </svg>
+
+  <!-- ── WORDMARK ── -->
+  <div class="logo-text">
+    <span class="logo-name">NAKAMAS <span class="logo-it">IT</span></span>
+    <span class="logo-tagline">Your Infrastructure Crew</span>
+  </div>
+</a>
+
+<style>
+  /* ── Layout ── */
+  .navbar-logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+    text-decoration: none;
+    transition: opacity 0.2s ease;
+  }
+  .navbar-logo:hover { opacity: 0.85; }
+
+  .logo-ship {
+    flex-shrink: 0;
+  }
+
+  .logo-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.05rem;
+    line-height: 1;
+  }
+
+  /* Primary name */
+  .logo-name {
+    font-family: 'Rajdhani', 'Segoe UI', sans-serif;
+    font-weight: 700;
+    font-size: 1.35rem;
+    letter-spacing: 0.08em;
+    color: #E8F0FE;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  /* IT badge */
+  .logo-it {
+    font-family: 'Space Mono', 'Courier New', monospace;
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: #00D4F5;
+    border: 1.2px solid #00D4F5;
+    border-radius: 4px;
+    padding: 1px 5px;
+    letter-spacing: 0.1em;
+    line-height: 1.6;
+    background: rgba(0, 212, 245, 0.08);
+  }
+
+  /* Tagline */
+  .logo-tagline {
+    font-family: 'Outfit', system-ui, sans-serif;
+    font-weight: 300;
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #4A6080;
+  }
+
+  /* ── Animations ── */
+  @keyframes nl-flag-wave {
+    0%, 100% { transform: rotate(-5deg); }
+    50%       { transform: rotate(5deg) translateX(2px); }
+  }
+  @keyframes nl-beacon-blink {
+    0%, 88%, 100% { opacity: 1; }
+    94%           { opacity: 0.1; }
+  }
+  @keyframes nl-sail-breathe {
+    0%, 100% { opacity: 0.8; }
+    50%       { opacity: 1; }
+  }
+  @keyframes nl-ping {
+    0%   { r: 2;  opacity: 0.9; }
+    100% { r: 9;  opacity: 0; }
+  }
+
+  .nl-flag      { transform-origin: 48px 14px; animation: nl-flag-wave 3.5s ease-in-out infinite; }
+  .nl-beacon    { animation: nl-beacon-blink 4s ease-in-out infinite; }
+  .nl-sail-gold { animation: nl-sail-breathe 3.5s ease-in-out infinite; }
+  .nl-sail-cyan { animation: nl-sail-breathe 3.5s ease-in-out 1s infinite; }
+  .nl-ping1     { animation: nl-ping 2.5s ease-out infinite; }
+  .nl-ping2     { animation: nl-ping 2.5s ease-out 1.25s infinite; }
+
+  /* ── Respect reduced motion ── */
+  @media (prefers-reduced-motion: reduce) {
+    .nl-flag, .nl-beacon, .nl-sail-gold,
+    .nl-sail-cyan, .nl-ping1, .nl-ping2 { animation: none; }
+  }
+</style>
