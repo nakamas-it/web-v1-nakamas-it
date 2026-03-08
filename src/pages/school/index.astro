@@ -7,6 +7,11 @@ const base = import.meta.env.BASE_URL;
 const allArticles = await getCollection('school', ({ data }) => !data.draft);
 
 const layerMeta: Record<string, { label: string; description: string; accent: string }> = {
+  layer1: {
+    label: 'Layer 1 — Physical',
+    description: 'Cables, signals, encoding, and the raw electrical or optical pulses that carry every bit across the wire.',
+    accent: 'text-orange-400 border-orange-800',
+  },
   layer2: {
     label: 'Layer 2 — Data Link',
     description: 'Ethernet frames, VLANs, STP, ARP, and how data travels within a broadcast domain.',
@@ -16,6 +21,11 @@ const layerMeta: Record<string, { label: string; description: string; accent: st
     label: 'Layer 3 — Network',
     description: 'IP addressing, DHCP, DNS, ICMP, and how packets are routed across networks.',
     accent: 'text-cyan-400 border-cyan-800',
+  },
+  layer4: {
+    label: 'Layer 4 — Transport',
+    description: 'TCP, UDP, ports, handshakes, flow control, and how data is reliably (or not) delivered end to end.',
+    accent: 'text-sky-400 border-sky-800',
   },
   application: {
     label: 'Application Layer',
@@ -37,11 +47,13 @@ const layers = Object.entries(layerMeta).map(([key, meta]) => ({
 <Layout title="School" description="A protocol library covering how networking really works — from packets to packet captures.">
 
   <header class="mb-12">
-    <p class="font-mono text-cyan-400 text-sm mb-2">nakamas.it / school</p>
     <h1 class="text-4xl font-bold text-slate-100 mb-4">The School</h1>
     <p class="text-slate-400 max-w-2xl leading-relaxed">
-      A library of networking protocols explained from first principles — how packets travel,
-      what each header field means, and what it all looks like in Wireshark.
+      <span class="text-cyan-400 font-mono font-semibold">Wanted:</span> A straight answer about why the internet works.
+      Last seen buried somewhere between a Layer 2 broadcast storm and a suspicious HTTP header.
+      This repository documents every protocol from the physical pulse on the wire to the application
+      shaking hands with your browser — so you can stop nodding along in meetings and actually know
+      what's happening.
     </p>
   </header>
 

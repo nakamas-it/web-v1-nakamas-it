@@ -20,6 +20,11 @@ const { articles } = Astro.props;
 const base = import.meta.env.BASE_URL;
 
 const layerMeta: Record<string, { label: string; description: string; accent: string }> = {
+  layer1: {
+    label: 'Layer 1 — Physical',
+    description: 'Cables, signals, encoding, and the raw electrical or optical pulses that carry every bit across the wire.',
+    accent: 'text-orange-400',
+  },
   layer2: {
     label: 'Layer 2 — Data Link',
     description: 'Ethernet frames, VLANs, STP, ARP, and how data travels within a broadcast domain.',
@@ -29,6 +34,11 @@ const layerMeta: Record<string, { label: string; description: string; accent: st
     label: 'Layer 3 — Network',
     description: 'IP addressing, DHCP, DNS, ICMP, and how packets are routed across networks.',
     accent: 'text-cyan-400',
+  },
+  layer4: {
+    label: 'Layer 4 — Transport',
+    description: 'TCP, UDP, ports, handshakes, flow control, and how data is reliably (or not) delivered end to end.',
+    accent: 'text-sky-400',
   },
   application: {
     label: 'Application Layer',
