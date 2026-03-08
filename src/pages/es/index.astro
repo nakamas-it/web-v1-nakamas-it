@@ -1,0 +1,372 @@
+---
+import Layout from '../../layouts/Layout.astro';
+
+const base = import.meta.env.BASE_URL;
+
+const experience = [
+  {
+    company: 'Nakamas IT',
+    type: 'Tiempo completo',
+    location: 'Vancouver, BC, Canadá',
+    roles: [
+      { title: 'Hackerman', period: 'Ene 2026 – Presente' },
+    ],
+  },
+  {
+    company: "Nature's Path Foods",
+    type: 'Tiempo completo',
+    location: 'Richmond, BC, Canadá',
+    roles: [
+      { title: 'IT Operations Manager', period: 'Mar 2026 – Presente' },
+      { title: 'Systems Administrator', period: 'Nov 2024 – Mar 2026' },
+    ],
+  },
+  {
+    company: 'Quicktech',
+    type: 'Tiempo completo',
+    location: 'Vancouver, BC, Canadá',
+    roles: [
+      { title: 'Systems Administrator', period: 'Ene 2022 – Nov 2024' },
+      { title: 'Support Technician', period: 'Nov 2020 – Ene 2022' },
+    ],
+  },
+  {
+    company: 'British Columbia Institute of Technology',
+    type: 'Contrato parcial',
+    location: 'Vancouver, BC, Canadá',
+    roles: [
+      { title: 'Course Instructor', period: 'Ene 2023 – Abr 2023' },
+      { title: 'Teacher Assistant', period: 'Oct 2022 – Ene 2023' },
+    ],
+  },
+  {
+    company: 'Temenos',
+    type: 'Tiempo completo',
+    location: 'Quito, Ecuador',
+    roles: [
+      { title: 'Technical Consultant', period: 'Mar 2018 – Dic 2018' },
+    ],
+  },
+  {
+    company: 'Conectividad Global SA',
+    type: 'Tiempo completo',
+    location: 'Quito, Ecuador',
+    roles: [
+      { title: 'Full Stack Developer', period: 'Ago 2017 – Dic 2018' },
+    ],
+  },
+  {
+    company: 'Pontificia Universidad Católica del Ecuador',
+    type: 'Contrato parcial',
+    location: 'Quito, Ecuador',
+    roles: [
+      { title: 'IT Technical Assistant', period: 'Ene 2015 – Jun 2017' },
+    ],
+  },
+];
+---
+
+<Layout
+  title="Inicio"
+  description="Hackerman, de la Casa Nakamas IT. El primero de su nombre. Admin de los sistemas, y las techs, y protector del reino."
+  lang="es"
+>
+
+  <!-- Hero -->
+  <section class="mb-20">
+    <p class="font-mono text-cyan-400 text-sm mb-3">Hola, soy</p>
+    <h1 class="text-5xl font-bold text-slate-100 mb-2">Gianfranco Cisneros</h1>
+    <p class="font-mono text-slate-500 text-sm mb-6">
+      Hackerman, de la Casa Nakamas IT. El primero de su nombre. Admin de los sistemas, y las techs, y protector del reino.
+    </p>
+    <p class="text-slate-400 leading-relaxed">
+      <span class="text-cyan-400 font-mono font-semibold">BUSCADO:</span> Alguien a quien culpar cuando la red se cae.
+      El sospechoso es un administrador de TI canadiense que dirige una operación sospechosamente bien organizada llamada
+      <span class="text-slate-200 font-medium">Nakamas IT</span>. Último avistamiento: persiguiendo una VLAN rebelde a las 2 AM
+      y sobreingeniando un homelab que no tiene ningún sentido tomarse tan en serio. Acérquese con café.
+    </p>
+    <div class="flex flex-wrap gap-4 mt-8">
+      <a
+        href="#sobre-mi"
+        class="border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-slate-100 font-medium px-6 py-3 rounded-lg transition-colors text-sm"
+      >
+        Sobre Mí
+      </a>
+      <a
+        href="#intereses"
+        class="border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-slate-100 font-medium px-6 py-3 rounded-lg transition-colors text-sm"
+      >
+        Mis Intereses
+      </a>
+      <a
+        href="#experiencia"
+        class="border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-slate-100 font-medium px-6 py-3 rounded-lg transition-colors text-sm"
+      >
+        Mi Experiencia
+      </a>
+      <a
+        href="#contacto"
+        class="border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-slate-100 font-medium px-6 py-3 rounded-lg transition-colors text-sm"
+      >
+        Contáctame
+      </a>
+      <a
+        href={`${base}school/`}
+        class="bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold px-6 py-3 rounded-lg transition-colors text-sm"
+      >
+        Ver la Escuela
+      </a>
+    </div>
+  </section>
+
+  <!-- Sobre mí -->
+  <section id="sobre-mi" class="mb-16 scroll-mt-24">
+    <h2 class="text-2xl font-bold text-slate-100 mb-6 flex items-center gap-3">
+      <span class="w-8 h-px bg-cyan-400 inline-block"></span>
+      Sobre Mí
+    </h2>
+    <div class="text-slate-400 space-y-4 leading-relaxed">
+      <p>
+        Nakamas IT comenzó como un proyecto personal para entender cómo funciona realmente la TI en un contexto
+        empresarial — no solo en teoría, sino desplegando y operando los mismos tipos de cargas de trabajo en los
+        que las organizaciones dependen cada día.
+      </p>
+      <p>
+        Lo que empezó como un homelab fue evolucionando gradualmente hacia algo más cercano a un entorno de
+        producción real. Ese cambio ha sido una de las experiencias de aprendizaje más valiosas que he tenido,
+        porque administrar algo de verdad — con consecuencias reales cuando se rompe — te enseña cosas que
+        ningún laboratorio de libro de texto podría enseñarte.
+      </p>
+      <p>
+        Este sitio es la extensión natural de eso. La sección School existe para compartir lo que he aprendido
+        a través de esos despliegues en el mundo real, explicado de una manera que conecta los puntos entre
+        cómo funciona un protocolo en papel y lo que realmente ves en una captura de paquetes o en un incidente
+        de producción.
+      </p>
+    </div>
+  </section>
+
+  <!-- Intereses -->
+  <section id="intereses" class="mb-16 scroll-mt-24">
+    <h2 class="text-2xl font-bold text-slate-100 mb-6 flex items-center gap-3">
+      <span class="w-8 h-px bg-cyan-400 inline-block"></span>
+      Intereses
+    </h2>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {[
+        {
+          icon: '📡',
+          label: 'Redes',
+          desc: 'Fluido en TCP/IP y poco razonablemente emocionado con una captura limpia de Wireshark. Leo tablas de enrutamiento por diversión y considero una topología OSPF bien ajustada una forma de arte.',
+        },
+        {
+          icon: '🛡️',
+          label: 'Ciberseguridad',
+          desc: 'Defensor de día, cazador de amenazas de noche. Zero-trust, defensa en profundidad, EDR, y la emoción de rastrear un movimiento lateral a través de registros de eventos a las 2am.',
+        },
+        {
+          icon: '🖥️',
+          label: 'Servidores e Hipervisores',
+          desc: 'Domador de hardware. Clusters de Hyper-V, consolas iDRAC, pools de almacenamiento y el satisfactorio sonido de los rieles del rack encajando en su lugar.',
+        },
+        {
+          icon: '☁️',
+          label: 'Nube',
+          desc: 'Admin de Microsoft 365 y ex purista del on-prem. Entra ID, Intune, Exchange Online, Defender — sí, sé que la nube es simplemente el servidor de otra persona. Intento conocer bien a esa persona.',
+        },
+      ].map(item => (
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+          <div class="text-2xl mb-3">{item.icon}</div>
+          <h3 class="font-semibold text-slate-100 mb-1">{item.label}</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">{item.desc}</p>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <!-- Experiencia -->
+  <section id="experiencia" class="mb-16 scroll-mt-24">
+    <h2 class="text-2xl font-bold text-slate-100 mb-6 flex items-center gap-3">
+      <span class="w-8 h-px bg-cyan-400 inline-block"></span>
+      Experiencia
+    </h2>
+    <div class="space-y-8">
+      {experience.map(job => (
+        <div class="border-l-2 border-slate-700 pl-5">
+          <div class="flex items-baseline justify-between gap-4 flex-wrap mb-1">
+            <h3 class="font-semibold text-slate-100">{job.company}</h3>
+            <span class="font-mono text-xs text-slate-500 shrink-0">{job.type}</span>
+          </div>
+          <p class="text-slate-500 text-xs font-mono mb-3">{job.location}</p>
+          <div class="space-y-2">
+            {job.roles.map(role => (
+              <div class="flex items-baseline justify-between gap-4 flex-wrap">
+                <span class="text-cyan-400 text-sm font-medium">{role.title}</span>
+                <span class="font-mono text-xs text-slate-500 shrink-0">{role.period}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <!-- Contacto -->
+  <section id="contacto" class="mb-4 scroll-mt-24">
+    <h2 class="text-2xl font-bold text-slate-100 mb-6 flex items-center gap-3">
+      <span class="w-8 h-px bg-cyan-400 inline-block"></span>
+      Contacto
+    </h2>
+    <p class="text-slate-400 leading-relaxed mb-8">
+      ¿Tienes una pregunta, quieres colaborar o simplemente hablar de redes? Envíame un mensaje o contáctame directamente.
+    </p>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+
+      <!-- Formulario de contacto -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+        <h3 class="font-semibold text-slate-100 mb-4">Envíame un Mensaje:</h3>
+        <form id="contact-form" action="https://formspree.io/f/mvzwgqob" method="POST" class="space-y-4">
+          <div>
+            <label for="name" class="block text-xs font-mono text-slate-400 mb-1">Nombre</label>
+            <input
+              id="name"
+              type="text"
+              name="name"
+              required
+              placeholder="Juan Pérez"
+              class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-colors"
+            />
+          </div>
+          <div>
+            <label for="email" class="block text-xs font-mono text-slate-400 mb-1">Correo electrónico</label>
+            <input
+              id="email"
+              type="email"
+              name="email"
+              required
+              placeholder="tu@ejemplo.com"
+              class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-colors"
+            />
+          </div>
+          <div>
+            <label for="message" class="block text-xs font-mono text-slate-400 mb-1">Mensaje</label>
+            <textarea
+              id="message"
+              name="message"
+              required
+              rows="4"
+              placeholder="¿Qué tienes en mente?"
+              class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-colors resize-none"
+            ></textarea>
+          </div>
+          <button
+            type="submit"
+            class="w-full bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold px-6 py-3 rounded-lg transition-colors text-sm"
+          >
+            Enviar Mensaje
+          </button>
+          <p id="form-status" class="text-sm text-center hidden"></p>
+        </form>
+      </div>
+
+      <!-- Redes sociales -->
+      <div class="flex flex-col gap-4 h-full">
+        <a
+          href="https://www.linkedin.com/in/gianfranco-cisneros-barreiro/"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="flex-1 flex items-center gap-4 bg-slate-900 border border-slate-800 hover:border-cyan-400 rounded-xl p-5 transition-colors group"
+        >
+          <div class="bg-slate-800 rounded-lg p-3 shrink-0">
+            <svg class="w-5 h-5 text-cyan-400" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+            </svg>
+          </div>
+          <div>
+            <p class="font-medium text-slate-100 group-hover:text-cyan-400 transition-colors">LinkedIn</p>
+            <p class="text-slate-500 text-sm">Gianfranco Cisneros</p>
+          </div>
+          <span class="ml-auto text-slate-600 group-hover:text-cyan-400 transition-colors">↗</span>
+        </a>
+
+        <a
+          href="mailto:gcisneros@nakamas-it.com"
+          class="flex-1 flex items-center gap-4 bg-slate-900 border border-slate-800 hover:border-cyan-400 rounded-xl p-5 transition-colors group"
+        >
+          <div class="bg-slate-800 rounded-lg p-3 shrink-0">
+            <svg class="w-5 h-5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+            </svg>
+          </div>
+          <div>
+            <p class="font-medium text-slate-100 group-hover:text-cyan-400 transition-colors">Email</p>
+            <p class="text-slate-500 text-sm">gcisneros@nakamas-it.com</p>
+          </div>
+        </a>
+
+        <a
+          href="https://signal.me/#eu/francogian2894.88"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="flex-1 flex items-center gap-4 bg-slate-900 border border-slate-800 hover:border-cyan-400 rounded-xl p-5 transition-colors group"
+        >
+          <div class="bg-slate-800 rounded-lg p-3 shrink-0">
+            <svg class="w-5 h-5 text-cyan-400" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm0 4.5a7.5 7.5 0 110 15 7.5 7.5 0 010-15zm0 2.25a5.25 5.25 0 100 10.5 5.25 5.25 0 000-10.5zm-3.182 2.068a5.22 5.22 0 013.182-1.068c.636 0 1.247.113 1.813.32L12.6 9.282a3.75 3.75 0 00-3.782-.464zm6.544 1.17a5.23 5.23 0 011.138 3.262 5.22 5.22 0 01-1.068 3.182l-1.212-1.212a3.729 3.729 0 00-.658-4.02zm-8.724.658a3.729 3.729 0 00-.658 4.02L4.768 13.678A5.22 5.22 0 013.75 12c0-1.18.39-2.267 1.045-3.14zm2.544 5.836L8.07 15.444a5.22 5.22 0 003.18 1.056 5.22 5.22 0 003.182-1.068l-1.212-1.212a3.75 3.75 0 01-3.838.012z"/>
+            </svg>
+          </div>
+          <div>
+            <p class="font-medium text-slate-100 group-hover:text-cyan-400 transition-colors">Signal</p>
+            <p class="text-slate-500 text-sm">francogian2894.88</p>
+          </div>
+          <span class="ml-auto text-slate-600 group-hover:text-cyan-400 transition-colors">↗</span>
+        </a>
+
+        <div class="flex-1 flex items-center gap-4 bg-slate-900 border border-slate-800 rounded-xl p-5">
+          <div class="bg-slate-800 rounded-lg p-3 shrink-0">
+            <svg class="w-5 h-5 text-cyan-400" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20.317 4.37a19.791 19.791 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028 14.09 14.09 0 001.226-1.994.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.299 12.299 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+            </svg>
+          </div>
+          <div>
+            <p class="font-medium text-slate-100">Discord</p>
+            <p class="text-slate-500 text-sm font-mono">francogian2894</p>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </section>
+
+</Layout>
+
+<script>
+  const form = document.getElementById('contact-form') as HTMLFormElement;
+  const status = document.getElementById('form-status') as HTMLParagraphElement;
+
+  form?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const data = new FormData(form);
+    try {
+      const res = await fetch(form.action, {
+        method: 'POST',
+        body: data,
+        headers: { Accept: 'application/json' },
+      });
+      if (res.ok) {
+        form.reset();
+        status.textContent = '¡Mensaje enviado! Te responderé pronto.';
+        status.className = 'text-sm text-center text-cyan-400';
+      } else {
+        status.textContent = 'Algo salió mal. Intenta de nuevo o contáctame por LinkedIn.';
+        status.className = 'text-sm text-center text-red-400';
+      }
+    } catch {
+      status.textContent = 'No se pudo enviar el mensaje. Revisa tu conexión e intenta de nuevo.';
+      status.className = 'text-sm text-center text-red-400';
+    }
+    status.classList.remove('hidden');
+  });
+</script>

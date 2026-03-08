@@ -9,6 +9,14 @@ export default defineConfig({
   site: 'https://nakamas-it.com',
   base: '/',
 
+  i18n: {
+    defaultLocale: 'en',
+    locales: ['en', 'es'],
+    routing: {
+      prefixDefaultLocale: false,
+    },
+  },
+
   vite: {
     plugins: [tailwindcss()]
   },

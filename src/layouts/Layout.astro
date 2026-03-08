@@ -1,28 +1,44 @@
 ---
 import '../styles/global.css';
 import NavbarLogo from '../components/NavbarLogo.astro';
+import { useTranslations } from '../i18n/ui';
+import type { Lang } from '../i18n/ui';
 
 interface Props {
   title: string;
   description?: string;
+  lang?: Lang;
 }
 
 const {
   title,
   description = 'Nakamas IT — Networking knowledge base and personal profile',
+  lang = 'en',
 } = Astro.props;
 
+const t = useTranslations(lang);
 const base = import.meta.env.BASE_URL;
 const currentPath = Astro.url.pathname;
 
-function isActive(path: string) {
-  if (path === base) return currentPath === base || currentPath === base.slice(0, -1);
-  return currentPath.startsWith(path);
-}
+// Home link and active state are language-aware
+const homeHref = lang === 'es' ? `${base}es/` : base;
+const homeActive =
+  lang === 'es'
+    ? currentPath === `${base}es/` || currentPath === `${base}es`
+    : currentPath === base || currentPath === base.slice(0, -1);
+
+const schoolActive = currentPath.startsWith(`${base}school`);
+
+// Only add hreflang on pages that have a translated alternate (home pages)
+const isHomePage =
+  currentPath === base ||
+  currentPath === base.slice(0, -1) ||
+  currentPath === `${base}es/` ||
+  currentPath === `${base}es`;
 ---
 
 <!doctype html>
-<html lang="en">
+<html lang={lang}>
   <head>
     <meta charset="utf-8" />
     <link rel="icon" type="image/svg+xml" href={`${base}nakamas-it.svg`} />
@@ -31,6 +47,13 @@ function isActive(path: string) {
     <meta name="generator" content={Astro.generator} />
     <meta name="description" content={description} />
     <title>{title} — Nakamas IT</title>
+    {isHomePage && (
+      <>
+        <link rel="alternate" hreflang="en" href="https://nakamas-it.com/" />
+        <link rel="alternate" hreflang="es" href="https://nakamas-it.com/es/" />
+        <link rel="alternate" hreflang="x-default" href="https://nakamas-it.com/" />
+      </>
+    )}
     <!-- Open Graph -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Nakamas IT" />
@@ -47,19 +70,31 @@ function isActive(path: string) {
     <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-10">
       <nav class="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
         <NavbarLogo />
-        <div class="flex gap-8">
-          <a
-            href={base}
-            class={`text-sm font-medium transition-colors ${isActive(base) ? 'text-cyan-400' : 'text-slate-400 hover:text-slate-100'}`}
-          >
-            Home
-          </a>
-          <a
-            href={`${base}school/`}
-            class={`text-sm font-medium transition-colors ${isActive(`${base}school`) ? 'text-cyan-400' : 'text-slate-400 hover:text-slate-100'}`}
-          >
-            School
-          </a>
+        <div class="flex items-center gap-6">
+          <div class="flex gap-8">
+            <a
+              href={homeHref}
+              class={`text-sm font-medium transition-colors ${homeActive ? 'text-cyan-400' : 'text-slate-400 hover:text-slate-100'}`}
+            >
+              {t('nav.home')}
+            </a>
+            <a
+              href={`${base}school/`}
+              class={`text-sm font-medium transition-colors ${schoolActive ? 'text-cyan-400' : 'text-slate-400 hover:text-slate-100'}`}
+            >
+              {t('nav.school')}
+            </a>
+          </div>
+          <div class="flex font-mono text-xs border border-slate-700 rounded overflow-hidden">
+            <a
+              href={base}
+              class={`px-2 py-1 transition-colors ${lang === 'en' ? 'bg-slate-700 text-slate-100' : 'text-slate-500 hover:text-slate-300'}`}
+            >EN</a>
+            <a
+              href={`${base}es/`}
+              class={`px-2 py-1 transition-colors ${lang === 'es' ? 'bg-slate-700 text-slate-100' : 'text-slate-500 hover:text-slate-300'}`}
+            >ES</a>
+          </div>
         </div>
       </nav>
     </header>
@@ -71,7 +106,7 @@ function isActive(path: string) {
     <footer class="border-t border-slate-800 sticky bottom-0 z-10 bg-slate-950/90 backdrop-blur">
       <div class="max-w-5xl mx-auto px-6 py-8 flex items-center justify-between text-slate-500 text-sm">
         <span class="font-mono">© 2026 Nakamas IT</span>
-        <span class="font-mono italic">there is no place like 127.0.0.1</span>
+        <span class="font-mono italic">{t('footer.tagline')}</span>
       </div>
     </footer>
 
