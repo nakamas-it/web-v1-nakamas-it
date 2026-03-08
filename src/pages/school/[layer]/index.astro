@@ -74,21 +74,21 @@ const meta = layerMeta[layer!] ?? { label: layer, description: '', accent: 'text
         return (
           <a
             href={`${base}school/${layerKey}/${slug}`}
-            class="flex items-start gap-5 bg-slate-900 border border-slate-800 hover:border-slate-600 rounded-xl p-6 transition-colors group"
+            class="bg-slate-900 border border-slate-800 hover:border-slate-600 rounded-xl p-6 transition-colors group"
           >
-            <div class={`font-mono text-xs font-bold mt-0.5 px-2 py-1 rounded border ${meta.accent} border-current opacity-60 shrink-0`}>
-              {article.data.protocol.toUpperCase()}
-            </div>
-            <div>
-              <h2 class="font-semibold text-slate-100 group-hover:underline underline-offset-2 mb-1">
+            <div class="flex items-center justify-between gap-3 mb-2">
+              <h2 class="font-semibold text-slate-100 group-hover:underline underline-offset-2">
                 {article.data.title}
               </h2>
-              <p class="text-slate-400 text-sm leading-relaxed">{article.data.summary}</p>
-              <div class="flex flex-wrap gap-2 mt-3">
-                {article.data.tags.map((tag: string) => (
-                  <span class="font-mono text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded">{tag}</span>
-                ))}
-              </div>
+              <span class={`font-mono text-xs font-bold shrink-0 px-2 py-1 rounded border border-current opacity-60 ${meta.accent}`}>
+                {article.data.protocol.toUpperCase()}
+              </span>
+            </div>
+            <p class="text-slate-400 text-sm leading-relaxed mb-3">{article.data.summary}</p>
+            <div class="flex flex-wrap gap-2">
+              {article.data.tags.map((tag: string) => (
+                <span class="font-mono text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded">{tag}</span>
+              ))}
             </div>
           </a>
         );
