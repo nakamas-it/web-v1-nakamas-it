@@ -8,6 +8,9 @@ order: 1
 draft: false
 ---
 
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
 ## Overview
 
 DHCP (Dynamic Host Configuration Protocol) is defined in [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131). When a device connects to a network with no pre-assigned address, DHCP lets it automatically discover and lease an IP address, subnet mask, default gateway, DNS server, and other options — all without any manual configuration.
@@ -35,6 +38,16 @@ The simplest DHCP scenario: client and server share the same Layer 2 broadcast d
 
 DHCP uses a four-step exchange known as **DORA**:
 
+<FlowDiagram
+  parties={["Client", "Server"]}
+  steps={[
+    { from: "Client", to: "Server", label: "DHCP DISCOVER", sub: "broadcast · src 0.0.0.0" },
+    { from: "Server", to: "Client", label: "DHCP OFFER",    sub: "broadcast · offers 192.168.1.100" },
+    { from: "Client", to: "Server", label: "DHCP REQUEST",  sub: "broadcast · accepts offer" },
+    { from: "Server", to: "Client", label: "DHCP ACK",      sub: "broadcast · lease confirmed" },
+  ]}
+/>
+
 | Step | Message  | From   | To              | Src IP    | Dst IP          |
 |------|----------|--------|-----------------|-----------|-----------------|
 | 1    | DISCOVER | Client | Broadcast       | 0.0.0.0   | 255.255.255.255 |
@@ -51,6 +64,17 @@ DHCP uses a four-step exchange known as **DORA**:
 The client has no IP address. It shouts onto the broadcast domain: *"Is there a DHCP server out there?"*
 
 ### Layer 2 — Ethernet Frame
+
+<PacketDiagram
+  label="Ethernet II — DHCP DISCOVER"
+  fields={[
+    { name: "Dst MAC", bytes: 6, highlight: true },
+    { name: "Src MAC", bytes: 6 },
+    { name: "EtherType", bytes: 2 },
+    { name: "IP + UDP + DHCP", bytes: "46–1500" },
+    { name: "FCS", bytes: 4 },
+  ]}
+/>
 
 | Field            | Value                       | Notes                                |
 |------------------|-----------------------------|--------------------------------------|
