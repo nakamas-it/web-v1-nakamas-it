@@ -1,0 +1,141 @@
+---
+title: "Microsoft Purview — Data Governance and Compliance for M365"
+category: "microsoft"
+topic: "purview"
+summary: "How Microsoft Purview classifies sensitive data, enforces retention, prevents data loss, and supports legal and regulatory compliance across the Microsoft 365 estate."
+tags: ["microsoft", "purview", "compliance", "dlp", "sensitivity labels", "retention", "ediscovery", "information protection"]
+order: 46
+draft: false
+---
+
+## Overview
+
+Organisations using Microsoft 365 generate data across Exchange Online, SharePoint, OneDrive, Teams, and connected endpoints. That data includes sensitive information — personal records, financial data, health information, intellectual property — that is subject to legal, regulatory, and contractual obligations. Microsoft Purview is the platform that addresses those obligations: it classifies sensitive data, applies persistent protective controls to it, governs how long it is retained, prevents it from being shared inappropriately, and supports legal and compliance investigation processes.
+
+Purview was formed by unifying the Microsoft 365 Compliance Center with the former Azure Purview data cataloguing product under a single brand. The compliance portal is accessed at `compliance.microsoft.com`.
+
+---
+
+## Sensitive Information Types
+
+A Sensitive Information Type (SIT) is a pattern definition that identifies a category of sensitive data. Purview ships with over 100 built-in SITs, covering:
+
+- Credit card numbers (pattern matching with Luhn checksum validation)
+- Social Security Numbers, National Insurance Numbers, and equivalent identifiers by country
+- Passport numbers, driver's licence numbers
+- Medical record identifiers, drug names, International Classification of Diseases codes
+- Bank account numbers, SWIFT codes, IBAN formats
+
+Built-in SITs use combinations of regular expression patterns, supporting keyword lists, and checksum functions to reduce false positives. The confidence of a match is expressed as a percentage — a high-confidence match requires the pattern plus nearby supporting keywords; a medium-confidence match may match the pattern alone.
+
+Custom SITs can be created using organisation-specific regular expressions and keyword lists. A custom SIT might identify an internal employee ID format, a proprietary document numbering scheme, or a contract reference pattern.
+
+Trainable classifiers extend this further. Rather than pattern matching, they use machine learning models trained on example content to identify categories like resumes, source code, financial statements, or harassment. Both pre-trained and custom trainable classifiers are available.
+
+SITs are used as conditions in DLP policies, sensitivity label auto-labelling rules, and retention label auto-apply policies.
+
+---
+
+## Sensitivity Labels
+
+Sensitivity labels classify content with a persistent label that travels with the file or email wherever it goes. A label is not just metadata — it can enforce technical controls directly on the content it is applied to.
+
+### What a Label Can Enforce
+
+| Control | What It Does |
+|---------|-------------|
+| Encryption | Content encrypted using Azure Information Protection; only authorised users can open it |
+| Content marking | Adds headers, footers, or watermarks to documents and emails |
+| Access restrictions | Restricts who can view, edit, print, copy, or forward the content |
+| Container protection | Applied to Teams, Microsoft 365 Groups, and SharePoint sites to control external sharing and access |
+
+Encryption options are either admin-defined (specific users or groups assigned permissions at label creation time) or user-defined (the user is prompted to specify recipients and their permissions when applying the label).
+
+Labels have a priority order: a higher-priority label takes precedence over a lower one. This prevents casual downgrade — a user cannot relabel a Confidential document as Public without justification.
+
+### How Labels Are Applied
+
+Labels can be applied in three ways:
+
+- **Manually** — The user selects a label from the sensitivity bar in Office applications or Outlook.
+- **Recommended** — A policy suggests a label when a SIT is detected but does not force it; the user can accept or dismiss the recommendation.
+- **Automatically** — A policy applies the label without user action when content matches SIT or trainable classifier conditions. Auto-labelling operates either client-side (in Office applications) or service-side (scanning Exchange, SharePoint, and OneDrive at rest or in transit).
+
+### Sensitivity Label Policies
+
+Labels are published to users via label policies. A policy defines which labels are available to which users and groups, sets a default label for new content, and can require that users provide a justification when downgrading a label to a less restrictive classification. Mandatory labelling — requiring a label before a document can be saved or an email sent — can also be enforced through label policy settings.
+
+---
+
+## Retention Policies and Labels
+
+### Retention Policies
+
+Retention policies apply at the container level. A policy applied to Exchange Online affects all mailboxes in scope; a policy applied to a SharePoint site affects all content in that site. No user action is required.
+
+Retention policies can be configured to:
+
+- Retain content for a specified period, then delete it
+- Retain content for a specified period, then do nothing (preserve but not delete)
+- Delete content after a specified period without retaining it
+
+Locations supported include Exchange Online, SharePoint Online, OneDrive for Business, Microsoft Teams channel and chat messages, and Yammer messages.
+
+### Retention Labels
+
+Retention labels are more granular than policies. They apply to individual items — specific documents or email messages — rather than all content in a location. A retention label travels with the item and governs its lifecycle independently of the container policy.
+
+Retention labels can:
+
+- Declare content as a **record**, making it immutable — it cannot be edited or deleted until the retention period expires and a disposition review completes.
+- Declare content as a **regulatory record**, applying the strictest form of immutability.
+- Trigger a **disposition review** at the end of the retention period, requiring a human to approve deletion before the item is removed.
+
+Labels can be applied manually by users or automatically via label policies using SIT matching, trainable classifiers, or KQL query conditions.
+
+### Preservation Lock
+
+Preservation Lock is an irreversible setting that makes a retention policy immutable. Once Preservation Lock is applied:
+
+- The policy cannot be turned off.
+- The retention period cannot be shortened.
+- Scope cannot be reduced.
+- Only extensions or expansions are permitted.
+
+This is required for regulatory compliance frameworks such as SEC Rule 17a-4 (US financial services), which mandates that records be retained in a non-rewriteable, non-erasable format that cannot be manipulated by administrators. Preservation Lock provides the technical evidence that the policy cannot be circumvented.
+
+---
+
+## Data Loss Prevention
+
+DLP policies detect and prevent sensitive information from being shared inappropriately. A DLP policy defines where it applies (locations), what it looks for (conditions), and what it does when a match is found (actions).
+
+### Locations
+
+| Location | What Is Protected |
+|----------|-----------------|
+| Exchange Online | Email sent and received |
+| SharePoint Online | Files in sites |
+| OneDrive for Business | Files in personal drives |
+| Microsoft Teams | Chat messages and channel messages |
+| Endpoint (Windows devices) | File operations on managed endpoints |
+
+### Conditions and Actions
+
+Conditions reference SITs, sensitivity labels, or content sharing direction (internal vs external). Actions include blocking the sharing or sending of content, restricting access, notifying the user with a **policy tip**, generating an alert for administrators, and requiring the user to provide a business justification override before proceeding.
+
+Policy tips are inline notifications that appear within the application — in Outlook when composing an email, in SharePoint when uploading a file — warning the user that their action matches a DLP rule before the action is completed. This gives users the opportunity to correct accidental sharing before it occurs rather than after.
+
+DLP policies support a test mode. In test mode, the policy evaluates content and logs matches but does not enforce blocks or display policy tips. This allows administrators to assess impact and tune conditions before enabling enforcement.
+
+---
+
+## Compliance Score
+
+The Microsoft Purview Compliance Score measures the organisation's posture against compliance requirements in a manner analogous to Secure Score for security. Improvement actions are mapped to regulatory frameworks (GDPR, HIPAA, ISO 27001, NIST, and others). Completing an action earns points. The score provides a structured roadmap for working toward regulatory compliance objectives.
+
+---
+
+## Summary
+
+Microsoft Purview provides the classification, protection, retention, and investigation layer that Microsoft 365 needs to operate within legal and regulatory constraints. Sensitive Information Types identify what needs to be protected; sensitivity labels enforce persistent controls on that content wherever it travels; retention policies and labels govern the lifecycle of data from creation through disposition; DLP policies prevent sensitive data from leaving the organisation inappropriately; and Preservation Lock provides the immutability evidence required by strict regulatory frameworks. Together these controls address the full data governance lifecycle — not just securing data at rest, but managing it through its entire lifespan.

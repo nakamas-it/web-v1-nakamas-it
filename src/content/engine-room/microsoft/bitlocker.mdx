@@ -1,0 +1,136 @@
+---
+title: "BitLocker — Full Disk Encryption for Windows Endpoints"
+category: "microsoft"
+topic: "bitlocker"
+summary: "BitLocker is Windows' built-in full volume encryption feature, protecting data on lost or stolen devices by encrypting the entire OS and data volumes with AES. Integrated with the TPM for transparent unlock, managed through Intune for silent deployment, and tied to Entra ID for automatic recovery key escrow, BitLocker is the standard disk encryption solution for Intune-managed Windows estates."
+tags: ["microsoft", "bitlocker", "encryption", "tpm", "intune", "endpoint-security", "recovery-key", "windows"]
+order: 53
+draft: false
+---
+
+## Overview
+
+BitLocker is the full volume encryption feature built into Windows 10 and Windows 11 Professional, Enterprise, and Education editions. When BitLocker is active on an OS volume, the entire contents of the disk — the operating system, page file, hibernation file, and all user data — are encrypted at rest using AES. If the physical drive is removed from the device and placed in another machine, the data is unreadable without the BitLocker key.
+
+The primary threat model BitLocker addresses is physical theft. A laptop left on a train, a drive pulled from a decommissioned server, or a device seized during a border crossing presents no data exposure risk if BitLocker is correctly deployed. It does not protect against threats that operate while the device is running and unlocked — that is the domain of access control and endpoint protection tools.
+
+---
+
+## The Role of the TPM
+
+The Trusted Platform Module (TPM) is a dedicated cryptographic chip — either discrete hardware or firmware-based — present in most business-class PCs manufactured after 2014. BitLocker integrates with the TPM to seal the volume encryption key.
+
+At initial encryption, BitLocker stores a copy of its Volume Master Key (VMK) inside the TPM, sealed against a set of Platform Configuration Register (PCR) measurements. These PCR values represent the state of the firmware and early boot components at the time of sealing. When the machine boots, the TPM re-measures the boot sequence. If the measurements match the sealed values — meaning the firmware and bootloader have not been tampered with — the TPM releases the VMK, and the volume decrypts transparently. The user sees no prompt and experiences no friction.
+
+If the measurements do not match — because the boot sequence changed, a firmware update altered the PCR values, or the drive was moved to a different machine — the TPM refuses to release the VMK. BitLocker prompts for a 48-digit recovery key instead.
+
+This architecture means BitLocker protects against offline attacks (drive removal, cold-boot attacks on a powered-off machine) while remaining completely invisible during normal daily use.
+
+---
+
+## Pre-Boot Authentication Options
+
+The TPM-only model is transparent but relies entirely on boot chain integrity for protection. Organizations can add a second factor at boot time for higher-assurance scenarios:
+
+| Authentication method | User action required | Security posture |
+|---|---|---|
+| TPM only | None — fully transparent | Standard; protects against physical drive theft |
+| TPM + PIN | Enter numeric PIN at power-on | Higher; adds knowledge factor; recommended for laptops |
+| TPM + startup key | Insert USB key at power-on | Higher; adds possession factor; impractical for remote workers |
+| Password (no TPM) | Enter password at boot | Fallback for non-TPM devices; not recommended |
+
+TPM + PIN is the recommended configuration for mobile devices — laptops carried by employees — because it ensures that physical possession of the device is not sufficient to unlock it. The PIN is entered before the OS loads, before any network connection is made, and is processed entirely by the TPM. It is separate from the Windows login password.
+
+---
+
+## Recovery Keys
+
+A BitLocker recovery key is a 48-digit numerical code that can unlock a protected volume when normal authentication fails. Recovery scenarios include:
+
+- TPM PCR measurement mismatch after firmware update or hardware change
+- Pre-boot PIN forgotten or repeated failures triggering lockout
+- Drive moved to a different machine for forensic or recovery purposes
+- TPM failure or TPM clear following a motherboard replacement
+
+Recovery keys must be stored before BitLocker is deployed. A recovery key that cannot be retrieved when needed renders the data permanently inaccessible. This is the most common operational failure in BitLocker deployments, and Intune's automatic escrow capability exists specifically to prevent it.
+
+### Recovery Key Storage Options
+
+| Storage location | How it gets there | Who can retrieve it |
+|---|---|---|
+| Entra ID | Automatic when device is Entra ID joined | Admins via Entra portal or Intune; device owner via myaccount.microsoft.com (if policy allows) |
+| Active Directory (AD DS) | Via Group Policy or ConfigMgr | AD admins via AD Users and Computers or PowerShell |
+| Azure Key Vault | Custom scripting or MBAM integration | Operations team with Key Vault access |
+| Printed / USB | Manual, at encryption time | Whoever has the physical copy |
+
+For Intune-managed devices, Entra ID escrow is automatic. When Intune applies a BitLocker policy to an Entra ID joined device and encryption completes, the recovery key is uploaded to the device's Entra ID object and visible in the Intune portal under Devices > [device name] > Recovery keys.
+
+---
+
+## Silent Enablement
+
+Intune can enable BitLocker without any user interaction — no prompts, no wizard, no requirement for the user to store their own recovery key. This is called silent enablement.
+
+For silent enablement to work, several conditions must be met simultaneously:
+
+- The device must be Entra ID joined (not only hybrid joined or domain-only)
+- A TPM must be present and activated
+- The device must support Modern Standby (also known as HSTI — Hardware Security Test Interface) or the **Allow standard users to enable encryption during Autopilot** CSP setting must be enabled
+- The Intune BitLocker policy must be configured to not require pre-boot authentication (TPM only)
+
+When these conditions are satisfied, BitLocker enables in the background after the Intune policy is received, the recovery key is escrowed to Entra ID, and the volume encrypts incrementally as the device is used — without the user ever seeing a BitLocker prompt.
+
+---
+
+## Encryption Scope
+
+BitLocker can encrypt volumes in two modes:
+
+- **Used Space Only**: encrypts only the sectors that currently contain data. New writes are encrypted as they occur. Faster initial encryption, suitable for new devices that have not yet accumulated user data.
+- **Full Disk**: encrypts every sector on the volume, including free space. Slower initial encryption, but ensures that data previously written to now-free sectors is also protected. Required for devices being repurposed or for high-security environments where deleted file recovery is a concern.
+
+For freshly provisioned devices deployed via Autopilot, Used Space Only is typically appropriate and results in near-instant encryption completion. For devices being re-enrolled or repurposed, Full Disk provides stronger guarantees.
+
+---
+
+## Intune Management
+
+BitLocker is managed in Intune under **Endpoint Security > Disk Encryption** or via a Device Configuration profile using the Endpoint Protection template. The Endpoint Security path is preferred because it provides cleaner policy targeting and a focused interface.
+
+Key settings in an Intune BitLocker policy:
+
+| Setting | Purpose |
+|---|---|
+| Require BitLocker | Enforces encryption as a compliance requirement |
+| Encryption method (OS drive) | AES-CBC 128/256 or AES-XTS 128/256 (XTS recommended for fixed drives) |
+| Startup authentication | TPM only vs TPM + PIN vs TPM + startup key |
+| Recovery options | Configure key backup to Entra ID, block recovery key export |
+| Fixed data drives | Encrypt non-OS volumes with separate policies |
+| Removable data drives | Control BitLocker To Go for USB drives |
+| Silent configuration | Enable transparent encryption without user prompts |
+
+### Encryption Report
+
+The Intune **Encryption report** (Reports > Endpoint Security > Encryption) provides a per-device view of encryption status across the estate. Each row shows whether the OS volume is encrypted, the encryption method in use, and whether the recovery key has been successfully escrowed. This report is the primary tool for verifying BitLocker deployment compliance before enforcing Conditional Access policies that require it.
+
+---
+
+## Network Unlock
+
+Network Unlock is an enterprise feature for servers and desktop machines that must start unattended — without any user entering a PIN. With Network Unlock configured, a device that boots while connected to the corporate wired network receives the BitLocker key from a WDS (Windows Deployment Services) server on the network. The device unlocks automatically. If the device is off the corporate network (lost, stolen, or at a remote site), the Network Unlock server is unreachable and the normal recovery process applies.
+
+Network Unlock requires a WDS server, a PKI certificate, and a dedicated Network Unlock certificate deployed to each protected machine. It is not typically used for laptops but is appropriate for servers in a datacenter or desktops in a secure facility.
+
+---
+
+## BitLocker and Device Compliance
+
+Intune compliance policies can require BitLocker as a condition of device compliance. The compliance policy setting **Require BitLocker** causes devices without active BitLocker encryption to be marked non-compliant. Combined with a Conditional Access policy that blocks non-compliant devices from accessing Microsoft 365, this creates an enforcement mechanism: users on unencrypted devices lose access to corporate resources until encryption is enabled.
+
+The compliance check reads the BitLocker status reported by the device's health attestation service — the same source used for Secure Boot and Code Integrity checks. The device must be enrolled in Intune and reporting health attestation data for this check to function.
+
+---
+
+## Summary
+
+BitLocker provides transparent, TPM-backed full volume encryption that protects Windows devices against physical data theft without imposing friction on users during normal operation. Intune enables silent deployment and automatic recovery key escrow to Entra ID, eliminating the two most common BitLocker failure modes: inconsistent deployment and lost recovery keys. Pre-boot PIN adds a second factor for high-risk mobile deployments. Compliance policy integration ensures that unencrypted devices are caught and remediated before they become a data breach risk.

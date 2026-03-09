@@ -1,0 +1,147 @@
+---
+title: "Microsoft Defender for Endpoint — EDR and Device Protection"
+category: "microsoft"
+topic: "defender-for-endpoint"
+summary: "How Microsoft Defender for Endpoint provides endpoint detection and response (EDR) across Windows, macOS, Linux, iOS, and Android — collecting behavioural telemetry, detecting threats post-breach, enabling investigation timelines, and automating remediation through the Microsoft 365 Defender portal."
+tags: ["defender-for-endpoint", "edr", "endpoint-security", "md-101", "ms-102"]
+order: 55
+draft: false
+---
+
+## Overview
+
+Microsoft Defender for Endpoint (MDE) is Microsoft's enterprise endpoint detection and response (EDR) platform. Unlike traditional antivirus that tries to block known-bad files at execution, EDR records everything that happens on a device — every process, network connection, file write, registry change — and analyses that telemetry to detect malicious behaviour after it has already started.
+
+MDE has two licensing tiers:
+
+| Plan | Capability focus |
+|------|-----------------|
+| **Plan 1** | Next-generation protection (antivirus), attack surface reduction, device control, web content filtering |
+| **Plan 2** | Everything in P1 plus EDR, device timeline, automated investigation, threat and vulnerability management, advanced hunting |
+
+Plan 2 is the full EDR product. Plan 1 is prevention-focused without post-breach investigation capabilities.
+
+---
+
+## Onboarding
+
+Devices must be onboarded before MDE can collect telemetry. Onboarding installs a sensor that runs as a kernel-level service and streams events to Microsoft's cloud backend.
+
+| Platform | Onboarding method |
+|----------|------------------|
+| Windows 10/11, Windows Server 2019+ | Microsoft Intune, Group Policy, SCCM, local script, or VDI script |
+| Windows Server 2016, 2012 R2 | Requires the MDE unified agent (replaces the old MMA-based sensor) |
+| macOS | Intune MDM profile or manual package deployment |
+| Linux | Ansible/Puppet scripts or manual package installation |
+| iOS / Android | Intune app deployment |
+
+Once onboarded, the device appears in the MDE device inventory within a few minutes.
+
+---
+
+## What the Sensor Collects
+
+The MDE sensor records and streams to the cloud:
+
+- **Process creation and termination** — full command lines, parent-child relationships
+- **Network connections** — source, destination, port, protocol
+- **File operations** — creation, modification, deletion, PE execution
+- **Registry modifications** — key and value changes
+- **User logon and logoff** — interactive and network sessions
+- **PowerShell and script activity** — script content, execution context
+
+This data is retained for **30 days** and queryable via Advanced Hunting.
+
+---
+
+## Detection Layers
+
+MDE detects threats through multiple complementary mechanisms:
+
+### Behavioural EDR Detections
+Correlates sequences of events (process hollowing, credential dumping, lateral movement) against attack patterns. These fire after activity has started — catching techniques that bypass prevention.
+
+### Next-Generation Protection (Microsoft Defender Antivirus)
+Real-time file scanning, cloud-delivered protection (cloud block), and machine learning classifiers catch malware at execution. MDAV and MDE work together; disabling MDAV degrades MDE detection.
+
+### Attack Surface Reduction (ASR) Rules
+Configurable rules that block specific high-risk behaviours independently of signature databases:
+- Block Office applications from creating child processes
+- Block credential stealing from LSASS
+- Block persistence via WMI event subscriptions
+- Block execution of potentially obfuscated scripts
+
+### Web Content Filtering / Network Protection
+Blocks connections to known malicious IPs and domains at the network level, regardless of which application made the request.
+
+---
+
+## Device Timeline
+
+Each onboarded device has a **timeline** — a chronological stream of all recorded events. The timeline is the primary investigation tool: an analyst can pivot from an alert to the device timeline, scroll backwards to find how the attacker gained access, and forwards to see what they did after.
+
+The timeline supports filtering by event type, time range, and keyword search across process command lines.
+
+---
+
+## Automated Investigation and Response
+
+When high-confidence alerts fire, MDE can automatically:
+
+1. Collect additional evidence from the affected device (memory, filesystem, network)
+2. Analyse each piece of evidence and classify it (malicious / suspicious / clean)
+3. Determine whether remediation is warranted
+4. Execute remediation actions based on the configured automation level
+
+Automation levels per device group:
+- **No automated response** — alerts only, no investigation
+- **Semi — approval required for any remediation** — investigation runs automatically, human approves each action
+- **Semi — approval required for non-temp folders** — auto-remediate temp folder threats
+- **Full — remediate threats automatically** — end-to-end automation
+
+### Live Response
+
+For manual investigation, **Live Response** provides an interactive shell to a device. From it, analysts can:
+- Browse the filesystem
+- Upload investigation scripts
+- Collect files for analysis
+- Run commands and see output in real time
+
+Live Response sessions are logged and auditable.
+
+---
+
+## Threat and Vulnerability Management (TVM)
+
+TVM continuously inventories software installed on onboarded devices and correlates that inventory against Microsoft's vulnerability database. The result is:
+
+- A **device exposure score** — lower is better
+- A prioritised list of **security recommendations** (patch this, disable that, remove unused software)
+- An **exposure timeline** showing when vulnerabilities were introduced
+
+TVM prioritises by exploitability and asset criticality, not just CVSS score — a vulnerability with active exploit code in the wild ranks higher than a theoretical high-CVSS flaw with no known exploit.
+
+---
+
+## Integration with Intune
+
+When MDE and Intune are connected (via the MDE connector in Intune), device risk level calculated by MDE can feed into Intune compliance policy. A device MDE classifies as High risk fails compliance, which can trigger Conditional Access to block that device from accessing corporate resources.
+
+This creates the enforcement loop:
+- MDE detects active threat → marks device High risk
+- Intune compliance fails → device non-compliant
+- Conditional Access blocks access to Exchange Online and SharePoint
+- User is blocked until the threat is resolved and device risk drops
+
+---
+
+## Key Exam Points
+
+- MDE Plan 2 includes EDR, automated investigation, device timeline, and TVM — Plan 1 is prevention-only
+- Onboarding deploys a sensor that streams telemetry to Microsoft's cloud — no on-premises infrastructure required
+- **Device timeline** is the primary investigation artifact
+- **ASR rules** block specific high-risk behaviours without requiring signature updates
+- **Automation level** controls whether automated investigation takes remediation actions without approval
+- **Live Response** provides interactive shell access for manual investigation
+- TVM ranks vulnerabilities by exploitability and asset criticality, not just CVSS
+- MDE + Intune integration enables risk-based Conditional Access blocking

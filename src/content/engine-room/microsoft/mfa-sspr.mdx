@@ -1,0 +1,111 @@
+---
+title: "MFA and SSPR — Securing and Recovering Identities in Entra ID"
+category: "microsoft"
+topic: "entra id"
+summary: "How Multi-Factor Authentication and Self-Service Password Reset work together to protect identities and remove helpdesk dependency in Entra ID."
+tags: ["microsoft", "entra id", "mfa", "sspr", "passwordless", "identity", "authentication"]
+order: 42
+draft: false
+---
+
+## Overview
+
+Passwords alone are not a sufficient control. Credential theft through phishing, data breaches, and password spraying is the most common initial access vector in enterprise environments. Multi-Factor Authentication (MFA) and Self-Service Password Reset (SSPR) are the two foundational controls that Entra ID offers to address this: MFA prevents attackers from using stolen credentials, and SSPR removes the helpdesk dependency for routine password recovery.
+
+---
+
+## Multi-Factor Authentication
+
+### What MFA Does and Why It Matters
+
+MFA requires a user to present at least two independent factors before authentication succeeds. The three categories are something you know (password), something you have (phone or hardware token), and something you are (biometric). A stolen password alone is not enough to pass MFA — an attacker also needs physical possession of the second factor. This single control defeats the majority of account takeover attacks that rely on credential dumps or phishing.
+
+### MFA Methods in Entra ID
+
+Entra ID supports several MFA methods, ranked here from strongest to weakest:
+
+| Method | Notes |
+|--------|-------|
+| FIDO2 security keys | Phishing-resistant hardware key; strongest option |
+| Windows Hello for Business | Biometric or PIN bound to a specific device |
+| Microsoft Authenticator (push/TOTP) | Push notifications with number matching; soft TOTP |
+| OATH hardware tokens | Physical TOTP token uploaded via CSV |
+| SMS / voice call | Weakest; susceptible to SIM-swapping; avoid if alternatives exist |
+
+FIDO2 and Windows Hello for Business are fully phishing-resistant because no credential is transmitted over the network. The Microsoft Authenticator app supports both push notifications (with number matching to defeat MFA fatigue attacks) and time-based one-time passwords (TOTP). SMS and voice call remain available for compatibility but should be treated as a fallback of last resort.
+
+### Per-User MFA vs Conditional Access MFA
+
+Entra ID offers two mechanisms for requiring MFA:
+
+**Per-user MFA** is the legacy approach. It places individual user accounts in one of three states: Disabled, Enabled (registered but not yet enforced at sign-in), or Enforced. Per-user MFA applies regardless of context — the user is always prompted, even from a trusted corporate network, on a managed device, signing into a low-risk application.
+
+**Conditional Access (CA) MFA** is the recommended modern approach. A CA policy defines conditions (user group, application, sign-in risk level, location, device compliance state) and grants access only when those conditions are satisfied — which may include requiring MFA. This allows context-aware enforcement: an admin signing into Azure management always gets MFA; a user accessing Teams from a compliant corporate device on the internal network may not. CA requires Entra ID P1 (or P2 for risk-based conditions).
+
+Per-user MFA and Conditional Access MFA should not coexist. Migrating from per-user to CA is the standard progression as environments mature.
+
+### MFA Registration and Combined Registration
+
+Users must register at least one MFA method before MFA can be enforced. The combined registration experience lets users register both MFA methods and SSPR authentication methods in a single workflow, reducing friction. Administrators can require re-registration and revoke active MFA sessions per-user from the Entra Admin Center under Authentication Methods.
+
+OATH hardware tokens are uploaded by an administrator via a CSV file containing the UPN, serial number, secret key, time interval, manufacturer, and model. Tokens must then be activated by the user entering the current code.
+
+---
+
+## Passwordless Authentication
+
+### Why Passwordless Is Stronger Than MFA
+
+MFA with a password plus a second factor still relies on a password existing — which means it can be phished. Passwordless authentication eliminates the password entirely. There is nothing to phish, nothing to leak in a data breach, and no credential to spray.
+
+Microsoft offers three passwordless options:
+
+| Method | Best Fit |
+|--------|---------|
+| FIDO2 security keys | Shared workstations, privileged identities, kiosk environments |
+| Microsoft Authenticator phone sign-in | Mobile-first users; biometric or PIN on iOS/Android |
+| Windows Hello for Business | Users with a dedicated Windows device; face or fingerprint |
+
+All three replace the password with a cryptographic proof tied to a device or hardware token, validated locally by biometric or PIN. No secret is transmitted over the network.
+
+### Temporary Access Pass
+
+The Temporary Access Pass (TAP) is a time-limited, one-use passcode issued by an administrator. Its purpose is onboarding or recovery: a new employee can use a TAP to register passwordless methods or MFA for the first time, without needing an existing credential. TAPs can also recover accounts where all authentication methods have been lost.
+
+---
+
+## Self-Service Password Reset
+
+### What SSPR Does
+
+Self-Service Password Reset allows users to reset their own Entra ID passwords without contacting the helpdesk. Users navigate to `https://passwordreset.microsoftonline.com`, prove their identity using pre-registered methods, and set a new password. The helpdesk call volume reduction is significant at scale.
+
+### Authentication Methods for SSPR
+
+| Method | Notes |
+|--------|-------|
+| Microsoft Authenticator (notification or code) | Shared with MFA registration |
+| Email (external address) | Separate from Exchange mailbox |
+| Mobile phone (SMS or call) | Text or voice call |
+| Office phone | Voice call to desk phone |
+| Security questions | Weakest; not available for admin accounts |
+
+Best practice is to enable multiple methods and require users to register at least two. Requiring two methods for a reset ensures that loss of one method does not leave the account unrecoverable.
+
+### SSPR Scope and Registration
+
+SSPR can be enabled for all users, a selected group, or disabled entirely. The combined registration experience means users complete SSPR and MFA registration together — this is the recommended path rather than separate registration flows.
+
+Registration renewal is prompted every 180 days by default. Administrators can view SSPR activity through the Entra ID Audit Log, filtering by SSPR activities to see registration counts, reset counts, and which methods are most frequently used or most frequently failing.
+
+### Password Writeback for Hybrid Environments
+
+When Entra ID is used in a hybrid configuration with on-premises Active Directory, SSPR writeback must be configured so that passwords reset in the cloud are also written back to the on-premises AD. Without writeback, the cloud password and the on-premises password diverge — the user can sign into cloud services but not domain-joined machines or on-premises applications.
+
+Password writeback requires Microsoft Entra Connect (not Cloud Sync) and a minimum of Entra ID P1 licensing. It is a setting enabled in the Entra Connect optional features configuration.
+
+---
+
+## Summary
+
+MFA is the single highest-impact identity control available. Conditional Access MFA is the recommended implementation — it is context-aware, flexible, and avoids unnecessary friction compared to blanket per-user enforcement. Passwordless methods go further by removing the password entirely, eliminating the phishing attack surface. SSPR completes the picture by returning credential self-sufficiency to users, reducing helpdesk load, and ensuring that account recovery does not depend on an attacker-exploitable reset process. In hybrid environments, password writeback is required to keep cloud and on-premises credentials in sync.

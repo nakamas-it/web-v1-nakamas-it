@@ -1,0 +1,117 @@
+---
+title: "Intune App Deployment — Delivering and Managing Applications at Scale"
+category: "microsoft"
+topic: "intune"
+summary: "Intune supports multiple application types with different trade-offs in flexibility, packaging complexity, and supported platforms. Win32 apps offer the most control for traditional Windows software; Microsoft 365 Apps deploy Office without installation media; MSIX provides modern clean packaging. Assignment intents and dependency chains let administrators model the full application lifecycle from delivery to supersedence."
+tags: ["microsoft", "intune", "apps", "win32", "msix", "m365-apps", "intunewin", "company-portal", "deployment"]
+order: 51
+draft: false
+---
+
+## Overview
+
+Intune app deployment is the mechanism by which managed devices receive software — silently, reliably, and without user involvement for required applications. The platform supports a range of app types because the Windows application ecosystem is not homogeneous: some software comes from the Store, some is packaged as an MSI, some requires a custom installer with pre-requisites, and some is a web shortcut. Each type has a different packaging model and different capabilities within Intune.
+
+---
+
+## App Types and When to Use Each
+
+### Microsoft Store Apps
+
+Modern Store apps packaged as MSIX. Intune integrates with the Windows Package Manager (winget) catalogue, allowing IT to search for and deploy Store apps directly from the Intune portal without uploading any package. Store apps auto-update through the Store infrastructure.
+
+**Limitation**: only software available in the public Store catalogue can be deployed this way. Line-of-business software not published to the Store cannot use this method.
+
+### Microsoft 365 Apps (Office Suite)
+
+Deployed via Intune using Microsoft's Office Deployment Tool integration — no installation media, no ISO, no on-premises distribution point. IT selects which Office applications to include (Word, Excel, Teams, etc.), the target architecture (64-bit recommended), and the update channel. Intune generates the configuration and deploys the Click-to-Run installer directly from Microsoft's CDN.
+
+Update channels control how frequently the Office suite receives new features:
+
+| Channel | Release Cadence | Intended Audience |
+|---------|----------------|-------------------|
+| Current Channel | Monthly (features + fixes) | Users who want the latest features quickly |
+| Monthly Enterprise Channel | Monthly, one month behind Current | Organisations wanting monthly updates with a validation buffer |
+| Semi-Annual Enterprise Channel | Every 6 months | Regulated industries, environments requiring extended validation |
+
+Microsoft 365 Apps require a Microsoft 365 license on the user account. For shared devices and Remote Desktop environments, Shared Computer Activation must be enabled — without it, the Office suite will deactivate after a period if multiple users sign in to the same device.
+
+### Web Apps
+
+A URL pinned as a shortcut to the Start menu or taskbar. No installation involved — Intune delivers a browser shortcut that opens a specified URL. Useful for web-based applications that users should be able to find alongside installed software in the Company Portal or Start menu.
+
+### Line-of-Business (LOB) Apps
+
+IT uploads an MSI, APPX, IPA (iOS), or APK (Android) directly to Intune. Intune handles distribution. LOB apps have limited capability compared to Win32 — no support for dependency chains, limited detection rule options, and no requirement rule support. An MSI LOB app assumes the MSI's own install logic handles everything.
+
+**Use when**: the software is a simple MSI with no dependencies and no complex detection requirements.
+
+### Win32 Apps
+
+The most capable app type for Windows. Any installer — EXE, MSI, batch script, or PowerShell-wrapped package — can be deployed as a Win32 app. This is the correct choice for the majority of traditional business software.
+
+### MSIX and MSIX Bundle
+
+MSIX is the modern Windows packaging format. MSIX apps are containerised — they install into a per-app namespace, do not write to shared system DLLs, and uninstall cleanly without leaving registry debris. Intune supports MSIX natively. MSIX Bundle is a single file containing multiple architecture variants (x86, x64, ARM64), with Windows selecting the appropriate one at installation.
+
+---
+
+## Win32 App Packaging in Detail
+
+Win32 apps require pre-processing before upload to Intune. The Microsoft Win32 Content Prep Tool (`IntuneWinAppUtil.exe`) wraps the installer and any dependencies into a single encrypted `.intunewin` file. This is what gets uploaded to Intune.
+
+When configuring a Win32 app in Intune, four elements define its behaviour:
+
+### Install and Uninstall Commands
+
+The exact command line used to silently install and uninstall the application. For an MSI: `msiexec /i installer.msi /quiet`. For a custom EXE: the vendor's silent switch, which must be determined from the installer's documentation or by testing.
+
+### Detection Rules
+
+How Intune determines whether the app is already installed after a deployment attempt — and on subsequent check-ins, whether the app is still present. Detection can be based on:
+
+| Method | What It Checks |
+|--------|---------------|
+| MSI product code | Registry key `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{GUID}` |
+| File existence | A specific file at a specific path exists (and optionally matches a version) |
+| Registry key | A specific registry key or value exists |
+| Custom PowerShell script | Script returns exit code 0 (detected) or non-zero (not detected) |
+
+The detection rule is critical. If it is wrong — too broad, too narrow, or pointing to the wrong path — Intune will incorrectly report the app as installed or repeatedly try to reinstall it.
+
+### Requirement Rules
+
+Conditions that must be true on the device before Intune even attempts installation. Common requirements: minimum OS version, minimum disk space, specific system architecture (x64 only), or a custom PowerShell check. A device that does not meet requirements is not offered the app — it simply does not apply.
+
+### Dependencies and Supersedence
+
+**Dependencies**: other apps that must be installed before this one. Intune automatically installs dependent apps in the correct order — the admin does not need to sequence deployments manually.
+
+**Supersedence**: replaces an earlier version of the same app. When a new version supersedes an old one, Intune uninstalls the old version and installs the new one. This handles the upgrade lifecycle without leaving orphaned old versions on devices.
+
+---
+
+## App Assignment Intents
+
+Every app must be assigned to a user or device group with an assignment intent:
+
+| Intent | Behaviour |
+|--------|-----------|
+| Required | App is installed automatically; user cannot uninstall it through normal means |
+| Available | App appears in the Company Portal; user installs it optionally |
+| Uninstall | App is removed from the device if present |
+| Available without enrollment | App accessible via Company Portal web portal without full MDM enrollment (MAM-only scenario) |
+
+Apps can be assigned to users or to devices. Device-assigned required apps install regardless of which user is signed in — the correct model for shared devices and kiosks. User-assigned apps follow the user and install when they sign in to any enrolled device.
+
+---
+
+## Conflict Resolution
+
+If the same app is assigned to the same device with conflicting intents (e.g., Required from one group and Uninstall from another), Intune resolves the conflict by priority: Required beats Available, and Uninstall has the lowest priority. However, explicit conflicts that cannot be resolved by intent priority generate a conflict state visible in the Intune portal's assignment status view.
+
+---
+
+## Summary
+
+Intune app deployment covers the full spectrum from simple Store-sourced apps to complex Win32 packages with dependencies and supersedence chains. The Win32 app type is the workhorse for enterprise software: the `.intunewin` packaging tool wraps any installer, detection rules confirm installation state accurately, and requirement rules prevent failed installs on incompatible devices. Microsoft 365 Apps deploy the Office suite without local infrastructure. Assignment intents — Required, Available, Uninstall — give administrators precise control over whether software is pushed automatically or offered for user choice. The dependency and supersedence mechanisms handle the full application lifecycle: prerequisite installation order and version upgrade management, both without manual intervention.

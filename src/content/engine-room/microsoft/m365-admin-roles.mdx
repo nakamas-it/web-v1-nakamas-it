@@ -1,0 +1,115 @@
+---
+title: "Microsoft 365 Admin Roles — Delegating Without Giving Away the Keys"
+category: "microsoft"
+topic: "m365"
+summary: "Microsoft 365 provides a layered set of administrative roles that allow organisations to delegate specific management tasks without granting blanket control. Understanding which role fits which responsibility is fundamental to operating a least-privilege environment."
+tags: ["microsoft", "m365", "entra-id", "rbac", "admin-roles", "defender", "purview", "security"]
+order: 38
+draft: false
+---
+
+## Overview
+
+Every Microsoft 365 tenant has a Global Administrator — the account that can do anything, including reset other administrators' passwords, modify billing, and change every policy in every workload. The existence of that power is necessary; exercising it routinely is a security problem.
+
+Microsoft's guidance is explicit: keep the number of Global Administrators between two and four. Two exist for redundancy in case one account is compromised or the administrator leaves the organisation. Beyond four, the attack surface grows without a meaningful operational benefit.
+
+The principle of least privilege — granting only the permissions required for the task at hand — is the organising principle of M365's role system. The platform provides dozens of built-in roles that carve out specific administrative capabilities, allowing real delegation without over-provisioning.
+
+---
+
+## Where Roles Are Assigned
+
+Role assignments can be made from two places, which reflect two different planes of identity and management:
+
+- **Microsoft Entra ID Admin Centre** (`entra.microsoft.com`) — The identity plane. Entra ID roles govern user accounts, groups, devices, and cross-cutting security features. All M365 admin roles are technically Entra ID roles.
+- **Microsoft 365 Admin Centre** (`admin.microsoft.com`) — A simplified management surface. Shows the most commonly used roles on the Manage Admin Roles page. Selecting "Show All Roles" exposes the full set.
+
+Some workloads — Defender for Endpoint, Defender for Office 365, Microsoft Purview — define their own role groups within their respective portals. These are layered on top of the Entra ID role system and provide finer-grained control within a single product.
+
+---
+
+## Core Microsoft 365 Built-in Roles
+
+The table below covers the roles most frequently tested in the MS-102 exam and most frequently encountered in real deployments.
+
+| Role | Scope of Authority |
+|------|--------------------|
+| **Global Administrator** | Full control of all M365 and Entra ID features. Can reset any password, including other Global Admins. Manages domains, licenses, users, groups, and all policies. |
+| **Global Reader** | View-only access to all admin features. Cannot make any changes. Appropriate for auditors and security reviewers who need visibility but not control. |
+| **Exchange Administrator** | Manages mailboxes, shared mailboxes, distribution groups, anti-spam policies, deleted item recovery, and sharing and delegation policies in Exchange Online. |
+| **SharePoint Administrator** | Manages site collections, storage limits, global SharePoint settings, site collection administrators, and user profile service. |
+| **Teams Administrator** | Full administration of Microsoft Teams — calling policies, messaging policies, meeting policies, call analytics, and M365 group management — except license assignment. |
+| **User Administrator** | Creates and manages users and groups (excluding users with Global Admin privileges). Resets most user passwords. Manages licenses and support tickets. |
+| **Helpdesk Administrator** | Resets passwords for non-privileged users and Password Administrators. Manages support tickets. Cannot reset passwords for Global Administrators, User Management Administrators, or Billing Administrators. |
+| **Service Support Administrator** | Creates and manages support requests with Microsoft. Views the Service Health dashboard and Message Centre. No ability to change configurations. |
+| **Billing Administrator** | Manages subscriptions, purchases additional licenses, views billing information. |
+| **Security Administrator** | Admin-level access to security features across Entra ID, Defender products, and Microsoft Purview. Manages Identity Protection, Azure Information Protection, and the Microsoft 365 Defender portal. |
+| **Compliance Administrator** | Manages compliance features including DLP policies, retention policies, eDiscovery, and audit logs in Microsoft Purview. |
+
+### The Helpdesk vs. User Admin Distinction
+
+A common exam and real-world confusion is when to use Helpdesk Administrator versus User Administrator. The Helpdesk role is intentionally limited: it cannot touch accounts that already have elevated privileges. The User Admin role is broader and appropriate for IT staff who manage the full user population. Neither should be substituted for Global Admin.
+
+---
+
+## The Identity Plane vs. Workload Plane
+
+Entra ID roles operate at the identity plane — they govern who can manage the directory itself, authentication policies, and cross-service identity features. M365 service-specific admin roles (Exchange Admin, Teams Admin, SharePoint Admin) operate at the workload plane — they manage the configuration of a specific cloud service but generally cannot alter directory objects outside their workload's scope.
+
+This distinction matters practically: an Exchange Administrator can manage mailboxes and mail flow but cannot create new user accounts, assign non-Exchange licenses, or modify authentication policies. A User Administrator can create accounts and assign licenses but cannot manage mailbox configurations in the Exchange Admin Centre.
+
+---
+
+## Microsoft Defender Roles
+
+The Defender family of products maps Entra ID roles to its portals and adds product-specific role groups for granular control.
+
+### Entra ID Roles Recognised by Defender
+
+| Role | Access Level |
+|------|-------------|
+| Global Administrator | Full access to all Defender portals |
+| Security Administrator | Admin-level management of security features, policies, and telemetry |
+| Security Operator | Configure and manage security events and alerts |
+| Security Reader | Read-only access across all Defender products |
+| Global Reader | Read-only access |
+
+Defender for Endpoint additionally supports custom roles defined within the portal itself (View Data, Active Remediation Actions, Alerts Investigation, Manage Portal System Settings, Live Response Capabilities). This allows an organisation to give a SOC analyst the ability to investigate alerts and run remediation actions without granting them access to portal system settings.
+
+---
+
+## Microsoft Purview Roles
+
+Microsoft Purview manages data governance and compliance across on-premises, multi-cloud, and SaaS environments. Its role system is distinct from the Entra ID role system.
+
+| Role | Purpose |
+|------|---------|
+| Collection Administrators | Manage collections; assign roles within Purview's data map |
+| Data Curators | Manage data assets, create classifications, configure business glossary terms |
+| Data Readers | View-only access to data assets, classifications, and collections |
+| Data Source Administrators | Configure data sources and scans in the Purview governance portal |
+| Policy Authors | View, update, and delete Purview access policies |
+| Compliance Administrator (Entra ID) | Access to the full Microsoft Purview compliance portal — DLP, retention, eDiscovery, audit |
+
+---
+
+## Delegated Administrator (Partner Access)
+
+Microsoft partners who manage a customer's tenant can be granted a **Delegated Administrator** relationship. This gives the partner's designated personnel either Full administration rights (equivalent to Global Administrator) or Limited administration rights (equivalent to Helpdesk Administrator) without needing a user account in the customer's tenant.
+
+The Delegated Administrator model is common for managed service providers. The partner accesses the customer tenant through the Microsoft Partner Centre and appears in the customer's admin centre under Settings > Partner Relationships.
+
+---
+
+## Privileged Identity Management for Role Activation
+
+Permanently assigning powerful roles to user accounts creates standing access — a constant risk if those accounts are ever compromised. Microsoft Entra ID Privileged Identity Management (PIM) addresses this by converting permanent role assignments to **eligible** assignments that users must explicitly activate for a time-limited session. PIM is covered in detail in a dedicated article, but from a roles perspective the key point is this: the preferred pattern is to assign sensitive roles (Global Administrator, Security Administrator, Exchange Administrator) as PIM-eligible rather than permanently active.
+
+PIM requires Microsoft Entra ID P2 licensing (included in Microsoft 365 E5).
+
+---
+
+## Summary
+
+Microsoft 365's role system is a graduated permission model that allows precise delegation across identity management, workload administration, security operations, and compliance. The Global Administrator is the apex of authority and should be used sparingly. Purpose-built roles — Exchange Admin, User Admin, Helpdesk Admin, Security Admin — cover the routine operational tasks of most IT teams without requiring tenant-wide privileges. For the most sensitive roles, PIM converts permanent access into time-bound activation, reducing the risk that a compromised account becomes a full tenant breach.

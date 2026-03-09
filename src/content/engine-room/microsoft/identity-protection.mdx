@@ -1,0 +1,115 @@
+---
+title: "Entra ID Identity Protection — Detecting and Responding to Risky Sign-ins"
+category: "microsoft"
+topic: "entra id"
+summary: "How Entra ID Identity Protection uses Microsoft threat intelligence to detect compromised users and suspicious sign-ins, and what risk-based policies do about them."
+tags: ["microsoft", "entra id", "identity protection", "risk", "conditional access", "security", "p2"]
+order: 43
+draft: false
+---
+
+## Overview
+
+A credential can be valid and still be in the hands of the wrong person. An attacker who has phished or purchased a username and password will sign in from an unexpected location, at an odd time, or with a behavioural pattern that does not match the account's history. Entra ID Identity Protection exists to detect exactly these situations. It is a Microsoft Entra ID P2 feature that applies Microsoft's global threat intelligence to continuously evaluate whether user accounts and individual sign-in attempts look legitimate — and takes automated action when they do not.
+
+---
+
+## The Two Risk Dimensions
+
+Identity Protection separates risk into two distinct dimensions. Understanding the difference is important because each dimension triggers a different type of response.
+
+### User Risk
+
+User risk is a long-running assessment of how likely it is that a specific account has been compromised. It is not about a single sign-in event; it accumulates over time based on evidence gathered about the account itself.
+
+| Risk Level | Typical Signals |
+|------------|----------------|
+| High | Credentials found in a known breach database or dark web dump |
+| Medium | Atypical behaviour patterns sustained over multiple events |
+| Low | Minor anomalies insufficient to conclude compromise on their own |
+
+The most significant high user-risk signal is a leaked credentials detection. Microsoft continually monitors breach repositories, dark web forums, and paste sites. When a username and password pair matching a tenant account is found in a leaked dataset, the user risk is immediately elevated to High.
+
+### Sign-In Risk
+
+Sign-in risk evaluates a specific, individual authentication attempt. It answers the question: does this particular sign-in look like it is being performed by the legitimate account owner, right now?
+
+| Risk Level | Typical Signals |
+|------------|----------------|
+| High | Atypical travel (physically impossible journey between locations) |
+| Medium | Anonymous IP address (Tor exit node, anonymizing proxy); unfamiliar sign-in properties |
+| Low | Minor deviations from established baseline |
+
+The atypical travel detection is illustrative of the approach: if a user signs in from London at 09:00 and then signs in from Sydney at 09:45, the elapsed time is physically impossible. One of those sign-ins is anomalous. Similarly, if a sign-in uses an IP address associated with a known malware botnet, Identity Protection flags the session regardless of whether the correct password was presented.
+
+---
+
+## Risk Detections
+
+Identity Protection surfaces the following detection types:
+
+| Detection | Description |
+|-----------|-------------|
+| Leaked credentials | Account credentials found in breach databases |
+| Anonymous IP address | Sign-in from Tor node or known anonymizing VPN |
+| Atypical travel | Impossible geographic distance between consecutive sign-ins |
+| Unfamiliar sign-in properties | Properties (location, ASN, device) differ substantially from historical baseline |
+| Malware-linked IP address | IP known to communicate with a botnet command-and-control server |
+| Entra ID threat intelligence | Sign-in matches Microsoft's database of known attack patterns |
+
+These detections feed both the user risk and sign-in risk scores. Some detections (such as leaked credentials) affect user risk directly. Others (such as anonymous IP usage) affect sign-in risk in the moment.
+
+---
+
+## Risk Policies
+
+Identity Protection provides two built-in risk policies that can be configured to respond automatically.
+
+### Sign-In Risk Policy
+
+The sign-in risk policy evaluates the risk of each authentication attempt and applies a configured response. The typical configuration is: if sign-in risk is Medium or above, require MFA. If sign-in risk is High, block access entirely.
+
+The logic here is sound: a medium-risk sign-in may be legitimate (a user genuinely signing in from a new location while travelling), so requiring MFA allows the real user to proceed while stopping an attacker who lacks the second factor. A high-risk sign-in warrants a harder block.
+
+### User Risk Policy
+
+The user risk policy evaluates the long-running account compromise score and responds when it crosses a threshold. The typical configuration is: if user risk is High, require a secure password change at next sign-in.
+
+When a user self-remediates — completing MFA or changing their password — the risk is automatically cleared. The rationale is that if the real user can prove identity through a second factor or demonstrate control of the account by completing a password reset, the evidence of compromise has been addressed.
+
+---
+
+## Integration with Conditional Access
+
+The built-in risk policies are functional, but they are less flexible than Conditional Access. For organisations with Entra ID P2, the preferred approach is to use Conditional Access policies that reference user risk and sign-in risk as conditions.
+
+This allows combining risk conditions with other conditions — for example: require MFA when sign-in risk is Medium AND the user is not on a compliant device. Or: block access when user risk is High AND the application is Exchange Online. The What If tool in Conditional Access can simulate which policies would apply to a given user and sign-in context without triggering enforcement.
+
+---
+
+## Investigation Workflow
+
+Identity Protection generates two primary reports for investigation:
+
+**Risky Sign-ins** — A list of sign-in events that were flagged, showing the risk level, the detections that triggered it, the user, and the outcome (blocked, MFA passed, etc.).
+
+**Risky Users** — A list of accounts with elevated user risk scores, with the history of detections associated with each.
+
+For each entry in these reports, an administrator can take one of two actions:
+
+- **Confirm compromise** — Marks the sign-in or user as genuinely compromised, which increases the risk score and can trigger additional protective actions.
+- **Dismiss risk** — Marks the flag as a false positive, which clears the risk without requiring the user to self-remediate.
+
+If an account has been confirmed as compromised, the remediation path is to require the user to reset their password (addressing user risk) and to revoke all active sessions.
+
+---
+
+## Licensing
+
+Identity Protection requires **Entra ID P2** licensing. It is also included in Microsoft 365 E5 and EMS E5 bundles. Organisations on Entra ID Free or P1 do not have access to the risk reports or risk-based policies, though a subset of detections (such as leaked credentials) may still surface in limited form.
+
+---
+
+## Summary
+
+Identity Protection treats authentication as a continuous evaluation rather than a single gate. By separating user risk (account compromise likelihood) from sign-in risk (individual session suspicion), it enables proportionate responses: prompt for MFA when something looks unusual, require a password change when credentials have leaked, and block outright when the signal is unmistakably malicious. The most mature implementation combines Identity Protection detections with Conditional Access policies, giving administrators precise control over how each risk level and risk type is handled.

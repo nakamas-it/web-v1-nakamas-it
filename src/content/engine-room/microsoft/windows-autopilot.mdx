@@ -1,0 +1,112 @@
+---
+title: "Windows Autopilot — Cloud-First Device Provisioning"
+category: "microsoft"
+topic: "autopilot"
+summary: "Windows Autopilot is a cloud service that transforms a factory-fresh Windows device into a fully configured corporate endpoint without IT ever touching the hardware. The four deployment modes cover everything from standard employee onboarding to kiosk provisioning to warehouse pre-staging."
+tags: ["microsoft", "autopilot", "intune", "entra-id", "mdm", "oobe", "esp", "deployment"]
+order: 47
+draft: false
+---
+
+## Overview
+
+Windows Autopilot is not an imaging solution — it does not deploy a custom WIM file or require on-premises servers. Instead, it is a cloud service that intercepts the Windows Out-of-Box Experience (OOBE) and transforms a stock OEM Windows installation into a corporate-configured device. The OEM ships the device with vanilla Windows; Autopilot and Intune handle everything else.
+
+The practical outcome: a new laptop can ship directly from the reseller to a remote employee. The employee opens the box, powers it on, signs in with their corporate credentials, and Autopilot configures the device — no IT intervention, no imaging lab, no VPN.
+
+---
+
+## How Autopilot Works Technically
+
+The process relies on a hardware hash — a 4 KB+ fingerprint generated from the device's hardware identifiers (serial number, hardware IDs, network adapter MACs). This hash is registered in the Intune/Autopilot service before the device reaches the user.
+
+The registration can happen through three paths:
+
+| Registration Method | Description |
+|---------------------|-------------|
+| OEM registration | The OEM submits the hardware hash to Microsoft at the factory — the device arrives pre-registered |
+| CSV import via partner/reseller | The reseller provides a CSV file of hardware hashes, imported into Intune |
+| Manual harvest | IT runs `Get-WindowsAutopilotInfo` (PowerShell script) on the device and uploads the result to Intune |
+
+When the device boots and connects to the internet during OOBE, Windows contacts the Autopilot Deployment Service at `ztd.dds.microsoft.com`. The service looks up the hardware hash, finds the registered device, and returns a deployment profile. OOBE behaviour changes immediately — privacy screens are skipped, the EULA is hidden, and the device is directed to sign in with corporate credentials. From that point, Entra ID join and Intune enrollment proceed automatically, and the Enrollment Status Page holds the desktop until all required apps and policies are applied.
+
+---
+
+## Deployment Profiles
+
+An Autopilot deployment profile is assigned to a device or Entra ID group and controls the OOBE experience:
+
+- **Device Name Template** — automatic naming convention (e.g., `CORP-%SERIAL%`)
+- **Skip EULA and privacy settings** — reduces friction at setup
+- **Deployment mode** — determines the level of user interaction (see below)
+- **Join type** — Entra ID join (cloud-only) or Hybrid Entra ID join (also domain-joins on-premises AD)
+- **Language and keyboard** — pre-set to avoid user prompts
+
+---
+
+## The Four Deployment Modes
+
+### User-Driven Mode
+
+The most common deployment mode. The user completes the OOBE by signing in with their Entra ID credentials. The device joins Entra ID (or Hybrid Entra ID) and auto-enrolls in Intune. Intune then pushes configuration profiles and required applications.
+
+This mode suits standard employee onboarding: the device is shipped to the employee's home or office, and the user handles the two-minute sign-in phase. IT has no involvement after registration.
+
+**Join type support**: Entra ID join or Hybrid Entra ID join.
+
+### Self-Deploying Mode
+
+No user interaction is required — the device provisions itself entirely using TPM-based device identity (TPM 2.0 Attestation). The device authenticates to Entra ID using its TPM certificate, not a user credential.
+
+This mode is designed for kiosks, digital signage, shared workstations, and meeting room devices where no specific user is assigned. Because there is no user credential, Hybrid Entra ID join is not supported — the device must join Entra ID directly.
+
+**Key requirement**: TPM 2.0 is mandatory. Devices without a TPM 2.0 chip cannot use self-deploying mode.
+
+### White Glove (Pre-Provisioning)
+
+White Glove splits provisioning into two phases to reduce the time the end user spends waiting.
+
+**Technician phase**: a technician (in a warehouse, staging area, or at an IT reseller) boots the device, presses Windows key five times at the OOBE screen to enter the White Glove flow, and runs the Autopilot process to completion. This phase performs the Entra ID join, Intune enrollment, and installs all device-targeted apps and policies. The device reaches a ready-to-use desktop — but the technician does not log in as the user.
+
+**User phase**: the device is then shipped (or handed) to the end user. The user powers it on, signs in with their Entra ID credentials, and only the user-targeted portion of provisioning runs. This is a fraction of the total provisioning time.
+
+White Glove is particularly valuable for complex app sets: if a device requires 10 GB of applications, a remote user on a slow connection could wait 90 minutes. Pre-provisioning that in a warehouse with a fast connection reduces the user's wait to minutes.
+
+**Requirements**: a wired network connection is required during the technician phase. Wireless-only environments cannot use White Glove.
+
+### Existing Devices Mode
+
+This mode is not for new devices — it is a migration path. It enables organisations to deploy an Autopilot profile to existing Windows 10/11 devices that are currently managed by Configuration Manager (SCCM/ConfigMgr). A ConfigMgr task sequence installs a fresh Windows installation and registers the device with Autopilot, transitioning it from on-premises OSD management to cloud Autopilot management.
+
+This addresses the practical reality that most enterprises have a large installed base of existing devices that were never Autopilot-registered. Existing Devices mode provides a structured migration rather than a forklift replacement.
+
+---
+
+## Enrollment Status Page (ESP)
+
+The Enrollment Status Page is a lock screen shown to the user during provisioning. It tracks progress through three phases: device preparation, device setup (device policies and apps), and account setup (user policies and apps).
+
+The ESP is configurable:
+
+- **Required apps list** — only the apps on this list block the ESP from completing (prevents a single optional app from holding up access)
+- **Time limit** — provisioning must complete within N minutes or the device shows an error
+- **Block device use until complete** — prevents users from accessing the desktop before the required apps are installed, avoiding a half-configured first experience
+
+Without ESP, a user could reach the desktop before Intune has delivered security policies, creating a window of exposure.
+
+---
+
+## Deployment Mode Comparison
+
+| Mode | User Interaction | TPM 2.0 Required | Join Types Supported | Primary Use Case |
+|------|-----------------|-----------------|---------------------|-----------------|
+| User-Driven | User signs in with Entra credentials | No | Entra ID, Hybrid Entra | Standard employee onboarding |
+| Self-Deploying | None | Yes | Entra ID only | Kiosks, shared devices, signage |
+| White Glove | Technician phase + brief user phase | No | Entra ID, Hybrid Entra | Remote workers, complex app sets |
+| Existing Devices | Via ConfigMgr task sequence | No | Determined by task sequence | Migration from ConfigMgr OSD |
+
+---
+
+## Summary
+
+Autopilot shifts device provisioning from a physical, infrastructure-heavy process to a cloud-defined one. The four modes address different scenarios along the spectrum from zero-touch kiosks to pre-staged enterprise deployments. The hardware hash is the anchor that links a physical device to its cloud configuration before the box is even opened. The Enrollment Status Page is the mechanism that ensures the device is fully configured before the user can interact with it — making the provisioned state predictable and auditable.

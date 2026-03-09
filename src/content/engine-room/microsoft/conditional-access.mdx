@@ -1,0 +1,138 @@
+---
+title: "Conditional Access — Zero Trust Policy Enforcement for M365"
+category: "microsoft"
+topic: "entra id"
+summary: "Conditional Access is the Entra ID policy engine that evaluates every access request against a set of signals — user identity, device state, location, application, and risk level — before deciding whether to allow, block, or require additional verification. It is the primary technical control for implementing Zero Trust in Microsoft 365."
+tags: ["microsoft", "entra-id", "conditional-access", "zero-trust", "mfa", "security", "m365", "identity-protection"]
+order: 41
+draft: false
+---
+
+## Overview
+
+The perimeter-based security model assumed that anything inside the corporate network could be trusted. Cloud-first work destroyed that assumption. Users sign in from personal devices on home broadband, from hotel Wi-Fi, from managed laptops in branch offices, and from phones on cellular networks. There is no meaningful perimeter to defend.
+
+Conditional Access is Microsoft's answer to this reality. It is an Entra ID feature that sits between the user's authentication event and the resource they are trying to reach, evaluating a set of signals to determine what access policy should apply. The logic follows a simple if-then structure: **IF** a defined set of conditions is true **THEN** enforce a specified access control. The sophistication comes from the richness of the signals available and the granularity of the controls that can be applied.
+
+Conditional Access requires **Microsoft Entra ID P1** as a minimum licensing tier. More advanced features (integration with Identity Protection risk signals) require P2.
+
+---
+
+## The If-Then Structure
+
+Every Conditional Access policy is composed of two sides:
+
+**Assignments** — the "IF" side. Defines the conditions under which the policy applies. This includes:
+- Which users or groups the policy targets
+- Which cloud applications or actions trigger evaluation
+- Additional conditions: device platform, named locations (IP ranges or countries), sign-in risk level, user risk level, client application type
+
+**Access Controls** — the "THEN" side. Defines what happens when the conditions are matched. Split into:
+- **Grant controls** — what is required to gain access
+- **Session controls** — constraints on the session after access is granted
+
+---
+
+## Signal Types
+
+### User and Group Assignment
+
+Policies can be targeted at all users, specific users, specific groups, or all users except a defined exclusion set. Exclusions are important: emergency break-glass accounts should always be excluded from policies that could block all access (such as "require compliant device for all apps"). Without an exclusion, a misconfigured policy could lock out all administrators including those needed to fix it.
+
+### Application Targeting
+
+A policy applies when a user attempts to access a specified cloud application — Exchange Online, SharePoint Online, the Azure portal, or any registered enterprise application. Policies can be scoped to all cloud apps, which is a broad but effective starting point for controls like "require MFA for all admin activity."
+
+### Conditions
+
+**Device platform** — target policies at specific OS platforms (Windows, iOS, Android, macOS). Allows differentiated treatment: a Windows device on a managed Intune estate may be trusted for direct access, while an iOS personal device requires an approved client app.
+
+**Location** — Named Locations are administrator-defined sets of IP address ranges or country/region lists. Policies can require MFA when the sign-in comes from outside a trusted corporate IP range, or block access entirely from regions where the organisation has no operations.
+
+**Sign-in risk** — Requires Entra ID P2 and Identity Protection. Risk is evaluated per-sign-in using signals like atypical travel, anonymous IP addresses, unfamiliar sign-in properties, and Microsoft threat intelligence. Policies can require MFA or block access when sign-in risk is Medium or High.
+
+**User risk** — Also requires P2. User risk reflects accumulated indicators that an account may be compromised — leaked credentials detected in breach databases, a pattern of risky sign-ins. A user risk policy can require a password change when risk crosses a threshold.
+
+**Client apps** — Distinguishes between modern authentication clients (current versions of Outlook, Teams, the browser) and legacy authentication clients (older protocols like POP3, IMAP, Basic authentication via Exchange ActiveSync). Legacy authentication cannot support MFA or Conditional Access, making it a common attack vector. Blocking legacy authentication is one of the highest-impact Conditional Access policies an organisation can apply.
+
+---
+
+## Grant Controls
+
+Grant controls define the requirements a user must meet to receive access. Multiple controls can be combined with AND (all must be satisfied) or OR (any one is sufficient).
+
+| Grant Control | What it Requires |
+|---------------|-----------------|
+| Block access | No access regardless of other conditions |
+| Require multi-factor authentication | User must complete an MFA challenge |
+| Require compliant device | Device must be enrolled in Intune and meet compliance policy requirements |
+| Require Hybrid Entra ID Joined device | Device must be domain-joined on-premises and registered in Entra ID |
+| Require approved client app | Access must come from an application on Microsoft's approved client list (e.g., Outlook mobile) |
+| Require app protection policy | The application must have an Intune App Protection Policy applied |
+| Require password change | User must change their password before gaining access (typically combined with user risk signals) |
+
+The "require compliant device" control is powerful but requires a mature Intune deployment. Compliance policies define what "compliant" means — disk encryption, OS patch level, PIN enforcement — and devices must report as meeting those criteria before access is granted.
+
+---
+
+## Session Controls
+
+Session controls do not block or gate access at the front door; they constrain what the user can do within the session after access is granted.
+
+**Sign-in frequency** — Forces re-authentication after a specified period. Instead of maintaining a persistent session for days, users must re-authenticate every 1 or 4 hours, for example. Useful for sensitive applications where silent background session continuation poses risk.
+
+**Persistent browser session** — Controls whether the browser stores a persistent session cookie ("Stay signed in?"). Disabling persistence means the user's session ends when the browser closes, reducing the risk from unattended shared workstations.
+
+**Conditional Access App Control** — Routes the user's session through Microsoft Defender for Cloud Apps as a reverse proxy. This enables real-time session monitoring and can enforce controls like preventing file downloads to unmanaged devices even when the application itself cannot enforce that.
+
+---
+
+## Named Locations
+
+Named Locations are reusable objects that represent trusted IP ranges or geographic boundaries. An IT administrator defines the organisation's public IP egress ranges as a trusted named location. Policies can then use the location condition to differentiate behaviour: require MFA only when the sign-in does not originate from a trusted location, or block access outright from countries where the organisation has no employees.
+
+Country-based blocking is an effective control against opportunistic attacks from regions with no business relationship to the organisation. It is not a substitute for MFA — determined attackers can route through proxies in allowed countries — but it significantly reduces the noise from automated credential-stuffing attacks.
+
+---
+
+## Testing Without Enforcement
+
+Conditional Access policies applied incorrectly can block legitimate users from accessing their work. Microsoft provides two mechanisms for validating policies before enforcement:
+
+### Report-Only Mode
+
+A policy in report-only mode evaluates against every sign-in and logs whether it would have applied and what the result would have been — but does not enforce the grant or session controls. Administrators can observe the policy's effect across real sign-in traffic for days or weeks before switching it to enforced. The sign-in log records the policy evaluation result as "Report-Only: Would Have Applied" or "Report-Only: Would Not Have Applied."
+
+### The What If Tool
+
+The What If tool allows an administrator to simulate a hypothetical sign-in event without waiting for real traffic. Inputs include the target user, the cloud application, the sign-in IP address or country, the device platform, and the risk levels. The tool returns a list of all Conditional Access policies that would apply to that simulated event, why they would apply, and what the access result would be. This is particularly useful for testing exclusion logic and confirming that break-glass accounts are genuinely excluded from blocking policies.
+
+---
+
+## Common Policy Patterns
+
+### Require MFA for All Administrators
+
+Every user with any admin role must complete MFA for every sign-in, regardless of location or device. This is the single highest-value Conditional Access policy for most organisations.
+
+### Block Legacy Authentication
+
+Block all sign-ins using legacy authentication client apps. POP3, IMAP, and Basic Auth do not support MFA. Any account successfully breached through a legacy auth protocol cannot be protected by MFA policies. Blocking legacy auth eliminates this attack surface.
+
+### Require Compliant Device for Exchange Online
+
+Email contains sensitive information. Requiring that email access comes only from Intune-enrolled, compliance-policy-meeting devices prevents access from personal unmanaged devices. Combined with an Approved Client App requirement, this also prevents web-browser access to OWA from personal machines.
+
+### Block Access from High-Risk Countries
+
+Using a named location that lists all countries except those where the organisation operates, block access to all cloud apps from outside the allowed set. Reduces exposure to automated attacks from non-business geographies.
+
+### Require MFA When Sign-In Risk is Medium or Above
+
+Uses Identity Protection risk signals to apply step-up authentication only when the sign-in looks suspicious. Low-risk sign-ins from familiar devices and locations proceed without friction; elevated risk triggers an MFA challenge.
+
+---
+
+## Summary
+
+Conditional Access is the enforcement layer of the Zero Trust model in Microsoft 365. It evaluates every sign-in against a policy engine that considers who is signing in, what they are accessing, from where and what device, and what risk signals are present. The result is a set of access controls that are contextually appropriate — different requirements for an administrator on an unmanaged device in an unknown country versus an employee on a compliant laptop at a trusted IP range. Report-only mode and the What If tool make it possible to validate policies against real and hypothetical traffic before committing to enforcement, reducing the risk of locking out legitimate users.

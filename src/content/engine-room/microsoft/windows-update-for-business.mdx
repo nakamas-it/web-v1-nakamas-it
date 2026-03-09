@@ -1,0 +1,115 @@
+---
+title: "Windows Update for Business — Managing Updates Without WSUS"
+category: "microsoft"
+topic: "windows"
+summary: "Windows Update for Business (WUfB) is a policy-driven service that controls when Windows 10/11 devices receive quality and feature updates directly from Microsoft. No on-premises WSUS server required — deferral periods, deadlines, and update rings give organisations predictable update delivery without local infrastructure."
+tags: ["microsoft", "windows", "updates", "wufb", "intune", "wsus", "patching", "update-rings"]
+order: 48
+draft: false
+---
+
+## Overview
+
+Windows Update for Business (WUfB) is Microsoft's answer to the question: how do you control update delivery for cloud-managed devices without running an on-premises Windows Server Update Services (WSUS) infrastructure? The answer is policy — either Group Policy for domain-joined devices or Intune configuration profiles for cloud-managed ones.
+
+Devices configured for WUfB continue to download updates directly from Microsoft's Content Delivery Network. WUfB adds the controls: which updates are offered, when they are offered, how long users can defer installation, and when a forced restart becomes mandatory. No update content passes through your network infrastructure; only the policy signals do.
+
+---
+
+## Update Types and Deferral Limits
+
+WUfB distinguishes three categories of update, each with its own deferral ceiling:
+
+| Update Type | Cadence | Maximum Deferral | Description |
+|-------------|---------|-----------------|-------------|
+| Quality Updates | Monthly (Patch Tuesday) | 30 days | Cumulative security patches and bug fixes |
+| Feature Updates | Annually (approx.) | 365 days | New Windows version upgrade (e.g., 22H2 to 23H2) |
+| Driver Updates | As available | 30 days | Hardware driver updates distributed via Windows Update |
+
+Quality updates are cumulative — every monthly release contains all previous fixes. Deferring a quality update by 14 days means the device installs the cumulative patch 14 days after it is released, not 14 days' worth of patches.
+
+Feature updates are major Windows version upgrades. The 365-day deferral gives organisations a full year to validate a new Windows release against their application estate before deploying it broadly.
+
+---
+
+## Update Rings
+
+An update ring is a logical group of devices with the same deferral and deadline settings. Rings allow staged rollout: a problem in a monthly patch shows up in the Pilot ring before it reaches the majority of the fleet.
+
+A typical ring structure:
+
+| Ring | Deferral | Audience | Purpose |
+|------|----------|----------|---------|
+| Pilot | 0 days | IT staff, early adopters | Catch problems immediately; fast feedback |
+| Early Adopters | 7 days | Tech-comfortable users | Broader validation with a short buffer |
+| Broad | 14–21 days | General workforce | Main deployment wave; Pilot has cleared by now |
+| Critical Systems | 30 days | Servers, production endpoints | Maximum buffer; validated across the entire fleet first |
+
+Rings are implemented as separate Intune Update Ring policies (or Group Policy OUs) applied to different device groups. A device belongs to one ring; its update schedule is determined entirely by that ring's settings.
+
+---
+
+## Deferral, Deadline, and Active Hours
+
+Three settings combine to define the complete update behaviour for a ring:
+
+**Deferral**: the number of days after Microsoft releases an update before it is offered to devices in this ring. During the deferral window, the update does not appear in Windows Update on the device at all.
+
+**Deadline**: the number of days after the update is offered (after the deferral expires) before the device must install it. Once the deadline passes, Windows installs the update and restarts the device automatically — even if the user is actively working — with one exception: Active Hours.
+
+**Active Hours**: a configurable window (up to 18 hours wide) during which Windows suppresses automatic restarts. The device will not force a restart while the user is within their defined active hours. After the deadline, however, Active Hours only apply to the timing of the restart — the installation itself proceeds regardless.
+
+The combination creates a predictable enforcement window. A quality update deferred 14 days with a 7-day deadline and active hours of 8:00–22:00 will be offered on day 14, and the device will be forced to restart outside active hours no later than day 21.
+
+---
+
+## Safeguard Holds
+
+Microsoft monitors Windows Update deployment telemetry and can automatically pause a feature update for specific device populations when a known compatibility issue is detected — for example, a specific driver version that causes a blue screen on the new Windows build. This pause is called a safeguard hold.
+
+Devices under a safeguard hold do not receive the affected feature update until Microsoft lifts the hold (typically after a fix is available). Organisations can opt out of safeguard holds via Intune policy, but Microsoft recommends leaving them active — opting out removes a protection layer and means the organisation accepts the known compatibility risk.
+
+---
+
+## Deadline and Restart Behaviour Summary
+
+| Phase | What Happens |
+|-------|-------------|
+| During deferral | Update not offered — device does not see it |
+| After deferral, before deadline | Update offered and downloaded; user can install at will |
+| After deadline | Mandatory install; restart scheduled outside active hours |
+| Post-deadline restart | Active hours respected for restart timing only |
+
+---
+
+## WUfB Reports
+
+WUfB Reports (formerly Update Compliance) is a cloud-based reporting solution built on Azure Monitor Workbooks. It provides fleet-wide visibility into:
+
+- Which devices have installed a given quality or feature update
+- Which devices are deferred, pending restart, or blocked by a safeguard hold
+- Update failure rates and error codes across the fleet
+
+WUfB Reports requires devices to send Windows diagnostic data at the **Required** level (formerly called Basic). The data flows from devices to Microsoft, and the Log Analytics workspace surfaces it in dashboards without any on-premises infrastructure.
+
+---
+
+## WUfB vs WSUS
+
+| Dimension | WUfB | WSUS |
+|-----------|------|------|
+| Infrastructure | None (cloud service) | Windows Server + SQL + disk storage |
+| Update source | Direct from Microsoft CDN | Downloaded to WSUS, then distributed |
+| Control granularity | Deferral and deadline per ring | Approve/deny individual KB numbers |
+| Specific KB blocking | Not possible | Possible |
+| Internet required | Yes | No (after initial sync) |
+| Reporting | WUfB Reports (cloud) | WSUS console / SCCM reports |
+| Best for | Cloud-managed, internet-connected devices | Air-gapped networks, fine-grained control requirements |
+
+The choice is architectural. WSUS gives approval control over individual updates and works without internet access — essential for air-gapped or highly regulated environments. WUfB eliminates the WSUS server entirely and delegates control to deferral periods and rings — appropriate for cloud-managed organisations where internet connectivity is assumed. Co-managed environments can run both, with WUfB controlling Intune-managed workloads while WSUS handles ConfigMgr-managed ones.
+
+---
+
+## Summary
+
+WUfB replaces WSUS infrastructure with a policy model: define rings, set deferrals and deadlines, and let devices pull updates directly from Microsoft on the schedule you control. Update rings are the operational mechanism for staged rollout — problems surface in Pilot before they reach the fleet. Deadline enforcement ensures devices do not drift indefinitely without patching. Safeguard holds are Microsoft's automatic safety net against known-bad updates. WUfB Reports provides the visibility layer to confirm the fleet is actually converging on the target patch level.

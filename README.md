@@ -27,7 +27,7 @@ A protocol library covering how networking actually works — from the physics o
 ### The Engine Room (`/engine-room/`)
 Vendor-focused platform coverage — what each vendor's technology stack is, why it exists, and how it works conceptually. Organised by vendor rather than function.
 
-**Current coverage — 36 articles (Microsoft):**
+**Current coverage — 56 articles (Microsoft):**
 
 | Topic area | Articles |
 |------------|----------|
@@ -37,6 +37,8 @@ Vendor-focused platform coverage — what each vendor's technology stack is, why
 | Networking Services | Windows DNS, Windows DHCP, IPAM, NPS/RADIUS, Remote Access/VPN, Web Application Proxy |
 | Storage & File Services | Storage Spaces, Storage Replica, DFS, Azure File Sync, Data Deduplication, Exchange Online, M365 Tenant |
 | Monitoring | Azure Monitor & Log Analytics |
+| M365 Administration | M365 DNS & Domains, M365 Admin Roles, Privileged Identity Management, Administrative Units, Conditional Access, MFA & SSPR, Identity Protection, Entra Password Protection, Microsoft Defender XDR, Microsoft Purview |
+| Modern Endpoint Management | Windows Autopilot, Windows Update for Business, Intune Enrollment, Intune Compliance, Intune App Deployment, Defender Antivirus, BitLocker, Windows Hello for Business, Defender for Endpoint, Endpoint Analytics |
 
 **Planned vendors (coming soon):** VMware, Linux, Google, Proxmox
 

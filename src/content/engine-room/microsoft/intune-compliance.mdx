@@ -1,0 +1,126 @@
+---
+title: "Intune Compliance Policies — Defining and Enforcing Device Health Standards"
+category: "microsoft"
+topic: "intune"
+summary: "Compliance policies define the minimum security state a device must be in to be considered trustworthy. Intune evaluates the device against the policy and reports a compliance state — which Conditional Access in Entra ID then uses as a gate for accessing corporate resources."
+tags: ["microsoft", "intune", "compliance", "conditional-access", "bitlocker", "entra-id", "zero-trust", "security"]
+order: 50
+draft: false
+---
+
+## Overview
+
+An Intune compliance policy is a set of rules that defines what "healthy" means for a device. Rules might require BitLocker encryption, a minimum OS version, a password of a certain complexity, or that Microsoft Defender's real-time protection is active. Intune evaluates the device against the assigned policy and assigns one of four compliance states. Those states feed directly into Conditional Access policies in Entra ID, which decide whether the device is allowed to reach corporate applications.
+
+The compliance system is the mechanism behind the Zero Trust principle of "verify every device, every time." A user's credentials might be valid, but if their device is running an outdated OS without encryption, Conditional Access can block the connection regardless.
+
+---
+
+## Compliance States
+
+| State | Meaning |
+|-------|---------|
+| Compliant | All rules in all assigned compliance policies are satisfied |
+| Not Compliant | One or more rules are violated |
+| Not Evaluated | The policy has not yet been applied to the device (e.g., recently enrolled, policy not yet synced) |
+| In Grace Period | The device is non-compliant but is within a configured grace window before enforcement actions begin |
+
+A device is compliant only if it satisfies every rule in every compliance policy assigned to it. If three policies are assigned and two pass but one fails, the device is non-compliant.
+
+An important default: devices with no compliance policy assigned are considered **compliant** by default. This can be changed in Intune Tenant Settings to treat unassigned devices as non-compliant — the more secure posture, but potentially disruptive if not all devices have policies assigned before the setting is changed.
+
+---
+
+## Compliance Policy Settings by Category
+
+### Device Health
+
+Rules in this category evaluate the integrity of the Windows boot and security stack:
+
+| Setting | What It Checks |
+|---------|---------------|
+| Require BitLocker | OS drive must be encrypted with BitLocker |
+| Require Secure Boot | UEFI Secure Boot must be enabled |
+| Require Code Integrity | Windows must confirm that only trusted drivers and system files load at boot |
+| No jailbreak / no root | iOS/Android: device must not be jailbroken or rooted |
+| Require device threat level ≤ X | Integrates with Microsoft Defender for Endpoint — device risk score must not exceed Low, Medium, or High |
+
+### Device Properties
+
+Minimum and maximum OS version requirements. This catches devices running outdated or unsupported Windows builds, iOS versions, or Android releases. Setting a minimum version prevents older, potentially vulnerable devices from accessing resources — incentivising users to keep devices updated.
+
+### System Security
+
+| Setting | Description |
+|---------|-------------|
+| Password required | Device must have a screen lock password or PIN set |
+| Minimum password length | Enforces a floor on credential length |
+| Password complexity | Alphanumeric, numeric only, complex characters |
+| Maximum minutes of inactivity before lock | Screen lock timeout |
+| Require device encryption | Storage encryption must be active (relevant for Android) |
+| Require antivirus | An AV solution must be registered with Windows Security Center |
+| Defender real-time protection | Microsoft Defender must have real-time protection enabled |
+
+---
+
+## Compliance Evaluation Flow
+
+1. The device checks in with Intune (either on a scheduled interval or after a sync is triggered).
+2. Intune evaluates all compliance policies assigned to the device (or to groups the device belongs to).
+3. Each policy produces a per-rule pass/fail result.
+4. The overall device compliance state is determined: if any rule in any policy fails, the device is non-compliant.
+5. The compliance state is reported to Entra ID.
+6. Conditional Access policies in Entra ID read the compliance state when the user attempts to access a resource.
+
+The evaluation is not continuous — it happens at check-in intervals, typically every 8 hours for Windows. A device that becomes non-compliant (e.g., the user disables BitLocker) remains compliant in Intune's view until the next check-in.
+
+---
+
+## Actions for Non-Compliance
+
+When a device is found non-compliant, Intune can take a series of escalating actions, each with a configurable delay:
+
+| Action | Description | Typical Timing |
+|--------|-------------|---------------|
+| Mark as non-compliant | The compliance state flips; CA can now block access | Immediately (0 days) |
+| Send email to user | Notification email with instructions to remediate | Day 0 or after grace period |
+| Send push notification | Notification via Company Portal app | Day 0 or after grace period |
+| Remotely lock | Device is locked, requiring PIN/password to unlock | After several days |
+| Retire device | Corporate data removed, MDM unenrolled | After extended non-compliance |
+
+The grace period is the gap between the device becoming non-compliant and the "mark as non-compliant" action taking effect. A grace period gives users time to respond to a notification and fix the issue (update their OS, re-enable BitLocker) before Conditional Access blocks them. Setting a grace period of three to seven days is common for organisations with a support desk that users can contact.
+
+---
+
+## The Conditional Access Connection
+
+Compliance policies on their own do not block anything. They produce a signal. Conditional Access in Entra ID consumes that signal as a grant condition.
+
+A typical Conditional Access policy might read: "To access Exchange Online, the user must have MFA satisfied AND the device must be marked compliant." The compliance check comes from Intune. The access decision is made by Entra ID at authentication time.
+
+This separation of concerns is architecturally significant:
+
+- Intune owns "is this device healthy?"
+- Entra ID owns "should this identity and device combination be allowed to access this resource?"
+- The two services communicate the compliance state between them automatically
+
+A non-compliant device does not receive a cryptic error — the user is typically redirected to a page explaining that their device does not meet requirements and pointing them to the Company Portal to see what is wrong.
+
+---
+
+## Compliance Reports
+
+The Intune portal provides several compliance reporting views:
+
+- **Policy compliance**: per-policy view showing what percentage of targeted devices are compliant, with drill-down to individual device results
+- **Device compliance**: per-device view showing every policy assigned and the result of each rule
+- **Setting compliance**: which specific settings are generating the most failures across the fleet (useful for identifying a widespread misconfiguration)
+- **Non-compliant devices**: filtered list of all devices currently in a non-compliant state, sortable by last check-in
+
+These reports are the operational dashboard for a security team monitoring device health posture across the organisation.
+
+---
+
+## Summary
+
+Compliance policies are the definition of minimum device security standards. The evaluation produces a compliance state — compliant or not — that Conditional Access in Entra ID uses to make access decisions. Non-compliance actions provide a proportionate escalation path: notify the user first, then block access, then retire the device after extended non-response. The grace period is the buffer that separates accidental non-compliance from deliberate non-remediation. Together, compliance policies and Conditional Access implement the device trust pillar of a Zero Trust security model.

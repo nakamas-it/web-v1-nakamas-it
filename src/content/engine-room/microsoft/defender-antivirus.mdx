@@ -1,0 +1,143 @@
+---
+title: "Microsoft Defender Antivirus — Built-in Endpoint Protection for Windows"
+category: "microsoft"
+topic: "defender"
+summary: "Microsoft Defender Antivirus is the built-in AV engine for Windows 10/11, active by default when no third-party product displaces it. Managed through Intune, GPO, or ConfigMgr, it provides real-time scanning, cloud-delivered verdicts, Attack Surface Reduction rules, Controlled Folder Access, and Network Protection — all tunable from a single Endpoint Security policy."
+tags: ["microsoft", "defender", "antivirus", "endpoint-security", "asr", "intune", "tamper-protection", "windows"]
+order: 52
+draft: false
+---
+
+## Overview
+
+Microsoft Defender Antivirus (MDAV) ships as a core component of Windows 10 and Windows 11. It activates automatically when no third-party antivirus product is detected and enters passive mode when another AV engine takes the active role. In most Intune-managed environments there is no competing product, so Defender AV runs in active mode on every enrolled device from day one — no separate deployment needed.
+
+Management surfaces include Intune Endpoint Security > Antivirus policies, Device Configuration profiles with the Windows Defender template, Group Policy, and Microsoft Configuration Manager. All three surfaces write to the same underlying Windows Defender CSP, so the settings are consistent regardless of the management tool in use.
+
+---
+
+## Real-Time Protection
+
+Real-time protection is the continuous on-access scan engine. It intercepts file reads and writes, process creation events, and network activity, submitting each to the scan engine before execution is permitted. The performance impact on modern hardware is minimal because the engine operates at the kernel filter driver level and caches results for files it has already assessed.
+
+When a match is found against the local signature database, the action (block, quarantine, or alert) is taken immediately. Signatures are delivered via Windows Update and the Microsoft Update Content Delivery Network, typically multiple times per day. The local database is the fallback — the cloud layer is what gives Defender its near-real-time response to new threats.
+
+---
+
+## Cloud-Delivered Protection
+
+Cloud-delivered protection (CDP) supplements local signatures with a live query to Microsoft's cloud intelligence service. When Defender AV encounters a file it has not seen before, it extracts a hash and a lightweight set of metadata (file size, entropy, PE header attributes) and submits them to the cloud within milliseconds. The cloud service responds with a verdict — clean, malicious, or unknown — before the file is allowed to execute.
+
+The practical effect is that a brand-new piece of malware that appeared hours ago and is not yet in the local signature database can still be caught, because the cloud has already seen it from other endpoints and built a verdict. This collapses the detection window from the hours required for a signature update cycle down to milliseconds.
+
+**Automatic sample submission** complements CDP: when a file is flagged as suspicious but a definitive verdict requires deeper analysis, Defender AV can send the full sample to Microsoft's detonation infrastructure. This feeds the intelligence loop that improves verdicts for all tenants.
+
+| Feature | What it does | Benefit |
+|---|---|---|
+| Cloud-delivered protection | Submits file metadata for live verdict | Near-instant detection of new threats |
+| Automatic sample submission | Sends suspicious files for deep analysis | Improves future verdicts globally |
+| Block at first sight | Blocks files that fail cloud check before execution | Zero patient-zero infections |
+
+---
+
+## Tamper Protection
+
+Tamper protection prevents malware — or a local administrator — from disabling or weakening Defender AV through registry writes, PowerShell commands, or WMI calls. When tamper protection is enabled, attempts to turn off real-time protection, clear the signature database, or disable cloud protection are silently blocked by the operating system.
+
+Tamper protection can be enabled through Intune or through Microsoft Defender for Endpoint (MDE). When a device is onboarded to MDE, tamper protection can be managed centrally from the Defender portal. The Intune Antivirus policy exposes a **Tamper Protection** toggle that writes to the same CSP path. Once set through a management channel, local changes — even from an elevated account — are ineffective.
+
+---
+
+## Scheduled Scans
+
+Two scan types are available for scheduled execution alongside continuous real-time protection:
+
+- **Quick scan**: examines the areas of the system most commonly targeted by malware — running processes, startup registry keys, memory, and known malware persistence locations. Completes in a few minutes and has minimal performance impact.
+- **Full scan**: traverses every file on every attached volume. Thorough but time-consuming; suited for off-hours schedules or post-incident verification.
+
+Intune Antivirus profiles expose scheduling settings for both scan types: day of week, time of day, and whether to run a catch-up scan if the device was off at the scheduled time.
+
+---
+
+## Attack Surface Reduction Rules
+
+Attack Surface Reduction (ASR) rules target specific techniques that malware uses to gain an initial foothold or move laterally. Each rule is a focused policy toggle rather than a generic signature match — the rules describe behaviors, not file hashes.
+
+### Rule Modes
+
+| Mode | Behavior |
+|---|---|
+| Off | Rule is inactive |
+| Audit | Event is logged but not blocked — used to assess impact |
+| Block | Behavior is prevented; event logged |
+| Warn | Behavior is blocked but user sees an override prompt |
+
+The recommended approach is to enable rules in Audit mode first, monitor the event log (or Defender portal) for false positives, then promote to Block once confidence is established.
+
+### Key Rules
+
+| Rule | What it blocks |
+|---|---|
+| Block Office apps from creating child processes | Macro malware spawning cmd.exe or PowerShell |
+| Block credential stealing from LSASS | Tools like Mimikatz dumping LSASS memory |
+| Block executable content from email | .exe and .dll dropped from email attachments |
+| Block untrusted/unsigned processes from USB | Autorun-style threats from removable media |
+| Block JavaScript/VBScript from launching executables | Script-based delivery (JS dropper, mshta abuse) |
+| Use advanced protection against ransomware | Behavioral heuristics for ransomware patterns |
+
+ASR rules require Defender AV to be in active mode. If a third-party AV is installed and Defender AV is in passive mode, ASR rules do not function.
+
+---
+
+## Controlled Folder Access
+
+Controlled Folder Access (CFA) protects a defined list of folders from unauthorized writes by untrusted processes. If a process that is not on the trusted application list attempts to modify a file in a protected folder, the write is blocked and an event is generated.
+
+The default protected folders include the user's Documents, Pictures, Videos, Music, and Desktop folders. OneDrive-synced paths and the Windows profile are also covered. Administrators can extend the list to include application data directories or network paths.
+
+CFA is the primary ransomware mitigation in the MDAV stack. Even if a ransomware binary evades signature detection, it cannot encrypt files in protected folders unless it is an explicitly trusted application. Trusted applications can be added through Intune or Group Policy; well-known system processes are trusted automatically by the engine.
+
+---
+
+## Network Protection
+
+Network Protection extends SmartScreen reputation checking beyond the browser. It operates at the kernel level via the Windows Filtering Platform and blocks outbound connections from any process — not just Edge or Internet Explorer — to domains and IPs that Microsoft's threat intelligence classifies as malicious.
+
+This matters because many attack tools make outbound connections for command-and-control, exfiltration, or payload download using system processes (PowerShell, certutil, bitsadmin) rather than a browser. A browser-only SmartScreen check would miss these. Network Protection catches them at the socket level.
+
+Like ASR rules, Network Protection supports Audit mode for pre-deployment assessment.
+
+---
+
+## Exclusions
+
+Exclusions tell Defender AV to skip certain paths, file extensions, or processes during scans and real-time protection. They are necessary for environments where legitimate tools produce false positives — build servers running compilers, AV-incompatible legacy applications, or EDR agents from other vendors.
+
+Each exclusion is a deliberate reduction in coverage. A path exclusion that covers a writable directory where untrusted content lands is a meaningful blind spot. Exclusion scope should be as narrow as possible: prefer a process exclusion (exclude scanner.exe from triggering real-time scans) over a path exclusion covering an entire directory.
+
+Intune Antivirus profiles allow configuration of path, extension, and process exclusions centrally. Exclusions set through Intune are delivered as managed settings and override or supplement locally configured exclusions.
+
+---
+
+## Managing Defender AV Through Intune
+
+The primary management surface is **Endpoint Security > Antivirus** in the Intune admin center. Policies created here are targeted at device or user groups through Entra ID group assignments.
+
+Key configurable settings in an Intune Antivirus profile:
+
+| Setting category | Examples |
+|---|---|
+| Cloud protection | Cloud-delivered protection level, block at first sight |
+| Scan settings | Scheduled quick/full scan, scan type, scan on network drives |
+| Exclusions | Path, extension, process exclusions |
+| Remediation | Action on detected threats (quarantine, remove, allow) |
+| PUA protection | Detect and block Potentially Unwanted Applications |
+| Tamper protection | Enable or disable |
+
+PUA (Potentially Unwanted Application) protection catches adware, browser hijackers, and bundled software that is not strictly malicious but degrades the user experience or poses a privacy risk. It can be set to Audit or Block independently of the main threat detection engine.
+
+---
+
+## Summary
+
+Microsoft Defender Antivirus provides a layered endpoint protection stack that is active by default on every Windows 10/11 device. Real-time protection handles day-to-day file and process scanning; cloud-delivered protection closes the gap between new threats and signature updates. Attack Surface Reduction rules tackle specific attacker behaviors; Controlled Folder Access provides ransomware-resistant folder protection; Network Protection extends reputation checks to all processes. Tamper protection ensures the stack remains intact even under attack. The entire configuration is manageable from Intune Endpoint Security policies, applied to device groups without any on-device agent installation beyond the Windows built-in components.

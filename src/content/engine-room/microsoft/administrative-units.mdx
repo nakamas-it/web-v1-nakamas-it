@@ -1,0 +1,114 @@
+---
+title: "Administrative Units — Scoped Delegation in Entra ID"
+category: "microsoft"
+topic: "entra id"
+summary: "Administrative Units are containers in Entra ID that restrict an administrator's scope to a defined subset of users, groups, or devices. They solve the problem of over-broad role assignments in large organisations where different teams should only manage their own populations."
+tags: ["microsoft", "entra-id", "administrative-units", "rbac", "delegation", "identity", "m365"]
+order: 40
+draft: false
+---
+
+## Overview
+
+By default, a role assignment in Entra ID is tenant-wide. When you assign someone the User Administrator role, they can manage every user in the organisation. For a small company with a single IT team this is entirely appropriate. For a university with separate IT departments per faculty, or a multinational with regional IT teams, or a managed service provider handling multiple client tenants, this breadth is a problem — an administrator who should only manage the Engineering department's accounts can technically reset passwords for the CEO.
+
+Administrative Units (AUs) are the Entra ID mechanism for solving this. An AU is a container object that holds a subset of users, groups, or devices from the tenant. Role assignments can be scoped to an AU, which means the role's permissions apply only to the objects inside that AU and not to the rest of the tenant.
+
+An administrator scoped to an AU with the Helpdesk Administrator role can reset passwords for users in that AU. They cannot see or modify users outside it. The role is the same; the scope is different.
+
+---
+
+## The Problem Administrative Units Solve
+
+Without AUs, the choice when delegating is binary: either give an administrator a role with tenant-wide scope, or give them no admin role at all. There is no middle ground.
+
+Consider a healthcare organisation with three hospitals, each with its own IT team. All three teams need to manage user accounts, reset passwords, and handle device issues for their own staff. Without AUs, the choices are:
+
+1. Make each team's lead a User Administrator at the tenant level — they can now manage every user in all three hospitals, which is far more access than they need.
+2. Grant no admin roles and route everything through a central IT function — creating a bottleneck and delaying support for end users.
+
+Administrative Units enable option 3: create an AU for each hospital, populate it with that hospital's users and devices, and assign the User Administrator role scoped to each respective AU. Each team administers only their population.
+
+---
+
+## How Administrative Units Work
+
+### Creating an AU and Adding Members
+
+An Administrative Unit is created in the Entra ID Admin Centre under Roles and Administrators. Once created, members are added — these can be users, groups, or devices. Adding a group to an AU does not automatically include the members of that group as individually managed AU members; the group object itself is an AU member and can be managed (for example, modifying group membership), but the users within the group are only AU-manageable if they are also directly added to the AU.
+
+### Scoped Role Assignments
+
+After populating an AU, administrators assign roles scoped to it. The process is the same as a standard role assignment, with the addition of selecting the AU as the scope. Supported roles for AU-scoped assignment include:
+
+- Authentication Administrator
+- Groups Administrator
+- Helpdesk Administrator
+- License Administrator
+- Password Administrator
+- User Administrator
+
+Notably, the Global Administrator role cannot be scoped to an AU — it is inherently tenant-wide. This makes logical sense: scoping a GA would be a contradiction in terms.
+
+### What Scoped Administrators Can and Cannot Do
+
+A User Administrator scoped to an AU can:
+- Reset passwords for users in the AU
+- Manage licenses for users in the AU
+- Update profile properties for users in the AU
+- Manage group membership for groups in the AU
+- View properties of users and groups in the AU
+
+A User Administrator scoped to an AU cannot:
+- Create new user accounts (user creation is tenant-wide, not AU-specific)
+- View or modify users outside the AU
+- Assign roles to users even within the AU
+- Delete users permanently from the tenant
+
+This last point is worth understanding clearly: scoped User Admin can manage existing objects inside the AU, but tenant-level operations like creating accounts remain with tenant-level administrators.
+
+---
+
+## Dynamic Membership Rules
+
+Administrative Units can be configured with **dynamic membership rules**, which automatically populate the AU based on user or device attribute values. A rule might specify that any user whose Department attribute equals "Engineering" is automatically a member of the Engineering AU. When a new employee is created with Department = Engineering, they are added to the AU automatically. When someone transfers to a different department and the attribute is updated, they are removed.
+
+Dynamic rules use the same attribute-based query language as dynamic security groups. This eliminates the manual overhead of maintaining AU membership as the organisation changes and ensures that new objects are brought under the correct administrative scope immediately.
+
+Static membership (manually adding individual users) is also supported and is more appropriate when the target population does not map cleanly to directory attributes.
+
+---
+
+## Flat Structure — No Nesting
+
+Administrative Units have a flat structure. An AU cannot contain another AU as a child — there is no hierarchy within the AU system itself. If an organisation needs to model a hierarchical structure (divisions, departments, teams), the current approach is to create separate AUs for each level of the hierarchy and assign role scopes independently.
+
+This differs from the organisational unit (OU) model in on-premises Active Directory Domain Services, where OUs can be nested to create administrative hierarchies that inherit group policy and delegation settings. Administrators familiar with AD OU delegation should be aware that AUs work on a flat peer model rather than a tree model.
+
+---
+
+## Licensing Requirement
+
+Creating Administrative Units does not require premium licensing. However, **assigning roles scoped to an AU requires Microsoft Entra ID P1 or P2**. Organisations on the free Entra ID tier can create AUs and add members but cannot make use of scoped role assignments, which removes the primary purpose of the feature. The P1 requirement is a frequent exam question and a real-world consideration when planning delegation models.
+
+---
+
+## Use Cases
+
+### University with Faculty IT Teams
+
+A university has faculties of Engineering, Law, Medicine, and Arts. Each faculty has its own IT support team responsible for student and staff accounts within their faculty. An AU is created per faculty, populated with faculty users and devices, and the faculty IT team members are assigned Helpdesk Administrator scoped to their AU. No cross-faculty access exists.
+
+### Managed Service Provider
+
+An MSP managing multiple client organisations within a single delegated tenant can use AUs to ensure that the engineer assigned to Client A cannot accidentally (or intentionally) modify Client B's user accounts. Each client gets an AU; engineers get scoped assignments per client.
+
+### Regional IT in Multinational Corporations
+
+A global company with IT operations in North America, Europe, and Asia-Pacific can use AUs to allow regional IT teams to manage their local user population independently while a central team retains tenant-wide authority. Dynamic membership rules based on the Country or Office Location attribute keep the AUs current without manual maintenance.
+
+---
+
+## Summary
+
+Administrative Units provide the scoped delegation model that Entra ID was missing for large and complex organisations. By attaching role assignments to a contained subset of the directory rather than the entire tenant, organisations can grant meaningful administrative capabilities to regional or functional IT teams without creating the over-broad access that tenant-wide roles produce. Combined with dynamic membership rules, AUs can automatically reflect the organisational structure in directory data with minimal ongoing manual maintenance.

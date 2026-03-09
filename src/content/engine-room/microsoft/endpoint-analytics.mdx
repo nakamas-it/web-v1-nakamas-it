@@ -1,0 +1,140 @@
+---
+title: "Endpoint Analytics — Device Experience and Performance Insights"
+category: "microsoft"
+topic: "endpoint-analytics"
+summary: "How Endpoint Analytics in Microsoft Intune measures the real-world performance and reliability of managed devices — tracking startup times, restart frequency, app reliability, and hardware readiness — giving IT teams data to proactively fix issues before users call the helpdesk."
+tags: ["endpoint-analytics", "intune", "microsoft-endpoint-manager", "md-101"]
+order: 56
+draft: false
+---
+
+## Overview
+
+Endpoint Analytics is a feature of Microsoft Intune (accessed through the Microsoft Intune admin centre) that collects performance and reliability telemetry from managed Windows devices and surfaces it as actionable insights. The goal is to shift IT from reactive helpdesk firefighting to proactive device experience management.
+
+Traditional endpoint management told you what was *configured* on a device. Endpoint Analytics tells you how the device is actually *performing* — startup times, restart counts, app crash rates, and whether hardware can run the latest OS.
+
+---
+
+## What Endpoint Analytics Measures
+
+### Startup Performance
+
+The startup score tracks how long managed devices take to reach a usable desktop after boot. It breaks the startup process into:
+
+- **Boot time** — from power-on to Windows logon screen
+- **Sign-in time** — from logon submission to responsive desktop
+- **Group Policy processing time** — time spent applying GPOs at logon
+- **Background startup process time** — how long background processes delay desktop responsiveness
+
+Devices are compared against a baseline. Devices below the baseline drag down the organisation's score and surface as candidates for remediation.
+
+Poor startup performance is usually caused by:
+- Too many startup applications
+- Slow Group Policy processing (large GPO count, slow DCs)
+- Hardware bottlenecks (spinning disk vs SSD, insufficient RAM)
+- Driver issues
+
+### Restart Frequency
+
+Tracks how often devices restart and *why*:
+
+| Restart reason | What it indicates |
+|----------------|------------------|
+| Update-related | Patch compliance is forcing restarts |
+| Blue screen (BSOD) | Driver instability, hardware faults |
+| User-initiated | Normal — user rebooting manually |
+| Unexpected shutdown | Power loss, crash without BSOD |
+| Other | Services, pending renames |
+
+Devices with high BSOD rates surface as hardware or driver problems that need investigation.
+
+### Work from Anywhere
+
+The Work from Anywhere report measures how cloud-ready the device fleet is. It scores each device against criteria:
+
+- **Windows 10/11**: Running a supported version
+- **Cloud identity**: Device joined to Entra ID (fully cloud or hybrid)
+- **Cloud management**: Enrolled in Intune (not just SCCM)
+- **Cloud provisioning**: Deployed via Autopilot
+- **Windows Update for Business**: Receiving updates through WUfB, not WSUS
+
+Each criterion earns points. The aggregate score shows how far the organisation has moved toward cloud-native endpoint management.
+
+### Application Reliability
+
+Tracks app crash and hang rates across the device fleet. The app reliability report shows:
+
+- Mean time between app failures (MTBF)
+- Crash vs hang breakdown
+- Affected device count per application
+- Trend over time
+
+This helps distinguish a systemic application compatibility problem (affecting many devices after an update) from isolated incidents on specific hardware.
+
+### Battery Health
+
+Reports battery capacity as a percentage of design capacity for each device. Batteries degrade over time — a laptop showing 40% remaining capacity relative to its design spec will fail to last a full workday even when showing 100% battery indicator.
+
+The battery health report identifies devices whose batteries should be replaced before they cause productivity disruption.
+
+---
+
+## Proactive Remediations (Remediations)
+
+Proactive Remediations (now just called **Remediations** in the Intune admin centre) are PowerShell script pairs deployed through Endpoint Analytics:
+
+- **Detection script** — runs on a schedule, returns exit code 0 (healthy) or 1 (issue found)
+- **Remediation script** — runs only when the detection script returns unhealthy, automatically fixes the issue
+
+Microsoft provides a library of built-in script packages for common issues:
+- Clear stale certificates
+- Restart the Windows Update service
+- Remove browser extensions causing performance issues
+- Check/restart OneDrive sync
+
+Custom script pairs can be authored for organisation-specific issues. This turns ad-hoc helpdesk fixes into automated, proactively-deployed remediations.
+
+Reporting shows: how many devices were checked, how many were found unhealthy, how many were successfully remediated.
+
+---
+
+## Baseline Scores
+
+Endpoint Analytics generates scores from 0–100 for startup performance, restart frequency, and app reliability. Microsoft provides a **baseline** — an industry median calculated from all enrolled organisations.
+
+Scores below the baseline identify areas requiring attention. Scores can also be compared to a **custom baseline** (e.g., snapshot from 30 days ago) to measure improvement or regression over time.
+
+---
+
+## Prerequisites and Data Collection
+
+Endpoint Analytics collects data from devices enrolled in Intune (co-management or full Intune management). Data is uploaded through the Intune management extension or via the Microsoft Connected Cache path.
+
+For devices managed with SCCM and co-managed, the SCCM client can upload data to Endpoint Analytics through co-management enrollment.
+
+No additional agent is required beyond the standard Intune management components.
+
+---
+
+## Licensing
+
+Endpoint Analytics is included in:
+
+- **Microsoft Intune Plan 1** (included in Microsoft 365 E3, E5, Business Premium)
+- **Microsoft 365 E5 / Microsoft Endpoint Manager**
+
+The Remediations feature (Proactive Remediations) requires **Windows 10/11 Enterprise** or **Education** on the managed device.
+
+---
+
+## Key Exam Points
+
+- Endpoint Analytics is accessed through the **Microsoft Intune admin centre** — not a separate portal
+- It measures device *experience* (performance, reliability), not just configuration compliance
+- **Startup score** breaks boot into boot time, sign-in time, GP processing time
+- **Restart frequency** categorises restarts by reason — BSOD rate indicates hardware/driver problems
+- **Work from Anywhere** score measures cloud-readiness across five criteria
+- **Remediations** = PowerShell detection + remediation script pairs deployed proactively
+- Scores compare against an industry baseline; custom baselines track improvement over time
+- No extra agent required — uses existing Intune management components

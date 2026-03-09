@@ -1,0 +1,109 @@
+---
+title: "Microsoft 365 DNS Domains — Connecting Your Domain to the Cloud"
+category: "microsoft"
+topic: "m365"
+summary: "Every Microsoft 365 tenant starts life with a .onmicrosoft.com domain, but real-world deployments require custom domain names. DNS is the bridge that proves ownership, routes mail, enables Teams, and ties every M365 workload to your organisation's identity."
+tags: ["microsoft", "m365", "dns", "exchange-online", "teams", "intune", "domains"]
+order: 37
+draft: false
+---
+
+## Overview
+
+When a Microsoft 365 subscription is provisioned, it is automatically assigned a default domain in the form `<tenantname>.onmicrosoft.com`. This domain is permanent — the tenant name embedded in it cannot be changed after creation, and the onmicrosoft.com domain itself cannot be removed from the tenant. For most organisations the default domain is an internal identifier used during provisioning; user-facing identity should come from the organisation's own registered domain name.
+
+Adding a custom domain to M365 is a two-phase process: first proving to Microsoft that you control the domain, then configuring the DNS records each workload requires to function. Getting this right is foundational — every service from Exchange Online to Intune enrollment depends on DNS being correctly configured.
+
+---
+
+## Why Domain Verification Exists
+
+Microsoft must confirm that the person adding a domain actually controls it before trusting that domain for authentication and mail flow. Without this check, an attacker could claim any domain and start receiving email or forging identities in the tenant.
+
+The standard verification method is adding a **TXT record** to the domain's public DNS zone. Microsoft generates a unique token value for each domain-tenant combination; once the TXT record is detected during Microsoft's DNS lookup, ownership is confirmed and the domain is added to the tenant. An MX record or a small text file on the domain's web root can alternatively be used for verification, but TXT is the most common path.
+
+DNS propagation can take up to 15 minutes but typically completes sooner. Some registrars (notably GoDaddy) integrate directly with the M365 admin centre and can configure all required DNS records automatically once ownership is confirmed.
+
+A single M365 subscription supports up to **900 custom domains**, including subdomains (which count as separate entries). Users can have proxy email addresses on multiple associated domains from the same mailbox.
+
+---
+
+## DNS Records Per Workload
+
+Once a domain is verified, the DNS records required depend on which workloads the domain will be used for.
+
+### Exchange Online
+
+| Record Type | Name | Value |
+|-------------|------|-------|
+| MX | `@` (apex) | `<token>.mail.protection.outlook.com` |
+| CNAME | `autodiscover` | `autodiscover.outlook.com` |
+| TXT (SPF) | `@` (apex) | `v=spf1 include:spf.protection.outlook.com -all` |
+
+The **MX record** directs inbound email to Exchange Online's mail protection infrastructure. MX priority is a numerical value — the lower the number, the higher the preference. When migrating from an on-premises mail system, a common technique is to leave the existing MX record in place and add the Exchange Online MX with a higher priority number. Traffic continues flowing to on-premises while pilot users are migrated; once all mailboxes are in the cloud the on-premises MX entry is removed.
+
+The **Autodiscover CNAME** allows Outlook and mobile email clients to automatically discover server settings, mailbox configuration, and Out of Office rules without manual server entry. Without it, users must configure their mail client manually.
+
+The **SPF TXT record** is a sender policy that identifies which mail servers are authorised to send email on behalf of the domain. Receiving mail servers check SPF to help determine whether a message is legitimate or a spoofing attempt. The `-all` qualifier at the end means that any server not listed should be treated as unauthorised (hard fail).
+
+### Microsoft Teams
+
+Teams (formerly Skype for Business Online) requires a set of records to enable federation, discovery, and calling:
+
+| Record Type | Name | Value |
+|-------------|------|-------|
+| CNAME | `sip` | `sipdir.online.lync.com` |
+| CNAME | `lyncdiscover` | `webdir.online.lync.com` |
+| SRV | `_sip._tls` | Points to `sipdir.online.lync.com` on port 443 |
+| SRV | `_sipfederationtls._tcp` | Points to `sipfed.online.lync.com` on port 5061 |
+
+These records allow client discovery of the Teams/SIP infrastructure and enable federation with other organisations' Teams tenants.
+
+### Intune (Device Enrollment)
+
+Mobile device management via Intune uses a CNAME to simplify the enrollment experience. Without it, users must manually type a long enrollment URL.
+
+| Record Type | Name | Value |
+|-------------|------|-------|
+| CNAME | `enterpriseregistration` | `enterpriseregistration.windows.net` |
+| CNAME | `enterpriseenrollment` | `enterpriseenrollment.manage.microsoft.com` |
+
+---
+
+## Authoritative vs. Internal Relay Domains
+
+Once the domain is configured, it must be classified according to where mailboxes reside:
+
+- **Authoritative domain** — All mailboxes for the domain exist in Exchange Online. Mail for unknown recipients is rejected. This is the correct setting for a fully cloud-based organisation.
+- **Internal relay domain** — Used in hybrid deployments where some mailboxes remain on-premises. Exchange Online accepts the mail, and a connector forwards unresolved recipients to the on-premises mail server. This prevents NDRs during a phased migration.
+
+---
+
+## Split DNS Considerations
+
+In environments where internal corporate DNS and external public DNS are managed separately, it is important that internal users resolve Autodiscover and other service CNAMEs to the correct endpoints. If internal DNS returns stale records pointing to old on-premises servers while external DNS has been updated to point to Exchange Online, internal Outlook clients will fail to connect. The solution is ensuring internal DNS zones for the custom domain include the same CNAME records as the public zone.
+
+---
+
+## Federated vs. Managed Domains
+
+A domain added to M365 can operate in one of two authentication modes:
+
+- **Managed domain** — Authentication is handled directly by Entra ID (cloud-only). Passwords are stored as hashes in Entra ID (Password Hash Sync) or validated against on-premises domain controllers in real time (Pass-Through Authentication). The default for new domains.
+- **Federated domain** — Authentication is delegated to an on-premises identity provider such as AD FS. Entra ID redirects sign-in requests to the federation infrastructure. More complex to maintain, required only when on-premises password policies must be enforced at sign-in time or when smart card/certificate authentication is needed.
+
+Most organisations should operate managed domains. Federated domains introduce a dependency on on-premises federation servers — if AD FS is unavailable, cloud sign-in fails.
+
+---
+
+## Changing the Primary Domain and the onmicrosoft.com Domain
+
+The **default domain** in M365 determines which domain suffix is automatically applied to new user accounts. Once a custom domain is added and verified, it can be set as the default, ensuring new users receive email addresses on the custom domain rather than onmicrosoft.com.
+
+The onmicrosoft.com domain itself cannot be removed or renamed. It remains in the tenant permanently and continues to function as a fallback identity. This is by design — removing it would break internal service dependencies and licensing references that Microsoft maintains. The practical implication is that administrators should choose a sensible tenant name at provisioning time; the onmicrosoft.com domain will remain visible in admin portals for the lifetime of the subscription.
+
+---
+
+## Summary
+
+DNS is the connective tissue between a Microsoft 365 tenant and an organisation's public identity. Domain verification proves control; the subsequent DNS records steer each workload — mail, autodiscover, Teams federation, device enrollment — to the correct cloud endpoints. Understanding the record types, their purposes, and the authoritative versus relay domain distinction is essential for any M365 deployment and a core subject area in the MS-102 exam.

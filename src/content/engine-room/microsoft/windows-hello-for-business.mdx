@@ -1,0 +1,141 @@
+---
+title: "Windows Hello for Business — Passwordless Authentication for the Enterprise"
+category: "microsoft"
+topic: "whfb"
+summary: "Windows Hello for Business replaces the password at Windows sign-in with a TPM-bound cryptographic key pair unlocked by biometric or PIN. The password is never transmitted, never replayable from the network, and never useful to a phisher. Deployed via Intune, it integrates with Entra ID and on-premises AD through several trust models suited to different infrastructure maturity levels."
+tags: ["microsoft", "windows-hello", "whfb", "passwordless", "tpm", "authentication", "intune", "entra-id"]
+order: 54
+draft: false
+---
+
+## Overview
+
+Windows Hello for Business (WHfB) is a passwordless authentication credential built into Windows 10 and Windows 11. At first glance it resembles the consumer Windows Hello feature — the user authenticates with a fingerprint, face scan, or PIN rather than typing a password. The difference is what happens underneath: WHfB creates an asymmetric key pair, stores the private key inside the device's TPM, and registers the public key with Entra ID or Active Directory. From that point, the credential is a cryptographic operation performed locally — no password is transmitted to any server.
+
+This distinction matters because most credential-based attacks — phishing, pass-the-hash, credential stuffing, man-in-the-middle — require a secret that travels over a network. WHfB eliminates that secret. The private key never leaves the TPM. Even if an attacker intercepts every byte of the authentication exchange, there is no replayable token.
+
+---
+
+## WHfB vs Consumer Windows Hello
+
+The two features share a user interface but have fundamentally different security architectures.
+
+| Dimension | Consumer Windows Hello | Windows Hello for Business |
+|---|---|---|
+| Key storage | Software (DPAPI) | TPM hardware |
+| Identity integration | Local account or MSA | Entra ID or Active Directory |
+| Network authentication | Password used for domain/cloud auth | WHfB key used directly |
+| PKI requirement | None | Depends on trust model |
+| Managed by | User preference | Intune / Group Policy |
+| Phishing resistant | No (password still used behind scenes) | Yes |
+
+Consumer Hello is a convenience wrapper around a password — it replaces the password prompt on the device screen, but the password still exists and is still used for network authentication when needed. WHfB is a genuine credential replacement: the WHfB key pair is what authenticates the user to Entra ID or AD, and the password can be left unused (or rotated to a random value) once WHfB is provisioned.
+
+---
+
+## Why the PIN Is Not a Password
+
+A common misunderstanding is that substituting a PIN for a password is simply trading a long secret for a short one. The WHfB PIN is not a password:
+
+- The PIN is **device-specific**. It unlocks the TPM on a particular machine. Knowing the PIN is useless without physical access to that exact device.
+- The PIN is **never sent over the network**. It is entered locally, processed by the TPM, and used to unseal the private key. Nothing leaves the device.
+- The PIN is **not validated by a remote server**. There is no server to attack, no lockout mechanism to bypass remotely, and no database where the PIN is stored.
+
+An attacker who steals the PIN still needs the physical device with its TPM. An attacker who steals the device still needs the PIN to unseal the key (unless biometric is used, in which case they need a working biometric match). The combination is two-factor authentication by design.
+
+---
+
+## Deployment Models
+
+WHfB supports three primary deployment models determined by the organization's identity infrastructure:
+
+### Cloud-Only
+
+The simplest model. Devices are Entra ID joined and Intune managed. No on-premises Active Directory is involved. WHfB provisions automatically after the device joins Entra ID and the user completes multi-factor authentication once. The WHfB public key is stored as a credential in the user's Entra ID account. No PKI, no on-premises servers.
+
+This model is appropriate for cloud-native organizations that have never built on-premises AD, or for acquisitions and subsidiaries that are being kept separate from an existing AD forest.
+
+### Hybrid — Key Trust
+
+The device is both on-premises domain joined and Entra ID registered (Hybrid Entra ID Join). The WHfB public key is synchronized to the on-premises AD via Entra Connect as an attribute on the user object. When the user authenticates to an on-premises resource (file server, application), a Windows Server 2016 or later domain controller validates the Kerberos service ticket using the public key stored in AD.
+
+Key trust eliminates the PKI requirement of the older certificate trust model. The trade-off is that it requires domain controllers at Windows Server 2016 or later — older DCs cannot validate key trust credentials.
+
+### Hybrid — Certificate Trust
+
+Similar to key trust in the hybrid topology, but the WHfB credential is backed by a certificate issued from the organization's PKI. The certificate is deposited in the user's personal certificate store and used for authentication. This model supports domain controllers running Windows Server 2012 R2 and later because Kerberos certificate authentication has been supported for longer than key trust.
+
+Certificate trust is more complex: it requires an operational PKI, enrollment policies, and certificate lifecycle management. It is the right choice when the existing domain controller fleet cannot be upgraded to 2016 immediately.
+
+### Hybrid — Cloud Trust (Entra Kerberos)
+
+The recommended model for new hybrid deployments. It uses the Entra Kerberos feature — Microsoft provides a partial Kerberos Key Distribution Center in Entra ID that issues Kerberos Ticket Granting Tickets trusted by the on-premises AD. No PKI is required, and there are no domain controller version constraints. The device authenticates to Entra ID using WHfB and receives a Kerberos TGT usable for on-premises resources.
+
+Cloud trust is simpler than both key trust and certificate trust and removes the PKI dependency entirely while still supporting on-premises resource access.
+
+| Trust model | PKI required | Min DC version | Recommended for |
+|---|---|---|---|
+| Cloud-only | No | N/A | Cloud-native orgs |
+| Hybrid Key Trust | No | Windows Server 2016 | Hybrid orgs with modern DCs |
+| Hybrid Certificate Trust | Yes | Windows Server 2012 R2 | Hybrid orgs with older DCs |
+| Hybrid Cloud Trust | No | None (uses Entra KDC) | New hybrid deployments |
+
+---
+
+## Biometric Options
+
+WHfB supports two biometric modalities in addition to PIN:
+
+- **Fingerprint**: requires a fingerprint reader. The reader hardware must meet Windows Biometric Framework specifications for enterprise use. The fingerprint template is stored encrypted in the TPM — it never leaves the device and is not accessible to the operating system.
+- **Facial recognition (Windows Hello Face)**: requires an infrared camera (depth sensor preferred). Consumer RGB cameras are not supported for enterprise WHfB. The facial model is stored in the TPM.
+
+Biometric data never leaves the device. It is not synchronized to Entra ID, not backed up to the cloud, and not accessible to administrators. If the device is replaced, the biometric must be re-enrolled on the new device.
+
+Organizations can configure whether biometrics are permitted, required, or disabled through the Intune policy. Some high-security environments mandate PIN-only to prevent biometric spoofing concerns, though Windows Hello Face requires an IR camera specifically to resist photograph-based attacks.
+
+---
+
+## Provisioning Flow
+
+WHfB provisioning happens automatically after enrollment conditions are met:
+
+1. The device is Entra ID joined or Hybrid Entra ID joined.
+2. The user completes the first sign-in and performs MFA (for cloud-only) or the provisioning prerequisites are met (for hybrid).
+3. Windows Hello for Business provisioning begins — the user is prompted to set up a PIN (and optionally biometrics).
+4. During PIN setup, the TPM generates an asymmetric key pair. The private key is sealed inside the TPM; the public key is sent to Entra ID or AD.
+5. A Kerberos authentication certificate or key trust credential is registered against the user's account.
+6. Future authentications use the TPM-bound key pair — the password is no longer needed for Windows sign-in.
+
+---
+
+## Intune Management
+
+WHfB is configured via an **Identity Protection** profile in Intune (Devices > Configuration > Create policy > Windows 10/11 > Identity Protection). Key settings include:
+
+| Setting | Options | Notes |
+|---|---|---|
+| Configure Windows Hello for Business | Enable / Disable / Not configured | Enable to enforce provisioning |
+| PIN minimum length | 4–127 characters | Longer PINs increase brute-force resistance |
+| PIN maximum length | Up to 127 characters | |
+| Lowercase/uppercase/special characters in PIN | Required / Allowed / Disallowed | Alphanumeric PINs are harder to guess |
+| Biometrics | Allowed / Not allowed | Disable for PIN-only environments |
+| Anti-spoofing for facial recognition | Enabled / Disabled | Requires IR camera |
+| Use security keys for sign-in | Enable / Disable | FIDO2 keys as an alternative |
+
+Policies are assigned to Entra ID user or device groups. When a device receives the policy and the user next signs in, provisioning begins automatically.
+
+---
+
+## Security Posture Considerations
+
+WHfB changes the attack surface in meaningful ways. Phishing attacks that capture passwords become useless because the password is not the credential. Pass-the-hash and pass-the-ticket attacks against the Windows credential become much harder because the private key that signs Kerberos requests is in the TPM and cannot be extracted. Credential stuffing — testing leaked password databases against accounts — has no effect on WHfB-provisioned accounts.
+
+The residual risks are physical: an attacker with the device and either the PIN or a biometric match can authenticate. This is why TPM-backed storage matters — a stolen device without the correct PIN is not useful for authentication, and PIN attempts are rate-limited by the TPM.
+
+Organizations that want to ensure the password cannot be used even as a fallback can configure policies that disable password sign-in after WHfB is provisioned, or rotate passwords to random values using Entra ID lifecycle tools.
+
+---
+
+## Summary
+
+Windows Hello for Business replaces the transmitted password with a device-bound cryptographic key pair, making phishing and network-based credential theft structurally impossible. The PIN or biometric used to unlock the key never travels over the network and is processed entirely within the TPM. Deployment ranges from simple cloud-only (Entra ID join, no PKI) to hybrid models that support on-premises AD with varying infrastructure requirements. The cloud trust model removes PKI and domain controller version constraints, making it the recommended starting point for new hybrid deployments. Intune manages the entire provisioning and policy lifecycle from a single Identity Protection profile.

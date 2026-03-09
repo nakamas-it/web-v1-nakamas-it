@@ -1,0 +1,133 @@
+---
+title: "Intune Enrollment — Getting Devices Under Management"
+category: "microsoft"
+topic: "intune"
+summary: "Before Intune can deliver policies, apps, or compliance checks to a device, the device must be enrolled. Enrollment establishes the management relationship and installs the MDM agent. The method varies by platform and ownership model — from fully automated Autopilot flows for new Windows devices to user-initiated Company Portal enrollment for BYOD."
+tags: ["microsoft", "intune", "mdm", "enrollment", "autopilot", "android-enterprise", "apple-business-manager", "co-management"]
+order: 49
+draft: false
+---
+
+## Overview
+
+Enrollment is the act of registering a device with Intune and installing the management channel — the MDM profile on mobile platforms, or the Intune Management Extension on Windows. Until a device is enrolled, Intune has no way to push configuration, assess compliance, or deploy applications to it.
+
+The choice of enrollment method is driven by three factors: the device platform, whether the device is corporate-owned or personal (BYOD), and whether the organisation wants full MDM control or a lighter-touch app-protection-only model.
+
+---
+
+## Windows Enrollment Methods
+
+### Autopilot
+
+The recommended path for new corporate Windows devices. The device hardware hash is pre-registered in Intune before it reaches the user. During OOBE, the Autopilot service delivers a deployment profile, which drives the Entra ID join and MDM auto-enrollment automatically. The user does not need to navigate any enrollment screens — it happens as part of the sign-in flow.
+
+### Entra ID Join with Auto-Enrollment
+
+When a user joins a Windows device to Entra ID during OOBE (choosing "Set up for work or school"), Entra ID triggers MDM auto-enrollment to Intune if the tenant is configured for it. This works for both new devices set up by users and devices where IT has chosen not to pre-register hardware hashes.
+
+Auto-enrollment requires that the Intune MDM scope in Entra ID is set to cover the user (either "All" or a specific group). If the scope is not set, the Entra join completes but Intune enrollment does not follow.
+
+### Group Policy MDM Auto-Enrollment
+
+For existing devices that are already domain-joined to on-premises Active Directory and also Hybrid Entra ID joined, a Group Policy Object can trigger MDM auto-enrollment without requiring the user to do anything. The GPO targets the Intune MDM enrollment URL and runs the enrollment silently in the background.
+
+This is the primary method for enrolling a large existing fleet of domain-joined Windows devices into Intune without re-imaging or manual user action.
+
+### Bulk Enrollment via Provisioning Package
+
+The Windows Configuration Designer tool creates a provisioning package (.ppkg file). The package can be applied during OOBE via USB or by running the file on an existing device. It enrolls the device into Intune and applies initial configuration without requiring a user to sign in with a corporate account first — useful for shared devices or kiosks where no named user account drives enrollment.
+
+### Manual Enrollment via Settings
+
+A user can manually enroll a device by navigating to Settings > Accounts > Access work or school > Connect. This is the fallback method — slower and dependent on user action, but available on any Windows 10/11 device without any pre-configuration.
+
+---
+
+## iOS and iPadOS Enrollment Methods
+
+### Automated Device Enrollment (ADE) via Apple Business Manager
+
+The Apple equivalent of Windows Autopilot. Corporate Apple devices are purchased through Apple Business Manager (ABM) or Apple School Manager (ASM). ABM associates the device serial number with the organisation's MDM server (Intune). When the device is activated, it contacts Apple's servers, receives an MDM profile, and enrolls in Intune — supervised mode enabled, MDM profile locked (user cannot remove it).
+
+Supervised mode is required for the strongest MDM controls on iOS: app restrictions, kiosk mode, content filter enforcement, and silent app installation.
+
+### User Enrollment
+
+Designed for BYOD scenarios. User Enrollment creates a cryptographic separation between the corporate management channel and the personal partition of the device. Intune can manage corporate apps and data without having visibility into personal apps or the ability to wipe the entire device.
+
+User Enrollment requires a Managed Apple ID (provided via ABM or federated from Entra ID). It is less invasive than full MDM enrollment and is the appropriate model when the organisation does not own the device.
+
+### Manual Enrollment via Company Portal
+
+The user installs the Company Portal app, signs in with their corporate credentials, and follows the enrollment prompts. This delivers standard MDM management without the automated onboarding of ADE. Used for personal devices where ABM supervision is not appropriate or available.
+
+---
+
+## Android Enrollment Methods
+
+### Android Enterprise
+
+The current standard for Android management in enterprise environments. Android Enterprise splits into several sub-modes based on ownership and use case:
+
+| Sub-Mode | Ownership | Management Level | Use Case |
+|----------|-----------|-----------------|----------|
+| Work Profile (BYOD) | Personal | Corporate apps/data isolated in work profile; personal space untouched | Employee-owned devices |
+| Fully Managed (COBO) | Corporate | Full device management; device is single-user, corporate purpose only | Corporate laptops, primary work device |
+| Dedicated Device (COSU) | Corporate | Single-app or kiosk mode; no user account | Kiosks, POS terminals, shared scanners |
+| Corporate-Owned Work Profile (COPE) | Corporate | Full device management with a separate personal work profile | Corporate device with personal use allowed |
+
+### Android Device Administrator (Legacy)
+
+The pre-Android Enterprise management API. Google has deprecated it; Android 10+ devices progressively restrict its capabilities. Organisations should migrate to Android Enterprise — Device Administrator enrollment should not be used for new deployments.
+
+---
+
+## macOS Enrollment
+
+macOS devices enrolled through Apple Business Manager follow the same ADE flow as iOS. The device arrives pre-registered; on first boot it enrolls in Intune automatically and receives configuration profiles. Without ABM, users can enroll manually via the Company Portal app, but this does not enable the locked MDM profile or supervision equivalent.
+
+---
+
+## Enrollment Restrictions
+
+Intune enrollment restrictions let administrators control which devices are allowed to enroll:
+
+- **Platform restrictions** — block specific OS platforms entirely (e.g., block personal Android)
+- **OS version requirements** — require minimum or maximum OS version (prevents enrolling outdated, potentially vulnerable devices)
+- **Device limit** — cap the number of devices a single user can enroll (default is 15)
+- **Corporate vs personal** — block personally owned devices from enrolling (enforce corporate-only MDM)
+
+Restrictions are evaluated at enrollment time and produce an immediate block if the device does not meet the criteria.
+
+---
+
+## Co-Management: ConfigMgr and Intune Together
+
+Co-management is the state where a Windows device is simultaneously managed by both Configuration Manager (SCCM/ConfigMgr) and Microsoft Intune. This is not a problem to fix — it is a deliberate migration strategy.
+
+In co-management, workloads (groups of management functions) can be assigned independently to either ConfigMgr or Intune:
+
+| Workload | Can Move to Intune |
+|----------|-------------------|
+| Compliance policies | Yes |
+| Windows Update policies | Yes |
+| Resource access (Wi-Fi, VPN, certificates) | Yes |
+| Endpoint Protection | Yes |
+| Device Configuration | Yes |
+| Microsoft 365 Apps | Yes |
+
+Sliding a workload to Intune means Intune takes authority for that workload; ConfigMgr settings for it are ignored. This allows a gradual, reversible migration: move compliance to Intune first, validate it, then move Windows Update policies, and so on — without a hard cutover that risks breaking the entire fleet.
+
+### Co-Management Prerequisites
+
+- Windows 10/11 version 1709 or later
+- Configuration Manager Current Branch 1710 or later
+- Devices must be Hybrid Entra ID joined (domain-joined + Entra ID registered)
+- Users must have Intune licenses assigned
+
+---
+
+## Summary
+
+Enrollment is the foundation of every Intune management capability. The method chosen determines the level of control Intune gains, the degree of user involvement, and how seamlessly provisioning integrates with the device's platform. For Windows, Autopilot and GPO auto-enrollment cover the new-device and existing-fleet scenarios respectively. For mobile, ADE and Android Enterprise provide corporate-grade supervised management. Co-management is the bridge for organisations that cannot yet fully abandon on-premises ConfigMgr — it allows partial migration to Intune without abandoning the existing management investment.

@@ -1,0 +1,105 @@
+---
+title: "Privileged Identity Management — Just-in-Time Admin Access"
+category: "microsoft"
+topic: "pim"
+summary: "Privileged Identity Management converts permanent admin role assignments into time-limited, approval-gated activations. It is the primary tool Microsoft recommends for reducing the attack surface created by standing privileged access in an Entra ID tenant."
+tags: ["microsoft", "entra-id", "pim", "privileged-access", "security", "identity", "m365"]
+order: 39
+draft: false
+---
+
+## Overview
+
+Privileged Identity Management (PIM) is a Microsoft Entra ID feature that governs who has access to privileged roles, when they have it, and for how long. It is included in the Entra ID P2 license tier and the Microsoft 365 E5 bundle.
+
+The problem PIM addresses is straightforward. In a traditional role assignment model, an administrator is permanently assigned a role — Global Administrator, Security Administrator, Exchange Administrator — and that assignment remains active continuously. If the account is phished, password-sprayed, or the credentials are found in a breach dump, the attacker inherits full role access from the moment of compromise. There is no time limit, no approval gate, and often no immediate alert that the role is being used maliciously.
+
+PIM changes the model. Instead of a role being permanently active, users are made **eligible** for a role. They do not have the role until they explicitly request activation. Activation is time-bounded, may require MFA, may require a written justification, and may require approval from a designated approver before it takes effect. When the activation expires, the role is automatically removed.
+
+---
+
+## Eligible vs. Active Assignment
+
+PIM introduces a distinction between two membership states for role assignments:
+
+**Active assignment** means the user holds the role continuously — equivalent to the traditional pre-PIM model. Some roles are appropriate as permanently active (for example, a service account that runs automated scripts may need permanent access). In PIM, this is still configurable, but the intent is that Active assignments should be used sparingly and only for genuinely non-interactive needs.
+
+**Eligible assignment** means the user can activate the role on demand. The role provides no permissions until the user initiates an activation request through the Entra ID portal or the My Access portal. Eligible is the preferred model for any human administrator with access to sensitive roles.
+
+The practical difference: an account with an eligible Global Administrator assignment has zero Global Admin permissions at rest. An attacker who compromises that account gets nothing from the GA eligibility until they also clear the activation requirements — MFA, approval, justification, and a time-limited session.
+
+---
+
+## The Activation Workflow
+
+When a user with an eligible role assignment needs to use their elevated permissions, the activation flow proceeds as follows:
+
+1. The user navigates to the PIM section of the Entra ID portal (or the My Access portal) and requests activation of the eligible role.
+2. They specify the duration of the activation session, within the maximum duration configured for that role.
+3. They provide a justification describing why they need the role — this is logged and auditable.
+4. If the role is configured to require MFA at activation, the user completes an MFA challenge at this point, regardless of whether they authenticated with MFA at sign-in.
+5. If the role requires approval, the request is sent to the configured approvers. The role is not activated until an approver accepts the request. Approvers can be specific users or members of a role-assignable group.
+6. Once all requirements are met, the role becomes Active for the specified duration. When the session expires, the role is automatically removed and the user reverts to their baseline permissions.
+
+The separation of step 4 (MFA at sign-in) and the MFA requirement at activation is important. Even if an attacker obtains a valid session token from a phished user, they still face the activation MFA challenge separately.
+
+---
+
+## Configurable Settings Per Role
+
+PIM is not a single policy applied uniformly. Each eligible role in the tenant can be individually configured with its own settings:
+
+| Setting | Effect |
+|---------|--------|
+| Maximum activation duration | Upper bound on how long a single activation session can last (configured in hours) |
+| Require MFA on activation | Forces a fresh MFA challenge even if the user already completed MFA at sign-in |
+| Require justification | The user must enter a reason for activation before the request proceeds |
+| Require approval | Sends the activation request to one or more designated approvers |
+| Notification on activation | Sends an email alert to configured recipients when the role is activated |
+| Require incident/request ticket | Requires a ticket number from an ITSM system to be entered before activation |
+
+For the most sensitive roles — Global Administrator above all — the recommended configuration is: maximum activation of 1–2 hours, MFA required, justification required, approval required from a second senior administrator.
+
+---
+
+## Access Reviews
+
+PIM includes a periodic access review mechanism that allows organisations to certify that role assignments are still appropriate. Reviews can be scheduled on a recurring cadence (monthly, quarterly, annually) and assigned to reviewers — either the role holders themselves (self-review) or designated reviewers such as managers or a governance team.
+
+During a review, each eligible assignment is presented to the reviewer with options to approve (the assignment stays) or deny (the assignment is removed). If a reviewer takes no action, PIM can be configured to auto-apply a default decision — typically denying the assignment if no review occurs. This prevents role accumulation over time as personnel change roles or leave the organisation.
+
+---
+
+## PIM for Groups
+
+In addition to managing individual role assignments, PIM can govern membership in **role-assignable groups**. A group can be made eligible for a role, and then users can be made eligible for membership in that group. When a user activates their group membership, they transitively gain the permissions the group holds — whether that is a directory role or permissions to an application that uses group-based access control.
+
+This model is useful when multiple users need temporary access to a set of application permissions that are managed through group membership rather than direct role assignment. It reduces the number of individual PIM-managed assignments while maintaining the same just-in-time principle.
+
+---
+
+## Audit History
+
+Every activation request — whether approved, denied, or expired — is logged in PIM's audit history. Each log entry records the user who requested activation, the role requested, the justification provided, the approval decision and approver, and the timestamps of request, activation start, and activation end.
+
+This audit trail serves two purposes. Operationally, it allows the security team to review who has been using elevated access and why. Compliantly, it provides an evidence trail for audit frameworks that require demonstration of least-privilege access control.
+
+---
+
+## Break-Glass Accounts
+
+PIM introduces a nuance for emergency access. If PIM is configured to require approval for Global Administrator activation, and all approvers are unavailable (a network outage, a key person on leave), it may be impossible to elevate to Global Admin when genuinely needed.
+
+The standard answer is a **break-glass account** — a cloud-only Global Administrator account with a very long, complex password stored in a physical safe, with the account excluded from PIM activation requirements and MFA policies. Its use should be rare and should generate immediate alerting. The break-glass account's sign-in log is monitored continuously; any sign-in that was not preceded by documented emergency use should be treated as a serious security incident.
+
+---
+
+## Licensing
+
+PIM requires **Microsoft Entra ID P2** (or the equivalent included in Microsoft 365 E5 or the Enterprise Mobility + Security E5 bundle). The requirement applies to every user who is either eligible for a role through PIM, or who acts as a PIM approver or reviewer. Users who are only Active (permanent) role holders without using PIM-managed eligibility do not require the P2 license specifically for PIM.
+
+---
+
+## Summary
+
+Privileged Identity Management converts the static world of permanent role assignments into a dynamic system of time-bounded, auditable, approval-gated access elevation. The core idea — that a powerful role should be a transient condition, not a permanent state — is central to the Zero Trust posture that underpins modern Microsoft 365 security architecture. For any organisation with Entra ID P2 licensing, configuring Global Administrator and other sensitive roles as PIM-eligible is a foundational security control.

@@ -1,0 +1,140 @@
+---
+title: "Microsoft 365 Defender — Extended Detection and Response for the M365 Stack"
+category: "microsoft"
+topic: "defender"
+summary: "How Microsoft 365 Defender unifies signals from across the M365 security stack into a single XDR platform, and what Defender for Office 365 does to protect email and collaboration."
+tags: ["microsoft", "defender", "xdr", "secure score", "incidents", "safe attachments", "safe links", "office 365", "threat analytics"]
+order: 45
+draft: false
+---
+
+## Overview
+
+An endpoint detection tool that does not know about a phishing email, and an email filter that does not know about a compromised device, are both operating blind. Attackers move laterally across identity, email, endpoint, and cloud app surfaces in a single attack chain. Microsoft 365 Defender is the platform that joins those signals together — an Extended Detection and Response (XDR) solution that ingests alerts from across the Microsoft 365 security stack and correlates them into a unified investigation and response experience at `security.microsoft.com`.
+
+---
+
+## The Components of Microsoft 365 Defender
+
+Microsoft 365 Defender aggregates signals from four underlying products:
+
+| Product | What It Protects |
+|---------|-----------------|
+| Defender for Endpoint | Windows, macOS, Linux, iOS, Android devices |
+| Defender for Office 365 | Exchange Online email, Teams, SharePoint, OneDrive |
+| Defender for Identity | On-premises Active Directory and Entra ID identity signals |
+| Defender for Cloud Apps | SaaS application discovery, access control, anomaly detection |
+
+Each product generates its own alerts. Defender correlates alerts that share an attacker, a technique, or a compromised asset into a single **Incident**, giving security teams a coherent view of an attack rather than a flood of disconnected notifications.
+
+---
+
+## Secure Score
+
+Microsoft Secure Score is a posture measurement expressed as a percentage of the maximum score achievable given the organisation's licensed products. Each recommended action has a point value (up to 10 points); completing the action earns those points. The score is recalculated continuously.
+
+Secure Score covers recommended actions across: Entra ID, Exchange Online, SharePoint Online, Teams, Defender for Endpoint, Defender for Identity, Defender for Office 365, and Defender for Cloud Apps.
+
+Recommended actions can be marked with status values that affect how they count:
+
+| Status | Effect on Score |
+|--------|----------------|
+| To Address | No points; planned or partial completion |
+| Planned | No points; committed future action |
+| Risk Accepted | No points; risk acknowledged without remediation |
+| Resolved Through Third Party | Points awarded; third-party control addresses the risk |
+
+The score can be compared against similar organisations (by industry and size) to contextualise where the organisation stands relative to peers.
+
+Roles with read/write access to Secure Score include Global Administrator, Security Administrator, Exchange Administrator, and SharePoint Administrator. Security Reader, Security Operator, Helpdesk Administrator, and Global Reader have read-only access.
+
+---
+
+## Incidents
+
+When Defender for Endpoint, Defender for Office 365, or any other component detects a threat, it creates an **alert**. Related alerts — those that share an attack technique, the same attacker IP, the same compromised user, or a common indicator — are automatically aggregated into an **incident**.
+
+The value of incident aggregation is significant. A ransomware attack might generate alerts from Defender for Endpoint (malicious process execution), Defender for Office 365 (the initial phishing email), and Defender for Identity (lateral movement in Active Directory). As separate alerts, these appear unrelated. As a single incident, they form a complete attack timeline.
+
+### Incident Severity
+
+| Severity | Indicator | Description |
+|----------|-----------|-------------|
+| High | Red | Advanced persistent threat; severe device damage risk |
+| Medium | Orange | Anomalous registry changes, suspicious file execution |
+| Low | Yellow | Common malware or low-sophistication intrusion tools |
+| Informational | Gray | Not immediately harmful; contextual awareness |
+
+Each incident can be assigned to an analyst, marked Active or Resolved, and classified as True Positive, False Positive, or Informational Expected Activity.
+
+---
+
+## Threat Analytics
+
+Threat Analytics provides curated threat intelligence from Microsoft's security research team, surfaced directly in the Defender portal. Reports cover active threat actors and their campaigns, attack techniques gaining prevalence, and critical vulnerabilities being exploited in the wild.
+
+For each threat report, the platform shows:
+
+- How many managed devices have active alerts related to that threat.
+- How many devices have had alerts resolved.
+- The recommended security configuration changes to reduce exposure.
+- Patch status for vulnerabilities the threat exploits.
+
+This closes the gap between generic threat intelligence and an organisation's actual exposure — the question is not just "is this threat active?" but "are our devices affected, and what can we do about it?"
+
+---
+
+## Defender for Office 365
+
+Defender for Office 365 protects Exchange Online email and Microsoft Teams from malware, phishing, and business email compromise. It operates in two plans:
+
+| Plan | Features |
+|------|---------|
+| Plan 1 | Safe Attachments, Safe Links, anti-phishing with impersonation protection |
+| Plan 2 | Everything in Plan 1 plus Attack Simulator, Threat Explorer, automated investigation and response |
+
+### Safe Attachments
+
+Safe Attachments routes incoming email attachments through a behavioural sandbox before they reach the recipient's mailbox. The attachment is detonated in an isolated environment and observed for malicious behaviour. This catches malware that bypasses signature-based detection.
+
+Safe Attachments operates in several modes:
+
+| Mode | Behaviour |
+|------|-----------|
+| Off | No sandbox scanning |
+| Monitor | Deliver the message even if malware is detected; log the detection |
+| Block | Block current message and all future messages from same sender/attachment |
+| Dynamic Delivery | Deliver the message body immediately; reattach the scanned file once cleared |
+
+Dynamic Delivery minimises user delay — the email arrives but the attachment placeholder is replaced with the real file only after the sandbox confirms it is safe.
+
+Safe Attachments also applies to files shared in SharePoint, OneDrive, and Teams, not just email.
+
+### Safe Links
+
+Safe Links rewrites URLs in emails and Office documents at delivery time, routing them through Microsoft's proxy at click time. When a user clicks a rewritten link, Microsoft checks it against a real-time blocklist. If the link has been weaponised after delivery (a common technique where a benign URL is swapped for a malicious one after it bypasses initial scanning), Safe Links blocks the connection.
+
+This time-of-click protection is the key distinction: a URL that was clean at delivery can still be caught if it becomes malicious before the user clicks.
+
+### Anti-Phishing Policies and Impersonation Protection
+
+Anti-phishing policies protect against domain spoofing and user impersonation. The impersonation protection feature allows administrators to designate specific high-value users (executives, IT administrators, finance staff) and domains that should be treated with heightened scrutiny. Email appearing to come from those users or domains — but failing authentication checks or originating from unexpected infrastructure — is flagged or blocked.
+
+### Preset Security Policies
+
+Rather than requiring administrators to configure every individual policy, Defender for Office 365 offers two preset security policies:
+
+- **Standard Protection** — Balanced settings suitable for most users; medium security posture.
+- **Strict Protection** — Aggressive settings for high-risk users or organisations requiring maximum restriction.
+
+Each preset covers the full set of applicable policies: anti-spam, anti-malware, EOP anti-phishing, Defender for Office 365 anti-phishing, Safe Attachments, and Safe Links. Presets can be applied to all recipients, specific users, groups, or domains, and recipients can be excluded.
+
+### Attack Simulator
+
+Attack Simulator (Plan 2) allows administrators to send simulated phishing campaigns to their own users. The simulation measures click rate, credential submission rate, and which users are most susceptible. Users who fail a simulation can be automatically enrolled in security awareness training. This provides data-driven evidence of human risk that compliance reports alone cannot capture.
+
+---
+
+## Summary
+
+Microsoft 365 Defender ties together endpoint, email, identity, and cloud app signals into a unified XDR platform. Secure Score gives a continuous posture measurement with actionable improvement steps. Incidents correlate disparate alerts into coherent attack stories. Threat Analytics connects global threat intelligence to an organisation's specific exposure. Within Defender for Office 365, Safe Attachments sandboxes files before delivery, Safe Links checks URLs at the moment of click, and impersonation protection defends high-value identities from targeting. Preset security policies make it practical to deploy a consistent and well-calibrated protection posture without manually configuring every individual policy setting.
