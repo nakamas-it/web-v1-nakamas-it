@@ -1,0 +1,87 @@
+---
+title: "IPAM — Centralised IP Address Management in Windows Server"
+category: "microsoft"
+topic: "ipam"
+summary: "Windows Server IPAM provides a centralised view of IP address space, DHCP scope state, and DNS zone data across the entire infrastructure from a single management point. Understanding what IPAM manages, how it discovers infrastructure, and where its limitations lie is important for evaluating when it meets enterprise needs and when a third-party solution is required."
+tags: ["microsoft", "windows-server", "ipam", "dhcp", "dns", "networking", "rbac"]
+order: 25
+draft: false
+---
+
+## Overview
+
+As networks grow, IP address management becomes an operational challenge. Without centralised tooling, administrators track address assignments in spreadsheets, hunt through individual DHCP server consoles to diagnose lease conflicts, and have no reliable way to answer incident response questions like "what device had IP 10.1.2.34 at 14:23 yesterday?" Windows Server IPAM (IP Address Management) is a server role that addresses these problems by aggregating configuration and operational data from DHCP and DNS servers across the network into a single database and management interface.
+
+IPAM is not itself a DHCP or DNS server. It does not answer DNS queries or assign IP addresses. It is a management and visibility plane that sits above those services, collecting data from them and providing administrators with a unified view of address space utilisation, lease history, and service configuration.
+
+## What IPAM Manages
+
+IPAM's scope covers three interconnected areas:
+
+**IP Address Space** — IPAM maintains a hierarchical model of the organisation's IP addressing: top-level IP blocks (e.g. the entire RFC 1918 space in use), subdivided into subnets, each subnet further subdivided into individual IP address records. For each address, IPAM tracks assignment type (static, dynamic, or reserved), assignment state (in use, free, or reserved), and associated metadata such as device name, owner, and last seen date.
+
+**DHCP Server Inventory** — IPAM discovers and connects to Windows DHCP servers, importing scope configuration, address pool sizes, current utilisation percentages, and lease data. IPAM can display all scopes across all managed DHCP servers in a single consolidated view, which is operationally far more efficient than logging into each server individually.
+
+**DNS Server Inventory** — IPAM connects to Windows DNS servers, displaying zone configuration, record counts, and replication status. IPAM does not provide record-level DNS editing in the same depth as the DNS manager, but it provides a consolidated status view useful for identifying misconfigured or stale zones.
+
+## Infrastructure Discovery
+
+IPAM discovers managed infrastructure through a GPO-based mechanism. The IPAM server creates a set of Group Policy Objects that configure Windows Firewall exceptions and WMI access permissions on target DHCP and DNS servers, allowing the IPAM service account to query them over WMI and RPC. Administrators can also add servers to IPAM's managed server list manually if GPO deployment is not suitable.
+
+Once servers are discovered and access is configured, IPAM polls them on a scheduled basis, importing current state. Lease data is collected at the time of import; IPAM does not receive real-time lease events — there is a polling lag between when a lease is issued and when IPAM reflects it.
+
+## IP Address Space Tracking and Utilisation
+
+The address space view is the core operational feature. Administrators define the IP blocks their organisation uses, and IPAM populates them with subnet and address data drawn from DHCP scope configurations and manual entries. For each subnet, IPAM displays:
+
+- Total address capacity
+- Assigned (in use) count
+- Free address count
+- Percentage utilisation
+
+Utilisation thresholds can be configured to flag subnets approaching exhaustion, giving infrastructure teams advance warning before a subnet runs out of addresses and clients fail to obtain leases.
+
+Address-level records capture the full lifecycle of an assignment: which device holds an address, whether it was assigned statically or via DHCP, and the associated DNS hostname. This structured data is what makes incident response meaningful — rather than trawling DHCP logs across multiple servers, an administrator queries IPAM's address tracking database.
+
+## Operational Event Tracking and Lease History
+
+IPAM maintains a searchable audit log of DHCP operational events: lease assignments, renewals, expirations, and releases. This log answers the forensic question that arises constantly in incident response: "who had IP X at time T?" For regulatory compliance in environments that require audit trails of network access, this history is valuable.
+
+IPAM also logs configuration changes: who added or modified a scope, who changed an option value, and when. This audit trail extends to DNS configuration changes on managed servers.
+
+## Role-Based Access Control
+
+IPAM implements its own RBAC layer on top of Windows group membership. Rather than granting administrators full access to DHCP and DNS server management, IPAM defines roles with limited permissions:
+
+| Role | Capability |
+|---|---|
+| IPAM Administrator | Full access to all IPAM features |
+| IP Address Record Administrator | Manage IP address records and subnets |
+| DHCP Administrator | Manage DHCP server configuration via IPAM |
+| DHCP Scope Administrator | Manage specific DHCP scopes |
+| DNS Record Administrator | Manage DNS records via IPAM |
+| IPAM Viewer (Read Only) | View all data, no modifications |
+
+These roles can be scoped to specific IP address blocks, DHCP servers, or DNS servers, enabling a large infrastructure team to delegate responsibilities without granting full administrative rights to underlying servers.
+
+## Limitations
+
+Windows Server IPAM has clear limitations that affect its suitability in larger or more heterogeneous environments:
+
+**Windows-only management targets** — IPAM only manages Windows DHCP and Windows DNS. It cannot connect to Cisco IOS DHCP servers, ISC DHCP, BIND, PowerDNS, or any non-Windows DNS or DHCP implementation. In mixed environments, IPAM provides a partial view at best.
+
+**Single-server architecture** — The IPAM server role is not natively clustered or highly available. If the IPAM server is unavailable, reporting and management functionality is lost, though the underlying DHCP and DNS services it monitors continue to function independently.
+
+**Scale limits** — Microsoft's guidance positions IPAM for organisations with up to a few hundred managed servers and tens of thousands of IP addresses. Larger environments with complex automation requirements typically outgrow IPAM's capabilities.
+
+**No external API for automation** — IPAM is manageable via PowerShell, but it lacks the REST API that enterprise-grade IPAM platforms like Infoblox, BlueCat, or SolarWinds IPAM provide for integration with ITSM, CMDB, and infrastructure-as-code tooling.
+
+## When to Use IPAM
+
+IPAM is well-suited for mid-size organisations that are entirely or predominantly Windows-based, have multiple DHCP servers across sites, and need consolidated IP visibility without investing in a commercial IPAM product. It provides genuine operational value for unified scope management, utilisation monitoring, and lease history queries in these environments.
+
+Organisations with significant non-Windows infrastructure, multi-vendor DHCP/DNS environments, or automation and API integration requirements should evaluate commercial IPAM platforms.
+
+## Summary
+
+Windows Server IPAM occupies a specific and useful niche: it is a free, integrated management layer for Windows DHCP and DNS that provides consolidated visibility, lease history, utilisation tracking, and delegated access control. It eliminates the need to manage each DHCP and DNS server in isolation and provides the audit trail that incident response and compliance require. Its limitations — Windows-only targets, lack of HA, and no REST API — are real constraints, but for the organisations it is designed to serve, it addresses the core IP address management problem without additional cost or tooling complexity.

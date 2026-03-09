@@ -1,0 +1,66 @@
+---
+title: "Storage Replica — Block-Level Replication for Windows Server"
+category: "microsoft"
+topic: "storage"
+summary: "Storage Replica is a synchronous and asynchronous block-level volume replication feature built into Windows Server 2016 and later. It provides disaster recovery and high availability without third-party software by replicating storage at a level below the filesystem, making it applicable to any workload regardless of the data format stored on the volume."
+tags: ["microsoft", "windows-server", "storage", "storage-replica", "replication", "dr", "az-800"]
+order: 30
+draft: false
+---
+
+## Overview
+
+Storage Replica is a native Windows Server feature that replicates storage volumes between servers or clusters at the block level. Introduced in Windows Server 2016 (Standard and Datacenter editions, with some feature differences between them), it requires no third-party replication software and operates independently of the filesystem and application layer. Because replication happens at the raw block level, it is filesystem-agnostic and application-agnostic — whether the volume holds NTFS files, a Hyper-V VHD, or a database, the replication mechanism is identical.
+
+The destination volume is always write-protected and inaccessible during active replication. No user or application can mount or write to the destination. This is by design: it ensures the destination remains a consistent replica of the source at all times.
+
+## How Block-Level Replication Works
+
+Storage Replica tracks changes to a source volume using a write-ahead log. When a write occurs to the source volume, it is recorded in the source log volume before being acknowledged. The data is then sent to the destination server, where it is written to the destination log volume and then applied to the destination data volume. This log-based write-journaling approach ensures that even in the event of a failure during transfer, the destination can be brought back to a consistent state from the log.
+
+A dedicated log volume is required on both the source and destination servers. This log volume must reside on a disk separate from the data volume — placing the log on the same disk as the data negates the performance isolation benefits of the log and can cause consistency issues. For best performance, the log volume should be on a low-latency disk such as an SSD or NVMe drive.
+
+## Synchronous vs Asynchronous Replication
+
+The replication mode governs when a write is acknowledged to the writing application, and this determines the recovery point objective (RPO).
+
+**Synchronous mode** holds the write acknowledgement until the data has been committed to both the source log and the destination log. From the application's perspective, the write is not complete until the remote site has received and journaled it. This guarantees zero data loss (zero RPO) in the event of a source failure, because the destination always has every write the source acknowledged. The trade-off is latency: every write incurs the round-trip time to the destination. Synchronous replication is practical within a data centre or between sites connected by a low-latency, high-bandwidth link.
+
+**Asynchronous mode** acknowledges writes to the application as soon as they are committed to the source log, without waiting for the destination to confirm receipt. Replication to the destination happens in the background. This introduces a non-zero RPO — if the source fails, the most recent writes that had not yet reached the destination are lost. The lag is typically measured in seconds to minutes, depending on available bandwidth and write rate. Asynchronous mode is the practical choice for geographic distances where round-trip latency would make synchronous replication unusable.
+
+| Mode | RPO | Latency Impact | Typical Use |
+|---|---|---|---|
+| Synchronous | Zero | Write latency + RTT | Same data centre, low-latency links |
+| Asynchronous | Seconds to minutes | Minimal | Geographic DR, high-latency WAN |
+
+## Deployment Scenarios
+
+Storage Replica supports three primary deployment topologies.
+
+**Server-to-server replication** is the simplest case: a single source server replicates one or more volumes to a single destination server. This is a manual failover scenario — if the source fails, an administrator must break the replication partnership and bring the destination volume online. This topology is suitable for small environments or departmental file server DR without a full cluster.
+
+**Cluster-to-cluster replication** replicates storage between two failover clusters in different sites. Each cluster manages its own compute and storage resources. Storage Replica keeps the storage in sync across the clusters. Failover between clusters remains a deliberate administrative action or can be orchestrated with additional tooling.
+
+**Stretch cluster** is the highest-availability topology. A single failover cluster spans two sites, with nodes and storage in each site. Storage Replica provides the storage synchronisation between sites. Failover Clustering provides automatic failover of workloads between sites when a failure is detected. This topology delivers both automatic failover and consistent storage, but requires that the cluster's quorum configuration accounts for the two-site layout.
+
+## Replication Groups and Partnerships
+
+Storage Replica organises replication relationships into partnerships and replication groups. A partnership defines the source and destination. Within a partnership, one or more replication groups are defined — each group contains one or more volumes. All volumes within a replication group are replicated consistently, which is important when an application (such as a database) stores data across multiple volumes that must remain in sync with each other.
+
+## Storage Replica vs DFS Replication
+
+DFS Replication (DFS-R) and Storage Replica are both Windows Server replication technologies, but they operate at different levels and serve different purposes.
+
+| Dimension | DFS Replication | Storage Replica |
+|---|---|---|
+| Replication level | File-level | Block-level |
+| Filesystem dependency | NTFS only | Filesystem-agnostic |
+| Destination accessibility | Destination is accessible | Destination is write-protected, not accessible |
+| Conflict resolution | Last-writer wins, per-file | No conflicts — one writer at a time |
+| Best fit | File shares, SYSVOL | Databases, Hyper-V, application data |
+
+DFS-R is the right tool for replicating shared file content where both sites need read access to the same data. Storage Replica is the right tool when the destination must be a consistent, crash-consistent copy of the source — particularly for workloads like Hyper-V virtual machines or database files where per-file conflict resolution is not appropriate.
+
+## Summary
+
+Storage Replica brings enterprise-grade block-level replication natively to Windows Server without requiring third-party software or specialised storage hardware. Its synchronous and asynchronous modes address both zero-RPO data centre scenarios and practical geographic disaster recovery configurations. Understanding the distinction between server-to-server, cluster-to-cluster, and stretch cluster topologies — along with the role of log volumes and the difference from file-level replication — is essential knowledge for designing resilient Windows Server storage architectures.

@@ -1,0 +1,70 @@
+---
+title: "Storage Spaces — Software-Defined Storage in Windows Server"
+category: "microsoft"
+topic: "storage"
+summary: "Storage Spaces is the software-defined storage layer built into Windows Server, enabling administrators to pool heterogeneous physical disks into a unified capacity pool and provision virtual disks with configurable resiliency. It decouples storage management from physical hardware, allowing flexible provisioning, tiering, and high availability without dedicated storage controllers."
+tags: ["microsoft", "windows-server", "storage", "storage-spaces", "s2d", "sds", "az-800"]
+order: 29
+draft: false
+---
+
+## Overview
+
+Storage Spaces is a storage virtualisation technology introduced in Windows Server 2012. Rather than relying on hardware RAID controllers or dedicated SANs, Storage Spaces allows Windows Server itself to manage disk redundancy, striping, and capacity pooling entirely in software. Administrators aggregate physical disks — HDDs, SSDs, NVMe, or a mix — into a storage pool, then carve that pool into virtual disks with resiliency characteristics defined at provisioning time.
+
+The result is a flexible storage layer that survives disk failures, supports mixed media types, and can be managed entirely through Server Manager, PowerShell, or Windows Admin Center.
+
+## Storage Pools
+
+A storage pool is the foundational construct. It is a collection of physical disks grouped together so that their total raw capacity is available as a single resource. Disks of different speeds, sizes, and interface types can coexist in the same pool, though practical deployments often segment pools by media type.
+
+Within a pool, individual disks can be designated as hot spares. A hot spare is held in reserve and is not used for normal storage allocation. If a disk in the pool fails, Storage Spaces automatically begins rebuilding data onto the hot spare, restoring redundancy without manual intervention.
+
+## Virtual Disks and Resiliency Types
+
+Virtual disks — also called "spaces" — are provisioned from a pool and presented to the operating system as a standard disk volume. The critical decision at virtual disk creation time is the resiliency type, which determines how data is distributed across the physical disks in the pool.
+
+| Resiliency Type | Behaviour | Disk Failures Tolerated | Capacity Efficiency |
+|---|---|---|---|
+| Simple | Striping across disks, no redundancy | 0 | Highest |
+| Two-way Mirror | Data written to 2 copies | 1 | 50% |
+| Three-way Mirror | Data written to 3 copies | 2 | 33% |
+| Parity | Data + parity stripes (like RAID 5/6) | 1–2 depending on variant | High |
+
+**Simple** spaces provide maximum throughput but offer no protection — a single disk failure means data loss. They are appropriate only for scratch or temporary data.
+
+**Mirror** spaces write every block to two or three physical disks simultaneously. Reads can be served from any copy, which can improve read throughput. Writes require all copies to be updated, which adds latency under write-heavy loads. Two-way mirror requires a minimum of two disks; three-way mirror requires three.
+
+**Parity** spaces distribute data and parity information across multiple disks in stripes, similar in concept to RAID 5 and RAID 6. This is more capacity-efficient than mirroring but has a higher write penalty due to parity calculation. Parity is well suited to archival or sequential workloads and less suitable for small random writes.
+
+## Storage Tiering
+
+Storage tiering, introduced in Windows Server 2012 R2, allows a virtual disk to span both SSD and HDD storage within the same pool. The SSD tier serves as a hot tier for frequently accessed data, while the HDD tier holds bulk capacity as a cold tier. A background process called the tier optimiser monitors access patterns and automatically moves hot data to the SSD tier and cold data to the HDD tier.
+
+Tiering is configured at the virtual disk level. A single tiered virtual disk benefits from fast SSD performance for active data while maintaining large total capacity from the HDD tier. This makes tiering particularly effective for workloads with a working set that fits on SSD but a total dataset that does not.
+
+## Storage Spaces Direct (S2D)
+
+Storage Spaces Direct, introduced in Windows Server 2016, extends the Storage Spaces model to hyperconverged clusters. Instead of pooling disks within a single server, S2D pools the direct-attached disks of multiple clustered servers into a single shared storage pool. The cluster nodes use SMB 3.0 (over RDMA where available) to access each other's local storage, creating a distributed storage fabric without a SAN.
+
+S2D requires a Windows Server Failover Cluster. All compute and storage resources run on the same nodes — this is the hyperconverged model. S2D is the storage engine underlying Azure Stack HCI, Microsoft's validated hyperconverged solution.
+
+## Storage Spaces vs Hardware RAID
+
+| Dimension | Storage Spaces | Hardware RAID |
+|---|---|---|
+| Controller dependency | None — logic lives in OS | Tied to specific RAID controller |
+| Controller failure | Data survives, pool moves to another server | Replacement controller required (same model) |
+| Flexibility | Disks added to pool dynamically | Typically fixed at RAID set creation |
+| Performance | Good; NVMe caching improves latency | Generally faster for simple RAID levels |
+| Cost | No additional hardware | RAID controller purchase required |
+
+Storage Spaces eliminates the risk of being locked to a specific hardware controller. A pool can be detached from one server and reattached to another, making disaster recovery and hardware replacement more straightforward.
+
+## Limitations
+
+Storage Spaces is not suitable for every scenario. Resilvering (rebuilding after a disk failure) on large HDDs can take many hours, during which another disk failure would be catastrophic. Write performance under parity resiliency is lower than mirroring. Very large volumes (beyond 64 TB in some configurations) may encounter limits. For transactional database workloads with demanding latency requirements, purpose-built storage hardware or all-NVMe configurations are generally preferred.
+
+## Summary
+
+Storage Spaces provides a capable software-defined storage layer directly within Windows Server, removing the dependency on hardware RAID controllers and enabling flexible, resilient storage provisioning. Its tiering capability extends the value of mixed media environments, and Storage Spaces Direct takes the model further into hyperconverged deployments. Understanding pool construction, resiliency types, and the S2D architecture is foundational to designing and operating modern Windows Server storage infrastructure.

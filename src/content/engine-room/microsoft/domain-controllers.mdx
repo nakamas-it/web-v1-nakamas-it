@@ -1,0 +1,68 @@
+---
+title: "Domain Controllers — The Pillars of AD DS"
+category: "microsoft"
+topic: "ad ds"
+summary: "Domain Controllers are the servers that make Active Directory work. This article covers what a DC does, how FSMO roles are distributed across the domain, the purpose of Read-Only Domain Controllers, and how to deploy DCs in Azure-connected hybrid environments."
+tags: ["microsoft", "windows-server", "active-directory", "ad-ds", "domain-controller", "fsmo", "rodc", "hybrid"]
+order: 2
+draft: false
+---
+
+## Overview
+
+A Domain Controller (DC) is a Windows Server running the Active Directory Domain Services (AD DS) role. Every authentication request, group policy application, and directory lookup in a Windows domain flows through a DC. The DC hosts a writable copy of the AD database (`ntds.dit`), answers Kerberos and NTLM authentication requests, replicates directory changes to peer DCs, and serves DNS (when co-hosted with the DNS role) so that clients can locate services via SRV records.
+
+A healthy domain requires at least two DCs for redundancy. The DCs continuously replicate changes to one another, so the failure of a single DC does not bring down authentication — clients simply contact another DC in the same site.
+
+## What a DC Does
+
+At its core, a DC performs four functions:
+
+- **Authentication**: Issues Kerberos tickets (TGTs and service tickets) or responds to NTLM challenge-response exchanges. Without a reachable DC, users cannot log in to domain-joined machines.
+- **Authorization**: Evaluates group memberships to determine what resources a security principal can access.
+- **Directory storage and query**: Responds to LDAP queries from applications, services, and management tools that need to look up users, computers, or groups.
+- **Replication**: Propagates changes made locally to all other DCs in the domain, and receives changes made on other DCs.
+
+## FSMO Roles
+
+Not all DCs are equal. Five Flexible Single Master Operations (FSMO) roles are assigned across the DCs in a forest. Each role designates a single authoritative DC for operations that cannot safely be performed on multiple DCs simultaneously.
+
+| FSMO Role | Scope | What it does | Impact when offline |
+|---|---|---|---|
+| Schema Master | Forest-wide | The only DC that can write changes to the AD schema | Schema extensions fail; normal operations continue |
+| Domain Naming Master | Forest-wide | Controls addition and removal of domains from the forest | Adding or removing child domains fails |
+| RID Master | Per-domain | Allocates pools of Relative Identifiers (RIDs) to other DCs, which use them to build new Security Identifiers (SIDs) | New security principals cannot be created once DC RID pools are exhausted |
+| PDC Emulator | Per-domain | Acts as the authoritative time source, handles password changes and lockouts, processes Group Policy updates, and emulates a Windows NT PDC for legacy clients | Password change replication slows, time skew accumulates, lockout processing degrades |
+| Infrastructure Master | Per-domain | Maintains cross-domain object references (e.g., when a user from domain A is a member of a group in domain B) | Cross-domain group membership may display stale data |
+
+In a single-domain forest, all five roles are typically held by one or two DCs. In multi-domain forests, the forest-wide roles (Schema Master, Domain Naming Master) should sit on a DC in the forest root domain. The PDC Emulator deserves particular attention in operations: it is the most frequently needed FSMO and the one whose absence is felt first.
+
+## Read-Only Domain Controllers
+
+A Read-Only Domain Controller (RODC) hosts a read-only copy of the AD database. RODCs were designed for branch offices and locations where physical security of the server cannot be guaranteed.
+
+Key RODC characteristics:
+
+- **No outbound replication**: Changes made locally on an RODC are never replicated back to the rest of the domain. A compromised RODC cannot be used to poison the directory.
+- **Credential caching policy**: By default, an RODC caches no passwords. An administrator defines a Password Replication Policy (PRP) that explicitly lists which accounts (typically branch office users and computers) are allowed to have their credentials cached. If a cached account is compromised, only that subset of credentials needs to be reset.
+- **Filtered Attribute Set (FAS)**: Sensitive attributes can be marked as part of the FAS, which prevents them from being replicated to any RODC at all — useful for protecting attributes used by applications that manage their own secrets within AD.
+- **Administrator role separation**: A local non-domain-admin account can be delegated administrative rights over the RODC without gaining any rights in the rest of the domain.
+
+## Deploying DCs in Azure
+
+Running a DC in Azure is the recommended approach for hybrid environments where workloads are moving to Azure VMs but identity must remain integrated with on-premises AD DS. The DC runs as a Windows Server VM with the AD DS role installed — there is no special Azure-native service involved.
+
+Critical considerations:
+
+- **Network connectivity**: The Azure DC must be able to replicate with on-premises DCs. This requires a Site-to-Site VPN or ExpressRoute circuit connecting the Azure virtual network to the on-premises network, with an AD site and site link configured to reflect that topology.
+- **DNS**: Azure VMs in the same virtual network should point to the Azure DC for DNS, so that AD-dependent name resolution does not traverse the WAN for every lookup.
+- **Disk caching**: Place the `ntds.dit` database, logs, and SYSVOL on a data disk with **host caching set to None**. Enabling write caching on the OS disk for AD database files risks corruption after an unexpected VM restart.
+- **Do not assign FSMO roles that must always be reachable to an Azure DC** unless the Azure site will always have connectivity to on-premises.
+
+## Server Core vs Desktop Experience
+
+Microsoft recommends running DCs on Server Core (no graphical shell). Server Core reduces the attack surface, requires fewer updates, and consumes less memory. The absence of a GUI is not a practical limitation: all DC management is performed remotely using RSAT (Remote Server Administration Tools) or Windows Admin Center (WAC). Direct RDP logon to a DC for routine administration is a poor practice — it unnecessarily exposes the DC to credential theft and user-error risk.
+
+## Key Takeaways
+
+Domain Controllers are the trust anchors of a Windows environment. FSMO roles introduce deliberate single-master constraints for operations where conflicts would be harmful; understanding which role breaks which operation is essential for incident response. RODCs bring AD to locations where physical security is inadequate without expanding the blast radius of a compromise. In hybrid environments, an Azure-hosted DC reduces authentication latency for cloud workloads while keeping identity integrated with on-premises AD DS. Manage DCs remotely and keep them lean.

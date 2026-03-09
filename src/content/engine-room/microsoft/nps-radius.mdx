@@ -1,0 +1,79 @@
+---
+title: "Network Policy Server — RADIUS Authentication for Network Access"
+category: "microsoft"
+topic: "nps"
+summary: "Network Policy Server is Microsoft's RADIUS implementation, providing centralised authentication, authorisation, and accounting for 802.1X wired and wireless access, VPN, and other network access scenarios. Understanding how NPS policies are structured, which EAP methods apply to which use cases, and how the Azure MFA extension extends NPS capabilities is foundational for securing network access in Windows environments."
+tags: ["microsoft", "windows-server", "nps", "radius", "802.1x", "vpn", "eap", "mfa", "network-access"]
+order: 26
+draft: false
+---
+
+## Overview
+
+Network access control — deciding which devices and users are permitted onto a network and under what conditions — requires a centralised policy engine that network devices can consult. Hardcoding access rules into individual switches, access points, and VPN gateways is unmanageable at scale and creates inconsistency. RADIUS (Remote Authentication Dial-In User Service) is the protocol that decouples the policy decision from the enforcement point: network devices become RADIUS clients that forward authentication requests to a central RADIUS server, which evaluates the request against configured policies and returns an accept or reject decision.
+
+Network Policy Server (NPS) is Microsoft's implementation of a RADIUS server, built into Windows Server as an installable role. It integrates natively with Active Directory, uses AD user and group membership as the basis for policy decisions, and supports the full range of modern EAP authentication methods. For Windows-centric environments, NPS is the natural centralised authentication point for any network access scenario.
+
+## What RADIUS Provides
+
+RADIUS defines three functions collectively called AAA:
+
+**Authentication** — Verifying the identity of a user or device attempting network access, using credentials validated against a backend identity store (AD in the NPS case).
+
+**Authorisation** — Determining what level of access the authenticated identity should receive: full access, limited VLAN, read-only, or rejection.
+
+**Accounting** — Recording session events — connection start, connection stop, session duration, bytes transferred — in a log for audit and billing purposes.
+
+Network devices (switches, access points, VPN concentrators) implement RADIUS client behaviour: they collect credentials from the end user or device and forward them to the NPS server over UDP. NPS processes the request, makes a policy decision, and returns a RADIUS Access-Accept or Access-Reject packet, optionally including attributes that instruct the network device to assign the client to a specific VLAN, apply a traffic policy, or enforce a session timeout.
+
+## NPS Use Cases
+
+### 802.1X Wired Authentication
+
+802.1X is a port-based access control standard for Ethernet. When a device connects to a managed switch port configured for 802.1X, the switch holds the port in an unauthorised state and only allows EAPOL (EAP over LAN) traffic through it. The device must authenticate via EAP to the RADIUS server before the switch grants network access. NPS serves as the RADIUS backend, validating credentials against AD and instructing the switch whether to open the port and which VLAN to place the client in.
+
+This prevents unauthorised devices from plugging into network ports and obtaining connectivity — a critical control in environments where physical security is imperfect.
+
+### 802.1X Wireless (WPA2/WPA3-Enterprise)
+
+WPA2-Enterprise and WPA3-Enterprise use 802.1X for wireless authentication rather than a shared PSK. Each user or device authenticates individually via EAP to the RADIUS server. The access point handles EAPOL encapsulation over the wireless medium; NPS evaluates the request and returns an accept or reject. This provides per-user/per-device audit trails for wireless access, enables VLAN assignment per user group, and eliminates the operational problem of shared PSKs that must be changed when an employee leaves.
+
+### VPN Authentication
+
+Remote access VPNs need to validate user identity before granting tunnel access. Windows RRAS (Routing and Remote Access Service) has built-in NPS integration — it acts as a RADIUS client and forwards authentication requests to NPS for validation against AD. Third-party VPN gateways (Cisco ASA, Palo Alto, Fortinet) can also use NPS as their RADIUS server, allowing VPN authentication to leverage AD credentials and NPS policy without any changes to the VPN gateway's local user database.
+
+## NPS Policy Structure
+
+NPS evaluates incoming RADIUS requests against two layers of policies, processed in order:
+
+**Connection Request Policies** determine whether this NPS instance will handle a given RADIUS request at all, or forward it to another RADIUS server. Rules can be based on the NAS (Network Access Server) IP, the called station ID, or the time of day. This allows an NPS instance to act as a RADIUS proxy, forwarding requests for certain network devices to a different NPS or RADIUS server — useful in multi-forest or multi-vendor environments.
+
+**Network Policies** determine the outcome for requests that this NPS instance does handle. Each Network Policy contains conditions (user group membership, NAS type, machine certificate presence, time restrictions) and then specifies what access to grant if all conditions are met: allow or deny, with optional RADIUS attributes that the network device uses to assign VLAN, apply a bandwidth policy, or set session timeout. Policies are evaluated in priority order; the first matching policy wins.
+
+## EAP Authentication Methods
+
+The EAP (Extensible Authentication Protocol) framework defines how credentials are exchanged during 802.1X authentication. NPS supports several EAP methods with different security properties:
+
+| Method | Authentication | Notes |
+|---|---|---|
+| EAP-TLS | Certificate (client + server) | Strongest — no passwords, requires PKI for client certs |
+| PEAP-MSCHAPv2 | Username + password | Most common, requires valid server certificate |
+| EAP-TTLS | Various inner methods | Less common in Windows environments |
+
+**EAP-TLS** is the highest-security option. Both the server (NPS) and the client present certificates, mutual authentication occurs, and no passwords traverse the network. It requires a PKI that can issue certificates to client machines, typically via AD Certificate Services autoenrollment. It is the appropriate choice for device authentication in managed environments.
+
+**PEAP-MSCHAPv2** wraps MSCHAPv2 credential exchange inside a TLS tunnel established using only a server certificate. The client validates the server certificate to prevent impersonation, then sends hashed credentials inside the tunnel. It is much simpler to deploy than EAP-TLS (no client certificates required) but carries the operational risk that users may accept invalid server certificates, enabling man-in-the-middle attacks. Certificate pinning or strict validation configuration mitigates this.
+
+## Azure MFA Extension for NPS
+
+The Azure MFA extension for NPS adds a second authentication factor to RADIUS authentication without replacing NPS or the applications that use it. The flow works as follows: NPS performs primary authentication against AD as normal. If the user passes primary authentication and the NPS extension is installed, the extension calls out to Entra ID's MFA service to trigger an MFA challenge (push notification, TOTP, phone call). Only if the user completes both factors does NPS return a RADIUS Access-Accept.
+
+This is particularly valuable for VPN scenarios where VPN clients cannot natively support modern MFA flows. The VPN gateway continues to use RADIUS authentication unchanged; the MFA requirement is enforced transparently by the NPS extension.
+
+## RADIUS Accounting
+
+NPS logs RADIUS accounting events — session start, session stop, interim updates — to local log files or to a SQL Server database. These records capture the timestamp, user identity, session duration, device IP, and bytes transferred for each network access session. This logging is the foundation for network access auditing, helping answer questions like "which users connected to the VPN last Tuesday between 18:00 and 22:00?" and providing evidence for security incidents and compliance reviews.
+
+## Summary
+
+NPS is the centralised authentication and policy decision point for network access in Windows environments. By implementing RADIUS, it enables network devices of any type to delegate authentication to Active Directory without needing to query AD directly. Its policy model — Connection Request Policies for routing and Network Policies for access decisions — provides flexible, ordered rule evaluation that can express complex access control requirements. EAP method selection balances security against deployment complexity, with EAP-TLS ideal for managed device fleets and PEAP-MSCHAPv2 appropriate where certificate infrastructure is limited. The Azure MFA extension extends NPS's relevance into hybrid security architectures where MFA is required for remote access.

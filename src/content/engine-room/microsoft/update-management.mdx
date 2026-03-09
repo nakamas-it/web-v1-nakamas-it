@@ -1,0 +1,110 @@
+---
+title: "Update Management — Keeping Windows Server Patched at Scale"
+category: "microsoft"
+topic: "wsus"
+summary: "Unpatched servers remain the most common vector for infrastructure compromise. This article covers the evolution from on-premises WSUS through to Azure Update Manager, and explains how to think about patch rings, maintenance windows, and compliance reporting across a hybrid server fleet."
+tags: ["microsoft", "windows-server", "wsus", "patching", "azure", "security"]
+order: 14
+draft: false
+---
+
+## Overview
+
+Patching is unglamorous, repetitive, and — when neglected — catastrophic. The overwhelming majority of successful infrastructure attacks exploit known vulnerabilities for which a patch already existed at the time of the breach. The operational challenge is not awareness of this fact but the mechanics of applying updates reliably across hundreds or thousands of servers without causing unplanned downtime.
+
+Microsoft's update management story has evolved considerably. Understanding both the on-premises WSUS model and its cloud-native replacement, Azure Update Manager, is essential for managing hybrid environments.
+
+## Patch Tuesday and the Update Cadence
+
+Microsoft releases patches on the second Tuesday of each month — universally known as Patch Tuesday. Updates fall into several classifications:
+
+| Classification | Description |
+|---|---|
+| Critical | Remote code execution or elevation of privilege with no user interaction required |
+| Important | Vulnerabilities likely to be exploited; most security patches fall here |
+| Cumulative updates | Monthly rollups that include all previous patches for a component |
+| Security-only updates | Narrower package including only the current month's security fixes (less common on Server) |
+| Preview updates | Optional, non-security fixes released mid-cycle for testing |
+
+Since Windows Server 2016, Microsoft has moved to a cumulative update model. Each monthly cumulative update supersedes all prior ones, which simplifies patch state reasoning: a server is either current or it isn't, rather than carrying a complex dependency tree of individual hotfixes.
+
+Out-of-band updates are also released when a critical vulnerability warrants immediate action outside the normal cycle. These must be tracked and applied promptly.
+
+## WSUS — The On-Premises Foundation
+
+Windows Server Update Services (WSUS) has been the standard on-premises patching infrastructure for two decades. It operates as a local cache and approval gateway between Microsoft's Update servers and the machines in your environment.
+
+### How WSUS Works
+
+WSUS syncs update metadata (and optionally, update binaries) from Microsoft Update on a configurable schedule. Administrators review available updates and explicitly approve them for deployment to specific computer groups. Client machines poll the WSUS server at intervals defined by Group Policy and download only approved updates.
+
+Key WSUS concepts:
+
+- **Computer groups** — logical collections of machines used for targeting approvals. Typical groupings: pilot/test, production-by-role, or production-by-site.
+- **Automatic approval rules** — rules that auto-approve updates matching certain criteria (e.g., Critical updates for all groups) to reduce manual review burden.
+- **Downstream servers** — WSUS supports a hierarchy where a central upstream server syncs from Microsoft and downstream servers in branch offices sync from the upstream, reducing WAN traffic.
+- **Reporting** — WSUS provides built-in reports showing update compliance per computer group.
+
+### WSUS Limitations
+
+WSUS was designed for a world where all managed machines lived inside the corporate network and update metadata was relatively simple. Its limitations in modern environments are significant:
+
+- Requires a dedicated Windows Server with SQL Server (or Windows Internal Database), plus disk storage for cached binaries.
+- No native cloud integration — Arc-enabled or cloud-hosted machines cannot be managed by WSUS without a VPN or direct network path.
+- Reporting is basic and difficult to aggregate across multiple WSUS hierarchies.
+- WSUS does not patch third-party software or Linux systems.
+- Management console (WSUS Administration Console) is an aging MMC snap-in.
+
+WSUS remains appropriate for air-gapped networks, high-security environments with strict change control requirements, or organisations with existing WSUS infrastructure not yet ready to migrate.
+
+## Azure Update Manager
+
+Azure Update Manager is Microsoft's cloud-native replacement for WSUS, generally available since 2023. It requires no dedicated on-premises infrastructure — management is entirely through the Azure portal, Azure CLI, or Azure Policy.
+
+### How It Works
+
+Azure Update Manager communicates with managed machines through:
+- The Azure VM guest agent (for Azure-native VMs).
+- The Azure Arc Connected Machine agent (for on-premises or multi-cloud servers).
+
+No WSUS server, SQL database, or binary cache is required. The managed machine fetches updates directly from Microsoft Update (or a configured WSUS/custom endpoint if desired) and reports status back through Azure.
+
+### Key Capabilities
+
+| Feature | Description |
+|---|---|
+| Assessment | On-demand or scheduled scan showing which updates are missing |
+| Maintenance windows | Time-bounded schedules controlling when updates are applied |
+| Patch orchestration | Apply updates to groups of machines with configurable reboot behaviour |
+| Compliance reports | Azure-native dashboards filterable by subscription, resource group, or tag |
+| Cross-platform | Supports Windows Server and major Linux distributions |
+| Policy integration | Azure Policy can enforce update compliance and trigger automatic remediation |
+
+### Update Rings and Staged Rollouts
+
+Whether using WSUS or Azure Update Manager, the principle of staged rollout (update rings) is critical for production safety:
+
+1. **Pilot group** — a small set of non-critical machines updated on Patch Tuesday or shortly after. This group validates that updates do not break core applications.
+2. **Broad production** — the majority of servers, updated one to two weeks after the pilot group completes without issues.
+3. **Critical systems** — high-availability or compliance-sensitive servers, updated last, often with additional change management approval.
+
+Maintenance windows should account for application dependencies: updating an application server before its database server's maintenance window can cause temporary service interruption if a reboot is required mid-window.
+
+## Microsoft Defender for Cloud Integration
+
+Defender for Cloud continuously evaluates update compliance as part of its security recommendations. Missing critical or important patches appear as high-severity recommendations with an associated secure score impact. This surfaces patching gaps to security teams independently of operations tooling, creating a second feedback loop to ensure compliance.
+
+## Choosing Between WSUS and Azure Update Manager
+
+| Factor | WSUS | Azure Update Manager |
+|---|---|---|
+| Infrastructure required | Dedicated server + SQL | None |
+| Air-gapped environments | Supported | Not supported without proxy |
+| Linux support | No | Yes |
+| Arc-enabled servers | Requires network path | Native |
+| Reporting | Basic, per-hierarchy | Unified across hybrid estate |
+| Migration path | Can co-exist during transition | Gradually replace WSUS groups |
+
+## Summary
+
+Update management at scale requires both a clear understanding of the patch cadence and a reliable distribution and reporting infrastructure. WSUS served this need well for on-premises-only estates but does not extend cleanly to hybrid and multi-cloud environments. Azure Update Manager fills that gap by leveraging the Arc agent as a universal management channel, providing unified compliance visibility and policy-driven enforcement across Windows and Linux workloads wherever they run.

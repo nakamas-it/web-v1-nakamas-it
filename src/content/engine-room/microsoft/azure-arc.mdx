@@ -1,0 +1,97 @@
+---
+title: "Azure Arc — Managing Non-Azure Machines from Azure"
+category: "microsoft"
+topic: "azure arc"
+summary: "Azure Arc extends the Azure management plane to servers running anywhere — on-premises data centres, third-party clouds, or edge locations — by installing a lightweight agent that registers each machine as an Azure resource. Once onboarded, Arc-enabled servers are subject to the same Azure Policy, RBAC, and monitoring tooling as native Azure VMs."
+tags: ["microsoft", "azure", "azure-arc", "hybrid", "policy", "management"]
+order: 13
+draft: false
+---
+
+## Overview
+
+Azure Arc is Microsoft's answer to a fundamental problem in hybrid infrastructure management: as organisations run workloads across on-premises hardware, Azure, AWS, GCP, and edge locations, managing each environment through its own native tools produces fragmentation. Security policies are enforced inconsistently, access control is defined in multiple directories, and compliance reporting requires aggregating data from disparate systems.
+
+Azure Arc addresses this by projecting non-Azure resources into the Azure management plane. From Azure's perspective, an Arc-enabled on-premises server and a native Azure VM are both Azure resources. They appear in the same resource groups, are subject to the same policies, and can be targeted by the same Azure tooling — regardless of where they physically run.
+
+## The Connected Machine Agent
+
+The core mechanism is the Azure Connected Machine agent, a lightweight service installed on each server to be managed. The agent:
+
+- Establishes an outbound HTTPS connection to Azure Arc endpoints (no inbound firewall rules required on the managed machine).
+- Registers the machine in Azure as a resource of type `Microsoft.HybridCompute/machines`.
+- Sends periodic heartbeats and metadata (OS version, CPU, memory, installed software) to Azure.
+- Provides the execution channel for Azure-side operations: policy evaluation, extension deployment, and configuration management.
+
+The agent requires outbound access to a small set of Azure endpoints on port 443. In environments with proxy servers, the agent can be configured to route through them. The machine's private IP and name remain local — Arc does not make the machine publicly reachable.
+
+## Azure Resource Projection
+
+Once onboarded, an Arc-enabled server behaves as a first-class Azure resource:
+
+| Capability | How It Works |
+|---|---|
+| Resource groups | Arc machines are assigned to resource groups and subscriptions like any Azure resource |
+| Tags | Azure tags applied to Arc resources are visible and queryable alongside cloud resources |
+| Azure RBAC | Access to manage the Arc resource (run extensions, view status) is controlled via Azure role assignments |
+| Azure Policy | Policies are evaluated against Arc machines using the same engine as Azure VMs |
+
+This uniformity is Arc's primary value proposition. An organisation with 500 on-premises Windows Servers and 200 Azure VMs can define a single policy — "all servers must have the Log Analytics agent installed" — and enforce it across all 700 machines from one place.
+
+## VM Extensions on Arc-Enabled Servers
+
+Arc uses the same VM extension model as Azure VMs to deploy and manage software on Arc-enabled machines. Extensions run on the machine via the Connected Machine agent and are managed from Azure. Common extensions include:
+
+- **Log Analytics agent** — ships event and performance data to a Log Analytics workspace for querying with KQL.
+- **Microsoft Defender for Endpoint** — deploys EDR capabilities managed through Microsoft Defender for Cloud.
+- **Dependency agent** — maps process and network dependencies for Azure Monitor VM Insights.
+- **Custom Script Extension** — executes arbitrary scripts on the managed machine, triggered from Azure.
+- **DSC Extension** — delivers Desired State Configuration documents to the machine.
+
+Extensions are installed, updated, and removed from Azure without requiring administrator access to the machine directly.
+
+## Azure Policy and Guest Configuration
+
+Azure Policy's Guest Configuration feature evaluates settings inside the operating system — not just the Azure resource properties — on both Azure VMs and Arc-enabled servers. Guest Configuration can audit or enforce:
+
+- Local password and account lockout policies.
+- Installed or absent Windows features.
+- Registry key values.
+- File permissions and content.
+- Running service states.
+
+Guest Configuration works by deploying a policy extension to the machine that periodically evaluates configuration against defined baselines and reports compliance state back to Azure Policy. In audit mode, non-compliant findings generate policy violations visible in the Azure portal. In enforce (DeployIfNotExists) mode, the extension can automatically apply remediation.
+
+## Update Manager
+
+Azure Update Manager is a cloud-native update management service that replaces the WSUS dependency for organisations managing Arc-enabled servers. It provides:
+
+- Visibility into update compliance across all Arc machines from the Azure portal.
+- Maintenance window scheduling to control when updates are applied.
+- On-demand patching for individual machines or groups.
+- Compliance reports filterable by subscription, resource group, or tag.
+
+Update Manager communicates with machines through the Arc agent, so no WSUS infrastructure, SQL database, or dedicated update server is required.
+
+## Microsoft Defender for Cloud Integration
+
+Arc-enabled servers are treated identically to Azure VMs by Microsoft Defender for Cloud. Enabling the Defender for Servers plan on a subscription that contains Arc resources extends workload protection to those machines, including:
+
+- Threat detection alerts based on process, network, and log activity.
+- Vulnerability assessment (powered by Qualys or Microsoft's built-in scanner).
+- Just-in-time management port access.
+- Adaptive application controls for approved application allowlisting.
+
+This makes Arc the enabler of a unified security posture across a mixed estate — Azure VMs, on-premises physical servers, and VMs hosted in other clouds all evaluated and reported through the same Defender for Cloud dashboard.
+
+## Use Cases
+
+Arc is particularly valuable in the following scenarios:
+
+- **Mixed-cloud compliance** — an organisation using both Azure and AWS can onboard Linux VMs from both into Arc and apply a single Azure Policy initiative for CIS benchmark compliance.
+- **Datacenter modernisation** — on-premises Windows Servers managed through Arc gain cloud-native monitoring, patching, and security without moving workloads to Azure.
+- **Edge and remote locations** — servers in branch offices or manufacturing floors with limited connectivity can be Arc-enabled and managed centrally from Azure.
+
+## Summary
+
+Azure Arc extends the Azure control plane outward to any server, regardless of where it runs, by projecting it as an Azure resource through a lightweight outbound agent. Once enrolled, Arc-enabled servers inherit Azure Policy enforcement, RBAC, Update Manager, VM extensions, and Defender for Cloud coverage — creating a single management plane for hybrid and multi-cloud server estates. For AZ-800 candidates, understanding Arc as an extension of Azure governance rather than a migration tool is the key conceptual distinction.

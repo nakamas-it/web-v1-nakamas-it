@@ -7,47 +7,40 @@ const base = import.meta.env.BASE_URL;
 const allArticles = await getCollection('engineRoom', ({ data }) => !data.draft);
 
 const categoryMeta: Record<string, { label: string; description: string; accent: string; border: string; icon: string }> = {
-  identity: {
-    label: 'Identity & Directory',
-    description: 'Active Directory, Entra ID, Group Policy, hybrid identity — how organisations manage who can access what.',
-    accent: 'text-violet-400',
-    border: 'border-violet-800',
-    icon: '🔑',
-  },
-  virtualization: {
-    label: 'Virtualization',
-    description: 'Hypervisors, ESXi, Hyper-V, Proxmox — what a hypervisor actually does and how virtualised infrastructure is built.',
+  microsoft: {
+    label: 'Microsoft',
+    description: 'Windows Server, Active Directory, Hyper-V, Azure Arc, Intune, Microsoft 365 — the full Microsoft infrastructure stack from domain controllers and Group Policy to hybrid cloud and containers.',
     accent: 'text-blue-400',
     border: 'border-blue-800',
-    icon: '📦',
+    icon: '🪟',
   },
-  storage: {
-    label: 'Storage',
-    description: 'RAID, NAS vs SAN, TrueNAS, ZFS — how enterprise storage is structured, protected, and shared.',
-    accent: 'text-amber-400',
-    border: 'border-amber-800',
-    icon: '💾',
-  },
-  endpoint: {
-    label: 'Endpoint Management',
-    description: 'Intune, Group Policy, imaging — how devices are deployed, configured, and kept compliant at scale.',
+  vmware: {
+    label: 'VMware',
+    description: 'ESXi, vSphere, vCenter, vSAN, NSX-T — VMware\'s virtualisation platform from bare-metal hypervisors to software-defined networking and storage.',
     accent: 'text-green-400',
     border: 'border-green-800',
-    icon: '🖥️',
+    icon: '💠',
   },
-  email: {
-    label: 'Email & Collaboration',
-    description: 'Exchange Online, Microsoft 365 tenant concepts — the plumbing behind every calendar invite and shared mailbox.',
-    accent: 'text-sky-400',
-    border: 'border-sky-800',
-    icon: '📧',
+  linux: {
+    label: 'Linux',
+    description: 'Debian, Ubuntu, RHEL — open-source server administration, filesystems, LVM, Samba, OpenLDAP, and the tools that run most of the internet.',
+    accent: 'text-yellow-400',
+    border: 'border-yellow-800',
+    icon: '🐧',
   },
-  monitoring: {
-    label: 'Monitoring & Logging',
-    description: "SNMP, Syslog, NetFlow, observability — knowing what your infrastructure is doing before your users tell you it's broken.",
-    accent: 'text-rose-400',
-    border: 'border-rose-800',
-    icon: '📊',
+  google: {
+    label: 'Google',
+    description: 'Google Cloud Platform, Google Workspace — GCP compute, Cloud DNS, Cloud Storage, GKE, and the Google productivity suite for enterprise environments.',
+    accent: 'text-red-400',
+    border: 'border-red-800',
+    icon: '☁️',
+  },
+  proxmox: {
+    label: 'Proxmox',
+    description: 'Proxmox VE — the open-source hypervisor combining KVM virtualisation and LXC containers with Ceph storage and high-availability clustering.',
+    accent: 'text-orange-400',
+    border: 'border-orange-800',
+    icon: '🔶',
   },
 };
 
@@ -67,11 +60,11 @@ const totalArticles = allArticles.length;
   <header class="mb-8">
     <h1 class="text-4xl font-bold text-slate-100 mb-4">The Engine Room</h1>
     <p class="text-slate-400 leading-relaxed">
-      <span class="text-cyan-400 font-mono font-semibold">WANTED:</span> A straight answer about how enterprise services actually work.
-      Last seen buried somewhere between a domain controller with no documentation and a hypervisor that
-      someone set up in 2019 and nobody has touched since. This section covers the conceptual layer —
-      what these platforms are, why they exist, and how they work before you ever touch a CLI or a GUI.
-      Organised by category rather than OSI layer, because Active Directory doesn't care which layer it runs on.
+      <span class="text-cyan-400 font-mono font-semibold">WANTED:</span> A straight answer about how enterprise platforms actually work.
+      Last seen buried somewhere between a vendor's marketing page and a 400-page admin guide nobody has time to read.
+      This section covers the technology each vendor provides — what it is, why it exists, and how it works
+      before you ever open a console. Organised by vendor rather than function, because Hyper-V is a Microsoft
+      problem and ESXi is a VMware problem and pretending otherwise helps nobody.
     </p>
   </header>
 

@@ -25,18 +25,20 @@ A protocol library covering how networking actually works — from the physics o
 | Application Layer | HTTP/HTTPS, TLS/SSL, FTP/SFTP/FTPS, SSH, SMTP, IMAP/POP3, SNMP, NTP, LDAP, RADIUS, Syslog, Telnet, TACACS+, Kerberos, NetBIOS, RTSP, iSCSI, rsync, MySQL, iperf, SIP, SMB, MSSQL, VPN, SSL VPN, IPsec VPN, DMVPN |
 
 ### The Engine Room (`/engine-room/`)
-The theory layer for platforms and services — not hands-on yet, but deeper than a protocol definition. Covers *what these things are, why they exist, and how they work conceptually*, organised by category rather than OSI layer.
+Vendor-focused platform coverage — what each vendor's technology stack is, why it exists, and how it works conceptually. Organised by vendor rather than function.
 
-**Current coverage — 17 articles:**
+**Current coverage — 36 articles (Microsoft):**
 
-| Category | Articles |
-|----------|----------|
-| Identity & Directory | Active Directory, Entra ID, Hybrid Identity, Group Policy |
-| Virtualization | Hypervisors (Type 1 vs 2), VMware ESXi/vSphere, Hyper-V, Proxmox VE |
-| Storage | RAID, NAS vs SAN, TrueNAS/ZFS |
-| Endpoint Management | Microsoft Intune, Endpoint Imaging (WDS/MDT/Autopilot) |
-| Email & Collaboration | Exchange Online, M365 Tenant Concepts |
-| Monitoring & Logging | Observability (metrics/logs/traces), NetFlow/IPFIX/sFlow |
+| Topic area | Articles |
+|------------|----------|
+| Active Directory & Identity | Active Directory, Domain Controllers, AD Sites & Replication, AD Trusts, GMSAs, Entra ID, Hybrid Identity, Entra Connect Cloud Sync, Entra Connect Health, Group Policy |
+| Windows Server Management | Windows Admin Center, PowerShell Remoting & JEA, Azure Arc, Update Management, Defender for Cloud, Azure Automation & DSC, Intune, Endpoint Imaging |
+| Hyper-V & Containers | Hyper-V, Hyper-V Networking, Hyper-V High Availability, Windows Containers |
+| Networking Services | Windows DNS, Windows DHCP, IPAM, NPS/RADIUS, Remote Access/VPN, Web Application Proxy |
+| Storage & File Services | Storage Spaces, Storage Replica, DFS, Azure File Sync, Data Deduplication, Exchange Online, M365 Tenant |
+| Monitoring | Azure Monitor & Log Analytics |
+
+**Planned vendors (coming soon):** VMware, Linux, Google, Proxmox
 
 ---
 

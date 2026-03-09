@@ -1,0 +1,86 @@
+---
+title: "Entra Connect Cloud Sync — Lightweight Hybrid Identity"
+category: "microsoft"
+topic: "entra id"
+summary: "Entra Connect Cloud Sync is a provisioning agent that synchronises on-premises Active Directory identities to Microsoft Entra ID without requiring a dedicated sync server. This article covers its architecture, supported scenarios, limitations compared to full Entra Connect, and how to decide which tool fits your environment."
+tags: ["microsoft", "entra-id", "azure-ad", "hybrid-identity", "cloud-sync", "provisioning", "ad-ds", "az-800"]
+order: 8
+draft: false
+---
+
+## Overview
+
+Hybrid identity — keeping on-premises Active Directory accounts synchronised with Microsoft Entra ID (formerly Azure AD) — is a foundational requirement for any organisation using Microsoft 365 or Azure resources alongside an on-premises Windows Server environment. Microsoft offers two tools to achieve this synchronisation: **Entra Connect** (the full, dedicated sync server solution) and **Entra Connect Cloud Sync** (a lightweight, agent-based alternative introduced in 2020).
+
+Cloud Sync was designed for scenarios where deploying and maintaining a full Entra Connect server is disproportionate to the need: branch offices, remote sites, smaller domains, or multi-forest topologies where the forests are disconnected and cannot be served by a single Entra Connect installation.
+
+## Architecture
+
+The architectural difference between Entra Connect and Cloud Sync is significant.
+
+**Entra Connect** runs a sync engine on a dedicated on-premises server. All configuration, rules, and filtering logic live on that server. The server must be maintained, patched, and backed up. It requires inbound firewall exceptions for some scenarios and is a single point of failure unless a staging server is configured.
+
+**Entra Connect Cloud Sync** inverts this model:
+
+- A **lightweight provisioning agent** (a small Windows service) is installed on one or more on-premises servers — these can be existing domain members, not dedicated machines.
+- The agent requires only **outbound HTTPS connections** to Entra ID on port 443. There are no inbound firewall rules required.
+- All **configuration lives in Entra ID** itself, in the cloud portal. The agent polls Entra ID for its configuration and for provisioning jobs, executes them against the local AD, and reports results back.
+- The agent has a minimal local footprint. It reads from AD, constructs provisioning payloads, and forwards them — it does not run a local sync engine with its own database.
+
+This design means that configuration changes are made in the Entra portal and flow down to agents automatically. There is no sync server to manage, no local configuration to back up separately, and no need for a dedicated machine.
+
+## Supported Scenarios
+
+Cloud Sync is a deliberate subset of full Entra Connect's capabilities, optimised for the most common hybrid identity use cases:
+
+- **Single AD forest to single Entra ID tenant**: The standard synchronisation scenario — users, groups, and contacts replicated from on-premises AD to Entra ID.
+- **Multiple AD forests to a single Entra ID tenant**: Cloud Sync can synchronise multiple disconnected forests to a single tenant, which was historically a complex Entra Connect deployment. Each forest has its own provisioning agent installed.
+- **Disconnected forests**: Because agents only need outbound connectivity, they can serve forests with no direct connectivity between them — only outbound internet access to Entra ID is required. This is a scenario that Entra Connect handles poorly.
+- **Password Hash Synchronisation (PHS)**: Cloud Sync supports PHS as an authentication method, allowing on-premises password hashes to be synchronised to Entra ID so that users can sign in to cloud services even when on-premises infrastructure is unavailable.
+
+## Scoping and Filtering
+
+Cloud Sync supports provisioning scope filters to limit which objects are synchronised:
+
+- **OU-based filtering**: Restrict synchronisation to specific Organisational Units.
+- **Group-based scoping**: Synchronise only users who are members of a specified on-premises security group. This is useful for piloting cloud sync in a subset of the organisation before full rollout.
+- **Domain filtering**: In a multi-domain forest, include or exclude specific domains.
+
+Attribute-level filtering is also available to control which attributes are included in the provisioning payload.
+
+## Agent High Availability
+
+A single provisioning agent is a single point of failure. Cloud Sync supports installing multiple agents per domain or forest. The agents operate in an active/passive model — one agent handles provisioning at a time, and Entra ID automatically fails over to another registered agent if the primary becomes unavailable. Microsoft recommends a minimum of two agents per synchronised domain.
+
+## What Cloud Sync Does Not Support
+
+Cloud Sync is not a drop-in replacement for Entra Connect in all scenarios. The following capabilities require full Entra Connect:
+
+| Feature | Entra Connect | Cloud Sync |
+|---|---|---|
+| Writeback (group, device, password) | Yes | No |
+| Device synchronisation | Yes | No |
+| Pass-Through Authentication (PTA) | Yes | No |
+| Seamless Single Sign-On | Yes | No |
+| Exchange hybrid configuration | Yes | No |
+| Custom sync rules and attribute transformations | Yes | Limited |
+| Synchronisation from Entra ID to AD (writeback) | Yes | No |
+
+Writeback is the most commonly cited missing feature. If your environment requires group writeback (syncing cloud-created groups back to AD), device writeback (for Hybrid Azure AD Join), or password writeback (for Self-Service Password Reset), Cloud Sync alone is insufficient and full Entra Connect is required.
+
+## Choosing Between Cloud Sync and Entra Connect
+
+| Choose Cloud Sync when... | Choose Entra Connect when... |
+|---|---|
+| You have a simple, single-forest environment | You need writeback of any kind |
+| You have disconnected forests | You need Pass-Through Authentication |
+| You want minimal on-premises footprint | You need Exchange hybrid mode |
+| You are deploying at a remote site with no dedicated servers | You have complex attribute mapping requirements |
+| You are piloting hybrid identity for a subset of users | You are an organisation with advanced sync customisation needs |
+| You want configuration managed centrally in the cloud portal | You have an existing Entra Connect deployment to maintain |
+
+It is also possible to run both Cloud Sync and Entra Connect in the same tenant for different domains or forests — for example, using Entra Connect for the primary corporate forest (which needs writeback) and Cloud Sync for an acquired company's disconnected forest.
+
+## Key Takeaways
+
+Entra Connect Cloud Sync lowers the barrier to hybrid identity significantly. By moving the sync configuration into Entra ID and replacing the dedicated sync server with a lightweight polling agent, it makes hybrid identity practical for smaller deployments, multi-forest topologies with disconnected forests, and environments without the resources to maintain a full sync server. Its limitations are real — the absence of writeback, PTA, and device sync rules it out for some environments — but for straightforward user provisioning from AD to Entra ID, it is the simpler and often more resilient choice.

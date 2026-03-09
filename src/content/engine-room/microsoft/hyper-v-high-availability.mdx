@@ -1,0 +1,59 @@
+---
+title: "Hyper-V High Availability — Live Migration, Failover Clustering, and Replica"
+category: "microsoft"
+topic: "hyper-v"
+summary: "High availability for Hyper-V workloads is not a single feature but a stack of complementary technologies each addressing a different failure scenario. Live Migration handles planned downtime, Failover Clustering responds to unplanned host failures, and Hyper-V Replica provides site-level disaster recovery — understanding when each applies is fundamental to designing resilient virtualised infrastructure."
+tags: ["microsoft", "windows-server", "hyper-v", "high-availability", "failover-clustering", "live-migration", "storage-spaces-direct"]
+order: 21
+draft: false
+---
+
+## Overview
+
+Virtualisation introduced a fundamental shift in how infrastructure availability is designed. Because a VM is ultimately a set of files and a running process, it can be moved, copied, and restarted in ways that physical servers cannot. Hyper-V on Windows Server exposes three distinct availability mechanisms that exploit this mobility: Live Migration for zero-downtime planned moves, Failover Clustering for automatic recovery from unplanned host failures, and Hyper-V Replica for asynchronous replication to a secondary site. Each technology has a specific failure domain and set of prerequisites, and mature environments use all three in combination.
+
+## Live Migration
+
+Live Migration allows a running VM to be moved from one Hyper-V host to another with no perceptible downtime to the workload inside it. The process works in stages. First, the destination host allocates memory and vCPUs to mirror the VM's current state. Then, memory pages are iteratively copied from source to destination while the VM continues running — pages that are modified during transfer (dirty pages) are re-copied until the delta becomes small enough. Finally, the VM is paused for a brief final state transfer (typically under a second), control is switched to the destination host, and the VM resumes. From the guest OS perspective, this looks identical to a brief network delay.
+
+Live Migration requires that both hosts can access the VM's storage — either via shared storage (SAN, SMB file share) or via Storage Migration, which moves the VM's disk files as part of the migration. Network-side, it requires sufficient bandwidth between hosts, and authentication must be handled via Kerberos constrained delegation or CredSSP. CPU compatibility matters: AMD and Intel are not mutually compatible for Live Migration, and even within the same vendor, certain newer instruction sets exposed to VMs can prevent migration to older host CPUs. Hyper-V's CPU compatibility mode can hide newer instructions from VMs to maximise migration flexibility at the cost of not exposing cutting-edge CPU features to guests.
+
+## Failover Clustering
+
+Live Migration addresses planned maintenance. When a host fails unexpectedly — hardware crash, kernel panic, power loss — Live Migration is unavailable. Failover Clustering addresses this scenario.
+
+A Windows Server Failover Cluster (WSFC) is a group of servers (nodes) that collectively own shared resources, including VMs. The cluster continuously monitors the health of each node through heartbeat traffic and votes on whether a node should be considered failed. When a node stops responding, the cluster achieves quorum agreement that the node has failed and automatically restarts its VMs on surviving nodes. From a VM perspective, this is not zero-downtime — the VM experiences a hard shutdown and cold boot on the new host — but recovery is automatic and typically completes within minutes.
+
+Clustering requires that all nodes share access to the same storage so any node can take ownership of a VM's disk files. Historically this meant external SAN or NAS storage. More recently, Storage Spaces Direct eliminates that requirement.
+
+### Cluster Shared Volumes
+
+CSV (Cluster Shared Volumes) is the storage abstraction that makes Hyper-V clustering practical. A CSV is an NTFS or ReFS volume that all cluster nodes mount simultaneously in read/write mode. Rather than one node owning a volume exclusively (as traditional clustered storage works), CSV allows all nodes to access all VM disk files regardless of which node is currently running each VM. I/O coordination is handled at the cluster layer. Without CSV, a failover would require volume ownership to be transferred before the VM could start — adding time and complexity to recovery.
+
+### Storage Spaces Direct
+
+S2D (Storage Spaces Direct) is Microsoft's hyper-converged infrastructure solution, introduced in Windows Server 2016. Rather than requiring external shared storage, S2D pools the local disks from all cluster nodes into a single distributed storage layer, replicating data across nodes for fault tolerance. A typical S2D cluster has three or more nodes, each contributing NVMe, SSD, or HDD capacity. The resulting storage pool presents volumes that any node can access, functionally equivalent to a SAN but without the cost and complexity of external storage hardware.
+
+S2D uses ReFS by default, supports tiering between fast (NVMe/SSD) and capacity (HDD) storage, and integrates with Failover Clustering and CSV natively. Windows Admin Center provides a graphical management surface for S2D clusters.
+
+## Hyper-V Replica
+
+Hyper-V Replica is asynchronous VM replication between two Hyper-V hosts or clusters, typically across sites. It is not a high-availability feature — the replica VM is offline and the primary VM must be failed over to it manually or via scripted automation. It is a disaster recovery feature.
+
+Replica works by shipping VM checkpoint differences to a secondary host on a configurable schedule (as frequently as 30-second intervals, or 5-minute/15-minute intervals). At the replica site, a copy of the VM exists in a powered-off state, current to the last replication cycle. If the primary site is lost, an administrator initiates a planned or unplanned failover, bringing the replica VM online.
+
+The RPO (Recovery Point Objective) depends on the replication interval — a 5-minute interval means up to 5 minutes of data loss in a worst-case failure. The RTO (Recovery Time Objective) depends on how quickly an administrator can initiate failover and how long the VM takes to boot. Hyper-V Replica does not provide automatic failover; that requires integration with additional orchestration such as Azure Site Recovery.
+
+## Choosing the Right Technology
+
+| Scenario | Technology |
+|---|---|
+| Planned host maintenance (patching, hardware) | Live Migration |
+| Unplanned host failure (crash, power loss) | Failover Clustering |
+| Site-level disaster (datacenter outage) | Hyper-V Replica or Azure Site Recovery |
+| Eliminate external SAN dependency | Storage Spaces Direct |
+| Zero-downtime storage migration | Storage Live Migration |
+
+## Summary
+
+Hyper-V's availability story is layered by design. Live Migration handles the ordinary operational lifecycle — patching hosts, redistributing load, decommissioning hardware — without impacting running workloads. Failover Clustering catches the failures that cannot be planned for, automatically restarting VMs on healthy hardware within the same site. Hyper-V Replica extends protection across sites for scenarios where the entire primary datacenter is unavailable. Storage Spaces Direct removes the shared storage prerequisite that once made clustering expensive, making this full stack accessible to organisations without enterprise SAN investment.

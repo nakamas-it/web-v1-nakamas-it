@@ -1,0 +1,93 @@
+---
+title: "AD DS Trusts — Crossing Domain and Forest Boundaries"
+category: "microsoft"
+topic: "ad ds"
+summary: "Active Directory trusts define the boundaries across which authentication and resource access can flow. This article covers trust direction, transitivity, the major trust types, and the security controls — SID filtering and selective authentication — that constrain what a trust actually permits."
+tags: ["microsoft", "windows-server", "active-directory", "ad-ds", "trusts", "kerberos", "sid-filtering", "forest-trust"]
+order: 4
+draft: false
+---
+
+## Overview
+
+A domain is not an island. Organisations grow through mergers and acquisitions, administration is sometimes split across multiple domains for regulatory or organisational reasons, and cloud integration introduces additional identity boundaries. Active Directory trusts are the mechanism that allows users in one domain or forest to authenticate and access resources in another, without merging the two directories.
+
+Understanding trusts is not just a deployment concern — it is a security-critical topic. A misconfigured trust can allow attackers who compromise one domain to pivot into another.
+
+## Trust Direction and Transitivity
+
+Every trust has two fundamental properties: direction and transitivity.
+
+### Direction
+
+A trust is always described from the perspective of where the resource lives.
+
+- **One-way trust**: Users in the **trusted** domain can access resources in the **trusting** domain. The arrow of access flows from trusted to trusting. If Domain A trusts Domain B (one-way), users from B can access resources in A, but not vice versa.
+- **Two-way trust**: Both domains trust each other. Users in either domain can access resources in the other. This is the default for parent-child and tree-root trusts within a forest.
+
+### Transitivity
+
+- **Transitive trust**: Trust is extended through an intermediary. If Domain A trusts Domain B and Domain B trusts Domain C, then Domain A also trusts Domain C. This is how the automatic intra-forest trust chain works — all domains in a forest implicitly trust each other through transitive trust.
+- **Non-transitive trust**: Trust is strictly point-to-point. Even if Domain B trusts Domain C, that relationship does not extend to Domain A. External trusts and realm trusts are non-transitive by default.
+
+## Trust Types
+
+| Trust Type | Scope | Direction | Transitivity | Created |
+|---|---|---|---|---|
+| Parent-Child | Intra-forest | Two-way | Transitive | Automatically when a child domain is added |
+| Tree-Root | Intra-forest | Two-way | Transitive | Automatically when a new domain tree is added to a forest |
+| Shortcut | Intra-forest | One- or two-way | Transitive | Manually |
+| Forest | Inter-forest | One- or two-way | Transitive within forest | Manually |
+| External | Inter-domain | One- or two-way | Non-transitive | Manually |
+| Realm | AD to non-Windows Kerberos | One- or two-way | Transitive or non-transitive | Manually |
+
+### Parent-Child and Tree-Root Trusts
+
+These are created automatically by AD DS during domain creation and are invisible to administrators in day-to-day operations. They form the backbone of intra-forest trust and are always transitive and two-way. Because of transitivity, every domain in a forest trusts every other domain — this is why a forest is the primary security boundary in AD DS, not a domain.
+
+### Shortcut Trusts
+
+When two domains in the same forest are in different domain trees and users frequently access resources across that boundary, authentication has to traverse the full chain of parent-child trusts up to the forest root and back down. This adds latency and can create bottlenecks on the forest root DC. A **shortcut trust** creates a direct trust path between the two domains, bypassing intermediate domains and reducing authentication overhead. Shortcut trusts are manually created and are transitive within the context of the forest.
+
+### Forest Trusts
+
+A **forest trust** connects two entire forests at the forest root level, extending transitive trust to all domains in both forests. Users from Forest B can access resources in Forest A (and in any domain within Forest A), and vice versa if the trust is two-way. Forest trusts require both forests to be at Windows Server 2003 forest functional level or higher.
+
+Forest trusts support **selective authentication** (described below), which makes them suitable for controlled cross-forest access scenarios such as post-acquisition environments where two organisations' IT departments are being kept separate.
+
+### External Trusts
+
+An **external trust** connects a domain in one forest to a domain in another, without the forest-wide transitivity of a forest trust. They are used when only a single cross-forest domain pair needs to communicate, when the remote forest is at a lower functional level, or when connecting to a Windows NT 4.0 domain (which predates Active Directory entirely). External trusts are non-transitive — they do not chain through to other domains in either forest.
+
+### Realm Trusts
+
+A **realm trust** connects an AD DS domain to a non-Windows Kerberos realm, such as a MIT Kerberos realm used by Linux or Unix infrastructure. Realm trusts allow standard Kerberos cross-realm ticket referrals to function between AD and non-AD Kerberos environments.
+
+## Security Controls on Trusts
+
+### SID Filtering (Quarantine)
+
+When a user from a trusted domain authenticates against a trusting domain, their Kerberos ticket includes their SIDs — their own account SID plus all group SIDs. Critically, this includes the **SID history** attribute, which retains old SIDs from previous migrations. An attacker who controls a trusted domain could craft an account with a SID history entry containing a highly privileged SID from the trusting domain (e.g., Domain Admins), and that SID would be honoured on authentication.
+
+**SID filtering** (also called SID quarantine) is a protection applied on the trusting domain side. It strips any SID from the authentication token that does not originate from the trusted domain itself. SID filtering is enabled by default on external trusts and forest trusts. It should not be disabled without a specific operational reason, and that reason should be documented and reviewed periodically.
+
+### Selective Authentication
+
+By default, a forest trust or external trust with **forest-wide authentication** allows any user in the trusted forest to authenticate against any resource in the trusting forest, subject to ACLs. **Selective authentication** restricts this: users in the trusted domain are only permitted to authenticate against specific servers in the trusting domain, and only after an administrator has explicitly granted the "Allowed to Authenticate" permission on those target computers.
+
+Selective authentication is the correct configuration for forest trusts between separate organisational entities — for example, between an acquired company's forest and the parent company's forest — where blanket cross-forest authentication would be too broad.
+
+## Choosing the Right Trust Type
+
+| Scenario | Recommended Trust |
+|---|---|
+| Two domains within the same forest | No action needed — intra-forest trust is automatic |
+| Authentication latency between distant intra-forest domains | Shortcut trust |
+| Cross-forest access, both forests under same organisation | Forest trust (two-way, selective authentication) |
+| Cross-forest access, post-acquisition, separate IT teams | Forest trust (one-way or two-way, selective authentication, SID filtering on) |
+| Single domain in a partner forest needs access, not the whole forest | External trust |
+| Integration with MIT Kerberos realm (Linux/Unix) | Realm trust |
+
+## Key Takeaways
+
+Trusts extend the reach of Active Directory authentication across domain and forest boundaries. The critical concepts to internalise are direction (who can access whose resources), transitivity (whether trust chains through intermediaries), and the distinction between the various trust types and their appropriate use cases. Forest trusts are the most powerful and the most dangerous — always pair them with SID filtering and evaluate whether selective authentication is appropriate. A well-understood trust architecture is a prerequisite for both hybrid cloud integration and safe post-acquisition IT consolidation.

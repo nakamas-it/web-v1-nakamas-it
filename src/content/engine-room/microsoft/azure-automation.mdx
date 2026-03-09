@@ -1,0 +1,113 @@
+---
+title: "Azure Automation and DSC — Runbooks, Drift Prevention, and Hybrid Workers"
+category: "microsoft"
+topic: "automation"
+summary: "Azure Automation is a cloud service for process automation and configuration management across Azure, on-premises, and multi-cloud environments. Runbooks automate repetitive operational tasks, while Desired State Configuration (DSC) declaratively defines and enforces server configuration — detecting and correcting drift without human intervention."
+tags: ["microsoft", "azure", "automation", "dsc", "powershell", "hybrid", "configuration-management"]
+order: 16
+draft: false
+---
+
+## Overview
+
+Azure Automation addresses two categories of operational burden that consume significant IT time: repetitive process tasks (creating accounts, restarting services, generating reports, rotating credentials) and configuration drift (servers that gradually diverge from their intended state through manual changes, failed patches, or software updates).
+
+The service is hosted in Azure and exposes two primary capabilities — runbooks for process automation and State Configuration (DSC) for declarative configuration management. Both capabilities extend to on-premises and multi-cloud machines through the Hybrid Runbook Worker feature.
+
+## Automation Accounts
+
+All Azure Automation resources live within an Automation Account, which is the top-level resource deployed in an Azure subscription and resource group. A single Automation Account can contain:
+
+- Runbooks (PowerShell, Python, graphical).
+- DSC configurations and compiled MOF documents.
+- Credentials, certificates, variables, and connections stored as encrypted assets.
+- Hybrid Runbook Worker groups.
+- Schedules and webhooks for triggering automation.
+
+Automation Accounts use a managed identity (system-assigned or user-assigned) to authenticate to Azure resources without storing credentials in runbook code.
+
+## Runbooks
+
+A runbook is a script — PowerShell, PowerShell Workflow, Python 2/3, or a graphical workflow — that automates an operational task. Runbooks execute in one of two environments:
+
+**Azure sandbox** — a managed execution environment in Azure. Suitable for tasks that interact with Azure APIs, Microsoft 365, or any internet-reachable endpoint. The sandbox does not have network access to private on-premises resources.
+
+**Hybrid Runbook Worker** — an agent installed on an on-premises or Arc-enabled machine that pulls jobs from Azure Automation and executes them locally. The Hybrid Worker bridges the gap: it has local network access to on-premises resources (Active Directory, on-premises databases, internal file shares) while receiving its instructions from Azure.
+
+### Typical Runbook Use Cases
+
+- Create and provision Active Directory user accounts as part of an HR onboarding workflow.
+- Restart a Windows service on a set of application servers after a deployment.
+- Resize Azure VMs on a schedule to reduce costs during off-hours.
+- Generate compliance reports and email them to stakeholders.
+- Rotate service account passwords and update dependent application configurations.
+- Snapshot or back up databases before maintenance windows.
+
+Runbooks can be triggered manually from the Azure portal, on a schedule, via webhook (allowing external systems like ITSM tools to invoke them), or by Azure Monitor alerts (closing the loop between detection and automated remediation).
+
+## Hybrid Runbook Worker
+
+The Hybrid Runbook Worker is the component that makes Azure Automation viable for on-premises environments. It is a Windows or Linux agent that registers with an Azure Automation Account and continuously polls for jobs assigned to its worker group.
+
+When a runbook is started with a target Hybrid Worker group, Azure queues the job and the worker pulls it, executes it in the local process context, and reports results back to Azure. From the operator's perspective, there is no meaningful difference between running a job in the Azure sandbox and running it on a Hybrid Worker — the same job history, logs, and output streams appear in the Automation Account.
+
+Worker groups allow load distribution and high availability: multiple machines can be members of the same group, and jobs are distributed across available workers.
+
+With Azure Arc, the Hybrid Runbook Worker extension can be deployed and managed as an Arc VM extension, integrating Hybrid Worker onboarding into the same management pipeline as other Arc-enabled server capabilities.
+
+## Desired State Configuration (DSC)
+
+Desired State Configuration is a declarative configuration management framework built into PowerShell. Rather than writing imperative scripts that perform actions step by step, DSC lets you describe what the end state of a server should be — and the DSC engine determines what needs to change to reach that state.
+
+### DSC Configuration Structure
+
+A DSC configuration is a PowerShell script block that specifies resources (built-in or from community modules like nx for Linux, or xWebAdministration for IIS) and their desired properties:
+
+- Which Windows features should be installed or absent.
+- Which services should be running, stopped, or disabled.
+- Which files should exist, what their content should be, and what permissions they should carry.
+- Which registry keys should exist and what values they should hold.
+- Which local users or groups should be present.
+
+The configuration is compiled into a Managed Object Format (MOF) document — a structured text file that the DSC Local Configuration Manager (LCM) on the target machine can read and apply.
+
+### Azure Automation State Configuration
+
+Azure Automation State Configuration is the hosted service that compiles DSC configurations, stores MOF documents, and distributes them to registered nodes (managed machines). It operates in pull mode: the LCM on each managed machine contacts the Azure Automation pull server on a configurable interval, downloads its current MOF, evaluates whether the machine is in compliance, and applies any necessary changes.
+
+| Mode | Description |
+|---|---|
+| ApplyOnly | Apply the configuration once; do not monitor or re-apply |
+| ApplyAndMonitor | Apply and report non-compliance, but do not automatically correct drift |
+| ApplyAndAutoCorrect | Apply, monitor, and automatically reapply when drift is detected |
+
+`ApplyAndAutoCorrect` is the mode that delivers the continuous enforcement value proposition of DSC: a human cannot change a monitored setting in a way that persists, because the LCM will detect and revert it on the next consistency check.
+
+## Configuration Drift
+
+Configuration drift is the gradual divergence of a server's actual state from its intended state. Common causes include:
+
+- Manual changes made during incident response that are never reverted.
+- Software installations or removals by application teams.
+- Windows Update side effects (feature changes bundled with patches).
+- Misconfiguration during server provisioning.
+
+Without DSC or a similar tool, drift is invisible until it causes a problem. With DSC in `ApplyAndMonitor` mode, the Azure Automation compliance dashboard shows every node that has drifted from its assigned configuration and exactly which resources are non-compliant. With `ApplyAndAutoCorrect`, many categories of drift are corrected before they are noticed.
+
+### Practical DSC Use Cases
+
+- Ensure IIS is always installed and running on web servers; ensure it is never installed on database servers.
+- Enforce that SMBv1 is always disabled across all servers (a critical security baseline item).
+- Ensure the Windows Firewall is always enabled and a specific inbound rule exists.
+- Verify that a required local administrator account exists with a known, managed password.
+- Prevent the installation of unauthorized software by monitoring specific directories.
+
+## Scheduling, Limits, and Pricing
+
+Azure Automation provides a free tier that includes 500 minutes of runbook execution time and 5,000 DSC node configuration checks per month. Beyond those limits, billing is per additional minute (runbook) or per node per month (DSC).
+
+Runbook execution schedules can be defined with minute-level granularity and linked to any number of runbooks or input parameter sets. Webhook URIs have configurable expiry and can carry JSON payloads that pass parameters to runbooks at invocation time.
+
+## Summary
+
+Azure Automation brings cloud-managed orchestration to both process automation and configuration management, with the Hybrid Runbook Worker extending its reach to on-premises and multi-cloud machines. DSC provides the declarative, drift-resistant configuration model that operational teams need to maintain consistent server states at scale — particularly valuable for security baselines where manual enforcement is impractical. Together, runbooks and DSC reduce unplanned operational work by automating the predictable and making the unpredictable (drift, incidents) visible before it becomes critical.

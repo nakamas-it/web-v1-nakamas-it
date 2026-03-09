@@ -1,0 +1,102 @@
+---
+title: "Azure Monitor and Log Analytics — Observability for the Microsoft Stack"
+category: "microsoft"
+topic: "monitoring"
+summary: "Azure Monitor is Microsoft's unified observability platform, collecting time-series metrics and structured log data from Azure resources, on-premises servers via Azure Arc, and applications. Log Analytics Workspaces serve as the central repository for log data, queried using the Kusto Query Language, while alert rules, workbooks, and integrations with Defender for Cloud make it the operational backbone for both cloud and hybrid Microsoft environments."
+tags: ["microsoft", "azure", "monitoring", "log-analytics", "kql", "azure-monitor", "arc", "az-800"]
+order: 36
+draft: false
+---
+
+## Overview
+
+Azure Monitor is Microsoft's platform for collecting, analysing, and acting on telemetry from infrastructure and applications. It unifies monitoring across Azure-native resources, on-premises Windows and Linux servers connected via Azure Arc, and application-level instrumentation via Application Insights. Rather than a single tool, Azure Monitor is a collection of services sharing a common data pipeline: data flows in from many sources, is stored in one of two data stores depending on its type, and is then made available for querying, alerting, and visualisation.
+
+For IT professionals managing hybrid Windows Server environments, Azure Monitor represents the convergence of what was previously fragmented across System Center Operations Manager, Windows Event Viewer, Performance Monitor, and various third-party tools — into a single cloud-managed platform.
+
+## Two Data Stores: Metrics and Logs
+
+Azure Monitor routes collected telemetry into two fundamentally different data stores, each optimised for its data type.
+
+**Metrics** are time-series numerical measurements — CPU percentage, disk IOPS, network bytes transmitted, memory working set. Metrics are lightweight, collected at high frequency (typically one-minute intervals or faster), and stored for 93 days by default. They are optimised for near-real-time querying and are the foundation of performance dashboards and threshold-based alerts. Metrics Explorer in the Azure portal provides a graphical interface for charting metric data without writing queries.
+
+**Logs** are structured records of events — Windows event log entries, application log lines, security audit records, network flow logs, diagnostic output. Logs are richer in context than metrics but are not time-series by nature. They are stored in Log Analytics Workspaces and queried using the Kusto Query Language (KQL). Log data is retained for 30 days by default, with configurable retention extending to years.
+
+| Property | Metrics | Logs |
+|---|---|---|
+| Data type | Numerical time-series | Structured records |
+| Default retention | 93 days | 30 days (configurable) |
+| Query interface | Metrics Explorer (graphical) | Log Analytics (KQL) |
+| Latency | Near-real-time | Minutes |
+| Best for | Performance monitoring, fast alerts | Troubleshooting, compliance, security |
+
+## Log Analytics Workspace
+
+The Log Analytics Workspace is the central repository for log data in Azure Monitor. It is a distinct Azure resource with its own access control (RBAC), geographic region, data retention settings, and ingestion costs. All log-producing resources — Azure VMs, Arc-enabled on-premises servers, Azure services, network equipment via diagnostic settings — send their data to one or more workspaces.
+
+A workspace is both a storage unit and a query scope. KQL queries run against a specific workspace and can see only the data ingested into that workspace. For multi-tenant or multi-region environments, workspace design requires careful consideration of data sovereignty, RBAC boundaries, and cost allocation.
+
+Tables within a workspace are organised by data type: `Event` for Windows Event Log entries, `Perf` for performance counters, `Heartbeat` for agent connectivity, `SecurityEvent` for security-audited events, and so on. Custom log tables can be created for application-specific log formats.
+
+## Kusto Query Language (KQL)
+
+KQL is the query language used to retrieve and analyse data stored in Log Analytics Workspaces. It is a pipe-based, read-only query language — queries are structured as a series of operators chained together with the pipe character, each operator transforming or filtering the data stream.
+
+A basic KQL query structure follows this pattern:
+
+```
+TableName
+| where Condition
+| summarize Aggregation by Grouping
+| sort by Column desc
+```
+
+For example, to find the count of error events per computer in the last 24 hours:
+
+```
+Event
+| where EventLevelName == "Error"
+| where TimeGenerated > ago(24h)
+| summarize ErrorCount = count() by Computer
+| sort by ErrorCount desc
+```
+
+KQL is conceptually similar to SQL in that it supports filtering, aggregation, joining, and projection — but it is designed for streaming log data and leans toward time-series operations. Common KQL operators include `where` (filter), `summarize` (aggregate), `project` (select columns), `extend` (add computed columns), `join` (join tables), and `render` (visualise results as a chart within the portal).
+
+## Agents and Data Collection Rules
+
+Azure Monitor collects data from servers through agents. The current standard agent is the **Azure Monitor Agent (AMA)**, which replaces the legacy Microsoft Monitoring Agent (MMA, also called the OMS agent). AMA is lighter-weight and configured through Data Collection Rules rather than workspace-level settings.
+
+**Data Collection Rules (DCRs)** define what data to collect, from which machines, and where to send it. A single DCR can specify Windows event log channels (Application, Security, System), performance counters and their collection intervals, custom log file paths, and the destination workspace. DCRs are Azure resources that can be applied to multiple machines, making them a scalable and auditable configuration mechanism compared to per-agent workspace configuration.
+
+## Alerting
+
+Alert rules in Azure Monitor query either metrics or logs on a schedule and fire when a defined condition is met. Metric alert rules check a metric value against a static or dynamic threshold. Log alert rules execute a KQL query against a Log Analytics Workspace and fire when the query returns results (or when the count of results crosses a threshold).
+
+When an alert fires, it triggers an **Action Group** — a reusable set of notification and response actions. An action group can send email, send SMS, call a webhook (for integration with ticketing or automation systems), trigger an Azure Function, or connect to an ITSM tool. Action groups are defined independently of alert rules and can be shared across multiple rules.
+
+## Dashboards and Workbooks
+
+Azure Monitor provides two primary visualisation tools.
+
+**Dashboards** are pinnable collections of charts and tiles in the Azure portal. Metric charts and query result tables can be pinned to a dashboard for at-a-glance operational visibility.
+
+**Workbooks** are parameterised, interactive reports built on KQL queries. They support text sections, query result tables, charts, and user input parameters (time ranges, server names, log levels). Workbooks are reusable and shareable across teams, making them the appropriate tool for recurring operational reports, compliance documentation, and troubleshooting playbooks.
+
+## Integration with Defender for Cloud
+
+Azure Defender for Cloud (formerly Azure Security Center) feeds security alerts, vulnerability assessments, and compliance recommendations into Azure Monitor. These appear as entries in Log Analytics tables such as `SecurityAlert` and `SecurityRecommendation`, making them queryable alongside operational log data. This integration allows security and operations teams to use the same KQL-based tooling for both operational troubleshooting and security investigation.
+
+## Practical Uses for Windows Server Environments
+
+For on-premises or hybrid Windows Server environments connected via Azure Arc, Azure Monitor provides:
+
+- **Windows event log ingestion**: Application, Security, and System event logs centralised in Log Analytics for search and alerting
+- **Performance counter collection**: CPU, disk, memory, and network counters for capacity planning and performance analysis
+- **IIS log ingestion**: Web server access logs for application troubleshooting
+- **Custom log ingestion**: Any text-based log file on the server filesystem can be ingested into a custom Log Analytics table
+- **Heartbeat monitoring**: The `Heartbeat` table records agent check-ins, enabling alerts when a server stops reporting
+
+## Summary
+
+Azure Monitor provides the observability foundation for modern Microsoft hybrid environments by unifying metric collection and log aggregation into a single platform with a consistent query language and alerting model. The distinction between the Metrics store and Log Analytics Workspaces — and the understanding of when to use each — is central to designing a monitoring strategy. KQL, Data Collection Rules, and Action Groups are the operational levers that translate raw telemetry into actionable operational intelligence, making Azure Monitor an essential capability for administrators managing Windows Server infrastructure at scale.

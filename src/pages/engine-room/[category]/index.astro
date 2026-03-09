@@ -20,41 +20,35 @@ const { articles } = Astro.props;
 const base = import.meta.env.BASE_URL;
 
 const categoryMeta: Record<string, { label: string; description: string; accent: string; icon: string }> = {
-  identity: {
-    label: 'Identity & Directory',
-    description: 'Active Directory, Entra ID, Group Policy, hybrid identity — how organisations manage who can access what.',
-    accent: 'text-violet-400',
-    icon: '🔑',
-  },
-  virtualization: {
-    label: 'Virtualization',
-    description: 'Hypervisors, ESXi, Hyper-V, Proxmox — what a hypervisor actually does and how virtualised infrastructure is built.',
+  microsoft: {
+    label: 'Microsoft',
+    description: 'Windows Server, Active Directory, Hyper-V, Azure Arc, Intune, Microsoft 365 — the full Microsoft infrastructure stack from domain controllers and Group Policy to hybrid cloud and containers.',
     accent: 'text-blue-400',
-    icon: '📦',
+    icon: '🪟',
   },
-  storage: {
-    label: 'Storage',
-    description: 'RAID, NAS vs SAN, TrueNAS, ZFS — how enterprise storage is structured, protected, and shared.',
-    accent: 'text-amber-400',
-    icon: '💾',
-  },
-  endpoint: {
-    label: 'Endpoint Management',
-    description: 'Intune, Group Policy, imaging — how devices are deployed, configured, and kept compliant at scale.',
+  vmware: {
+    label: 'VMware',
+    description: "ESXi, vSphere, vCenter, vSAN, NSX-T — VMware's virtualisation platform from bare-metal hypervisors to software-defined networking and storage.",
     accent: 'text-green-400',
-    icon: '🖥️',
+    icon: '💠',
   },
-  email: {
-    label: 'Email & Collaboration',
-    description: 'Exchange Online, Microsoft 365 tenant concepts — the plumbing behind every calendar invite and shared mailbox.',
-    accent: 'text-sky-400',
-    icon: '📧',
+  linux: {
+    label: 'Linux',
+    description: 'Debian, Ubuntu, RHEL — open-source server administration, filesystems, LVM, Samba, OpenLDAP, and the tools that run most of the internet.',
+    accent: 'text-yellow-400',
+    icon: '🐧',
   },
-  monitoring: {
-    label: 'Monitoring & Logging',
-    description: "SNMP, Syslog, NetFlow, observability — knowing what your infrastructure is doing before your users tell you it's broken.",
-    accent: 'text-rose-400',
-    icon: '📊',
+  google: {
+    label: 'Google',
+    description: 'Google Cloud Platform, Google Workspace — GCP compute, Cloud DNS, Cloud Storage, GKE, and the Google productivity suite for enterprise environments.',
+    accent: 'text-red-400',
+    icon: '☁️',
+  },
+  proxmox: {
+    label: 'Proxmox',
+    description: 'Proxmox VE — the open-source hypervisor combining KVM virtualisation and LXC containers with Ceph storage and high-availability clustering.',
+    accent: 'text-orange-400',
+    icon: '🔶',
   },
 };
 

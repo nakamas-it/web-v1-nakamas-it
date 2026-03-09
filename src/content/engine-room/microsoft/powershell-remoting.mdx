@@ -1,0 +1,87 @@
+---
+title: "PowerShell Remoting — Remote Administration at Scale"
+category: "microsoft"
+topic: "powershell"
+summary: "PowerShell Remoting uses the WinRM protocol to execute commands on remote machines, enabling both interactive sessions and parallel batch operations across large server fleets. Just Enough Administration (JEA) extends this model with constrained endpoints that delegate specific capabilities to non-administrator accounts."
+tags: ["microsoft", "windows-server", "powershell", "winrm", "jea", "security"]
+order: 12
+draft: false
+---
+
+## Overview
+
+PowerShell Remoting is the mechanism by which PowerShell commands are executed on remote computers rather than locally. It is built on Windows Remote Management (WinRM), Microsoft's implementation of the WS-Management (WSMan) protocol — an open, SOAP-based standard for managing systems over HTTP or HTTPS.
+
+When a command runs via remoting, PowerShell serialises the command and its parameters, ships them over WinRM to the target machine, executes them in a remote session, serialises the result objects, and returns them to the local session. Administrators interact with the results as if they were local objects, though some method calls are not available on deserialised ("rehydrated") objects.
+
+## Transport and Port Model
+
+WinRM listens on two ports:
+
+| Protocol | Port | Notes |
+|---|---|---|
+| HTTP | 5985 | Cleartext transport; acceptable only on trusted, segmented networks |
+| HTTPS | 5986 | Requires a valid certificate on the remote host |
+
+In domain environments, Kerberos encrypts the session payload even over HTTP 5985, providing confidentiality without requiring a certificate. In workgroup or cross-domain environments, HTTPS on 5986 is the appropriate choice.
+
+Enabling remoting is accomplished with `Enable-PSRemoting` on the target machine, which starts the WinRM service, sets it to automatic startup, and creates the necessary firewall rules.
+
+## Enter-PSSession vs Invoke-Command
+
+These are the two primary remoting entry points, and they serve different purposes.
+
+**Enter-PSSession** opens an interactive, one-to-one session with a single remote computer. The prompt changes to reflect the remote host. This is conceptually similar to SSH for interactive administration of a single machine.
+
+**Invoke-Command** executes a script block against one or more remote computers and returns results to the local session. It is the right choice for automation: Invoke-Command can target hundreds of machines in a single call, running the script block in parallel (controlled by `-ThrottleLimit`) and aggregating results. This is the backbone of fleet-wide automation scripts.
+
+## Authentication Methods
+
+| Method | Domain Required | Notes |
+|---|---|---|
+| Kerberos | Yes | Default in AD environments; mutual authentication, no credential forwarding |
+| NTLM | No | Falls back automatically for workgroup targets; less secure |
+| CredSSP | No | Delegates credentials to the remote host; solves double-hop but increases exposure |
+| Certificate | No | Most secure for non-domain scenarios; requires PKI or self-signed cert trust |
+
+## The Double-Hop Problem
+
+The double-hop problem is a common source of confusion in remoting scenarios. When an administrator remotely connects to Server A and then attempts to access a network resource (such as a file share or another server) from within that session, the access fails. This happens because Kerberos does not forward credentials by default — Server A holds an impersonation token for the admin but cannot present Kerberos tickets to Server B on their behalf.
+
+Solutions include:
+
+- **Kerberos Constrained Delegation** — configured in Active Directory; allows Server A to request Kerberos tickets for the admin to specific services on Server B. No credential forwarding; considered the safer option.
+- **CredSSP** — the admin's credentials are encrypted and sent to Server A, which can then authenticate to Server B directly. Effective but increases risk because credentials are materialised on the intermediate server.
+- **Resource-Based Constrained Delegation** — a more flexible variant configured on the target resource (Server B) rather than Server A, introduced with Windows Server 2012 R2.
+
+## Just Enough Administration (JEA)
+
+Just Enough Administration is a PowerShell remoting feature that enforces least-privilege access to remote management. Instead of granting full administrator rights, JEA allows you to define constrained endpoints where non-admin users can run only a specific set of approved commands.
+
+The key components are:
+
+**Role Capability files** (.psrc) define what a given role can do: which cmdlets are visible, which parameters are allowed, which external scripts or executables can be called, and what values specific parameters may accept.
+
+**Session Configuration files** (.pssc) bind role capabilities to user accounts or AD security groups, define the virtual account or group-managed service account the session runs under, and specify session settings like transcript logging.
+
+**Virtual accounts** are temporary local administrator accounts created for the duration of a JEA session. The connecting user never sees or holds the password. All actions taken in the session run under this ephemeral identity, which means auditing is clean and no standing privilege is granted.
+
+### JEA in Practice
+
+A practical example: the helpdesk team needs to reset user passwords and restart specific Windows services on application servers. Without JEA, this requires either full local administrator rights (too broad) or RDP access (uncontrolled). With JEA:
+
+1. A role capability file permits `Reset-ADAccountPassword` and `Restart-Service` with an approved list of service names.
+2. A session configuration file maps the helpdesk AD group to this role.
+3. Helpdesk staff connect to the JEA endpoint via `Enter-PSSession` and see only the permitted cmdlets.
+4. All actions are logged in PowerShell transcripts for auditing.
+
+## Security Considerations
+
+- Always use HTTPS (port 5986) when remoting outside a domain environment or across untrusted network segments.
+- Avoid CredSSP unless Kerberos delegation is not feasible. CredSSP places decrypted credentials on the remote host, making it a target for credential theft if that host is compromised.
+- Enable PowerShell script block logging and transcription via Group Policy to maintain an audit trail of remote activity.
+- JEA endpoints should be the default for any remoting access granted to non-administrator staff.
+
+## Summary
+
+PowerShell Remoting provides a scalable, protocol-based approach to remote server administration that underpins most modern Windows automation. Understanding the distinction between interactive sessions and batch execution, the mechanics of the double-hop problem and its mitigations, and the JEA model for least-privilege delegation is essential for AZ-800 candidates and practising Windows Server administrators alike.

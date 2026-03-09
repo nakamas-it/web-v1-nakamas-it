@@ -1,0 +1,73 @@
+---
+title: "Azure File Sync — Extend Windows File Servers to the Cloud"
+category: "microsoft"
+topic: "azure"
+summary: "Azure File Sync synchronises Windows file server shares to Azure Files, creating a cloud-backed copy of on-premises data while allowing servers to cache only the most-accessed files locally through cloud tiering. It supports multi-server sync, enabling branch offices and remote sites to share file content via a common cloud endpoint without requiring direct server-to-server replication."
+tags: ["microsoft", "azure", "file-sync", "azure-files", "cloud-tiering", "hybrid", "az-800"]
+order: 32
+draft: false
+---
+
+## Overview
+
+Azure File Sync is a service that bridges on-premises Windows file servers and Azure Files — Microsoft's fully managed SMB file share service in the cloud. Once deployed, the same file content exists both on the on-premises server and in Azure, kept in sync by a lightweight agent running on the Windows Server host. Azure File Sync transforms an ordinary Windows file server into a hybrid storage node: it retains all the familiar access protocols and permissions that users already use, while the cloud becomes the authoritative backing store for the data.
+
+This creates several possibilities that are difficult to achieve with purely on-premises solutions: centralised backup of file server content, multi-site file synchronisation without server-to-server replication, and graceful migration from on-premises file servers to Azure Files.
+
+## Architecture
+
+The Azure File Sync architecture consists of four components that work together to define sync scope, manage participants, and move data.
+
+**Storage Sync Service** is the top-level Azure resource that acts as the management plane for Azure File Sync. It is the resource against which on-premises servers register themselves, and it coordinates sync relationships. A single Storage Sync Service can manage multiple sync groups.
+
+**Sync Group** defines the scope of a single sync relationship. Each sync group contains exactly one cloud endpoint (the Azure Files share) and one or more server endpoints (paths on registered on-premises servers). All participants in a sync group replicate the same content.
+
+**Cloud Endpoint** is the Azure Files share that serves as the authoritative copy of the data. All changes — whether originating on a server endpoint or uploaded directly to Azure Files — flow through the cloud endpoint and are propagated to all other participants in the sync group.
+
+**Server Endpoint** is a path on a registered Windows Server that participates in a sync group. Multiple server endpoints can exist in the same sync group, pointing to different servers or even different paths on the same server. The agent installed on each Windows Server manages the sync communication between the server endpoint and the cloud endpoint.
+
+## The Azure File Sync Agent
+
+The agent is a lightweight Windows service installed on each participating Windows Server. It runs in the background, monitors the server endpoint path for changes, uploads new and modified files to the cloud endpoint, and downloads changes from the cloud to the local server. The agent communicates outbound over HTTPS — no inbound firewall rules are required on the on-premises server.
+
+The agent supports Windows Server 2012 R2 and later. The server does not need to be Azure Arc-enabled or domain-joined to a specific configuration, though it must be able to reach the Azure Storage Sync Service endpoints over the internet.
+
+## Cloud Tiering
+
+Cloud tiering is one of the most operationally significant features of Azure File Sync. Without tiering, the entire content of the Azure Files share would need to fit on the local server's disk. With tiering enabled, the server stores only a subset of files locally and replaces the rest with thin placeholder files called reparse points.
+
+When a user or application opens a tiered file (a reparse point), the Azure File Sync agent intercepts the file system request, downloads the file content from Azure in the background, and presents it to the caller. From the user's perspective, the file appears present — it is listed in Explorer with the correct name, size, and metadata — but its content is retrieved on demand from the cloud.
+
+### Tiering Policies
+
+Two policies govern which files are tiered.
+
+**Volume Free Space Policy** specifies a minimum percentage of free space to maintain on the volume. When the volume's free space drops below the threshold, the agent begins tiering the coldest (least recently accessed) files until the free space target is met. This policy ensures the local disk never fills completely.
+
+**Date Policy** tiers any file that has not been accessed within a specified number of days, regardless of available disk space. Files accessed recently stay local; files not accessed for the configured period are tiered automatically.
+
+Both policies can be used simultaneously. The volume free space policy takes precedence in constrained disk situations.
+
+## Multi-Server Sync and Branch Office Scenarios
+
+Because multiple server endpoints can participate in a single sync group, Azure File Sync enables a natural branch office file sharing model. Each branch office deploys a Windows file server with the Azure File Sync agent installed and registers a server endpoint. All branch servers sync to the same cloud endpoint, so changes made at any branch are eventually propagated to all other branches via the cloud. Combined with cloud tiering, each branch server caches only the data most relevant to its local users, while the full dataset is always available in Azure.
+
+This eliminates the need for direct server-to-server DFS replication between branches. The cloud is the replication hub, and the topology is implicitly hub-and-spoke.
+
+## Migration Use Case
+
+Azure File Sync is frequently used as a migration tool. The process is straightforward in principle: install the agent, configure sync, allow the on-premises content to upload to Azure Files, then redirect users and cut over DNS or DFS namespace targets to the Azure Files share (or another server endpoint in the sync group). The on-premises server can then be decommissioned. This approach minimises migration downtime because the data is pre-seeded in Azure before the cutover.
+
+For very large datasets, Azure Data Box can be used to seed the initial content into Azure Files without uploading over the internet, after which Azure File Sync handles ongoing delta synchronisation.
+
+## Azure Backup Integration
+
+The Azure Files share (cloud endpoint) can be backed up directly using Azure Backup. Azure Backup creates recovery point snapshots of the share, which capture the state of all files at the time of the snapshot. Files deleted on-premises and therefore removed from the sync group are still recoverable from backup snapshots. This provides a backstop against accidental deletion, ransomware, or sync errors.
+
+## DFS Namespace Compatibility
+
+Azure File Sync coexists with DFS Namespaces. A DFS Namespace can continue to point to the on-premises server endpoints, preserving the UNC path that users have always used. When a server endpoint is eventually retired, the namespace folder target is updated to point to the remaining server endpoint or directly to the Azure Files share via its SMB path.
+
+## Summary
+
+Azure File Sync extends the familiar Windows file server into a hybrid model where the cloud serves as the authoritative backing store and on-premises servers act as intelligent local caches. Its cloud tiering capability makes it practical for servers with limited local disk capacity, and multi-server sync enables branch office scenarios without server-to-server replication infrastructure. For organisations evaluating a path from on-premises file servers to Azure Files, Azure File Sync provides a low-disruption migration and coexistence strategy.

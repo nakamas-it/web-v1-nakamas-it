@@ -1,0 +1,55 @@
+---
+title: "Hyper-V Networking — Virtual Switches, NIC Teaming, and SR-IOV"
+category: "microsoft"
+topic: "hyper-v"
+summary: "Hyper-V's virtual network stack translates physical network hardware into a flexible, software-defined layer that VMs and the host management OS share. Understanding vSwitch types, NIC teaming strategies, and hardware offload technologies like SR-IOV and RDMA is essential for designing performant and resilient virtualised infrastructure."
+tags: ["microsoft", "windows-server", "hyper-v", "networking", "sr-iov", "rdma", "nic-teaming"]
+order: 20
+draft: false
+---
+
+## Overview
+
+When Hyper-V is installed on a Windows Server host, the physical network adapters do not belong exclusively to the host OS anymore. Instead, Hyper-V inserts a virtualisation layer between the physical NICs and everything above them — the management OS, virtual machines, and container workloads. That layer is the Hyper-V Virtual Switch, a software-defined Layer 2 switch implemented inside the hypervisor itself. Everything that crosses a network boundary in a Hyper-V environment passes through one of these virtual switches, and the choices made when designing that switching layer determine performance, isolation, and resilience for every workload running on the host.
+
+## The Hyper-V Virtual Switch
+
+The vSwitch is a software-implemented L2 switch that lives inside the hypervisor partition. It connects virtual machine network adapters (vNICs) to each other and, depending on type, to the physical network.
+
+There are three vSwitch types, and the distinction matters enormously:
+
+**External** binds the vSwitch to a physical NIC. VM traffic can reach the physical network and all external hosts. The management OS also receives a synthetic vNIC on this same vSwitch, sharing the physical NIC with VMs. This is the most common type in production.
+
+**Internal** allows VM-to-VM traffic and VM-to-host communication, but traffic never reaches the physical network. Useful for isolated lab segments or NAT scenarios where the host routes traffic on behalf of VMs.
+
+**Private** allows only VM-to-VM communication on that same host. The management OS has no visibility and there is no physical network path. Provides the strongest isolation for sandboxed workloads.
+
+When an external vSwitch is created, Hyper-V effectively unbinds the standard TCP/IP stack from the physical NIC and binds it to a new virtual NIC (the "management OS vNIC") instead. The physical NIC becomes a transport carrier for vSwitch traffic rather than a directly addressed interface.
+
+## NIC Teaming — LBFO and SET
+
+A single physical NIC is both a bandwidth bottleneck and a single point of failure. Windows Server provides two distinct teaming technologies to address this.
+
+**LBFO (Load Balancing and Failover)** is the traditional NIC teaming solution built into Windows Server. Multiple physical NICs are grouped into a team, which the operating system presents as a single logical adapter. The vSwitch then binds to that logical adapter. LBFO supports several load-balancing algorithms (Hyper-V Port, Dynamic, Address Hash) and handles failover transparently if one NIC loses link. LBFO is independent of Hyper-V — it operates at the Windows networking layer before the vSwitch sees any traffic.
+
+**SET (Switch Embedded Teaming)** takes a different architectural approach. Rather than teaming NICs before they reach the vSwitch, SET integrates the teaming logic directly inside the Hyper-V vSwitch itself. This eliminates a software layer and is the required approach when RDMA is in use — LBFO breaks RDMA offload paths, while SET preserves them. SET is limited to Hyper-V environments and supports up to eight physical NICs per team. It does not expose all the load-balancing modes LBFO does, but for converged fabric deployments (where storage, VM, and management traffic all share the same physical NICs), SET is the correct choice.
+
+## SR-IOV — Bypassing the vSwitch
+
+SR-IOV (Single Root I/O Virtualisation) is a PCI-SIG hardware standard that allows a single physical NIC to present itself as multiple independent virtual functions (VFs) to the PCIe bus. Each VF can be mapped directly into a VM's memory space, giving the VM a near-hardware-speed network path that completely bypasses the vSwitch and its software processing overhead.
+
+The benefit is dramatic latency reduction and near-zero CPU overhead for network I/O, which matters for latency-sensitive workloads like financial transaction processing or high-performance computing. The cost is that several vSwitch features stop working for SR-IOV-assigned VMs: the vSwitch cannot inspect or filter their traffic, and live migration becomes incompatible with an active SR-IOV assignment (the VF must be detached before migration, which incurs a brief connectivity interruption). SR-IOV also requires a NIC that supports it, a physical switch that permits the NIC's MAC spoofing mode, and BIOS/UEFI settings that enable SR-IOV in the PCIe hierarchy.
+
+## RDMA and SMB Direct
+
+RDMA (Remote Direct Memory Access) allows a NIC to read and write data directly into the memory of a remote machine, bypassing the CPU and operating system stack on both ends. When used with SMB 3.x via SMB Direct, storage traffic — including VM disk I/O over SMB shares — achieves high throughput and very low latency without consuming CPU cycles.
+
+Windows Server supports RDMA over RoCE (RDMA over Converged Ethernet, requires Priority Flow Control on the network fabric) and iWARP (RDMA over standard TCP, more forgiving of network congestion). In Hyper-V converged fabric designs, the same physical NICs carry both VM traffic and storage RDMA traffic, with the two flows differentiated by SET and network QoS policies.
+
+## QoS and Bandwidth Management
+
+The Hyper-V vSwitch includes two complementary traffic management mechanisms. Hyper-V QoS assigns 802.1p priorities and Data Center Bridging settings to differentiate traffic classes at the vSwitch egress. Per-vNIC bandwidth management applies minimum and maximum bandwidth guarantees at the individual VM level — a minimum guarantees a VM will receive at least a specified throughput even under contention, while a maximum prevents any single VM from monopolising the physical NIC at the expense of others.
+
+## Summary
+
+Hyper-V networking is a layered stack: physical NICs at the bottom, NIC teaming (LBFO or SET) for redundancy and aggregation, the vSwitch as the central switching fabric, and per-VM vNICs at the top. SR-IOV and RDMA provide hardware-level escape hatches for workloads where software switching overhead is unacceptable. QoS and bandwidth management ensure that shared physical capacity is allocated predictably. Designing this stack correctly before VMs are deployed avoids costly reconfiguration later, particularly because changing vSwitch types on a live host causes a brief loss of management OS network connectivity.

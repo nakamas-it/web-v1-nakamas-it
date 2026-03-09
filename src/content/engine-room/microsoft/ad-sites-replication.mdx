@@ -1,0 +1,78 @@
+---
+title: "AD DS Sites and Replication — How Identity Spreads Across the Network"
+category: "microsoft"
+topic: "ad ds"
+summary: "AD DS replication is not a simple broadcast — it is a topology-aware system built around sites, site links, and an automatic topology generator. This article explains how changes propagate across domain controllers, how SYSVOL replication works, and how to diagnose replication failures."
+tags: ["microsoft", "windows-server", "active-directory", "ad-ds", "replication", "sites", "kcc", "sysvol", "dfsr"]
+order: 3
+draft: false
+---
+
+## Overview
+
+Active Directory does not operate from a single master database. Every Domain Controller holds a full, writable copy of the directory for its domain, and changes made on any one DC must eventually reach all others. The mechanism that moves those changes is AD DS replication. To do this efficiently across a real network — where links between sites have different bandwidths and costs — AD DS uses a model built around sites and site links, and it generates an optimised replication topology automatically.
+
+## Sites and Subnets
+
+An AD DS **site** is an administrative object that represents a portion of the network with fast, reliable connectivity — typically a physical location or a well-connected segment of the WAN. A site contains one or more **IP subnets**. When a client performs a DC lookup, it sends its IP address to DNS, which returns a list of DCs whose SRV records are registered in the matching site. Clients prefer DCs in their own site, which keeps authentication traffic local and off the WAN.
+
+Sites do not map automatically to domains or organisational units. A single domain can span many sites, and a single site can contain DCs from multiple domains.
+
+## Site Links
+
+A **site link** connects two or more sites and describes the properties of the network path between them:
+
+- **Cost**: A relative number. Lower cost paths are preferred for replication routing. Assign costs that reflect relative link speed (e.g., a 1 Gbps LAN link = cost 10; a 10 Mbps WAN link = cost 100).
+- **Replication interval**: How often, in minutes, the replication schedule is checked when connectivity is available. The minimum is 15 minutes.
+- **Schedule**: A 168-hour matrix defining which hours of the week the link is available for replication. Blocking replication overnight is possible but should be done carefully — it delays propagation of security-critical changes such as account lockouts.
+
+By default, site links are not transitive between sites connected through an intermediate site. **Site link bridging** (enabled by default) makes all site links transitive, allowing the KCC to calculate paths through intermediate sites automatically.
+
+## The Knowledge Consistency Checker
+
+The **Knowledge Consistency Checker (KCC)** is a built-in process running on every DC that automatically builds and maintains the replication topology. It runs every 15 minutes and generates a set of **Connection Objects** — directed replication partnerships between DCs. The KCC ensures that no DC is more than three hops from any other DC within a site, and that at least two independent paths exist for fault tolerance.
+
+Administrators do not normally need to create Connection Objects manually. The KCC will re-optimise the topology as DCs are added, removed, or moved between sites. When manual Connection Objects are created (to force a specific replication path), the KCC respects them but will still create automatic connections around them.
+
+## Intrasite vs Intersite Replication
+
+The replication model differs significantly depending on whether the DCs are in the same site or in different sites.
+
+**Intrasite replication** (within a site):
+- Change notification is immediate. When a DC writes a change, it notifies its replication partners within seconds.
+- No compression is applied below a threshold, since the assumption is a high-bandwidth local link.
+- The goal is near-real-time consistency within a site.
+
+**Intersite replication** (across a site link):
+- Replication is **scheduled and polled**, not notification-driven. DCs check for changes at the configured interval on the site link.
+- Traffic is always compressed, reducing bandwidth consumption across WAN links.
+- A **Bridgehead Server** in each site handles intersite replication. The KCC elects one automatically (Intersite Topology Generator, ISTG), but it can be configured manually for predictability.
+- Urgent replication (e.g., account lockout, LSA secret change) bypasses the schedule and replicates immediately even across sites.
+
+## Replication Conflicts and USNs
+
+AD DS uses **Update Sequence Numbers (USNs)** rather than timestamps to track replication state. Every DC maintains its own USN counter and a vector of the highest USN it has received from each replication partner. This allows a DC to request only the changes it has not yet seen.
+
+When two DCs modify the same attribute simultaneously (a write conflict), AD DS resolves the conflict deterministically: **the change with the higher version number wins**. If versions are equal, the change with the later timestamp wins. These conflicts are rare in well-designed environments, but can occur during AD migrations or when replication is severely delayed.
+
+## SYSVOL Replication
+
+SYSVOL is a shared folder on every DC that holds Group Policy templates and logon scripts. Its contents must be identical across all DCs. SYSVOL replication is separate from AD DS database replication.
+
+- **FRS (File Replication Service)**: The legacy mechanism, deprecated since Windows Server 2008 R2. FRS is unreliable at scale and prone to morphed-file errors.
+- **DFSR (Distributed File System Replication)**: The current mechanism, RPC-based and far more robust. Domains created at the Windows Server 2008 R2 functional level or higher use DFSR by default. Domains upgraded from older versions may still be running FRS and require a manual migration using `dfsrmig`.
+
+Verifying SYSVOL replication health is essential — inconsistent SYSVOL means Group Policy is inconsistently applied across the domain, which can have wide-ranging effects on security and configuration.
+
+## Troubleshooting Replication
+
+Two command-line tools cover most replication diagnostics:
+
+- **`repadmin`**: Queries and manipulates replication metadata. Key subcommands: `repadmin /showrepl` (show replication partners and last replication attempt), `repadmin /replsummary` (aggregate success/failure counts), `repadmin /syncall` (force replication from all partners), `repadmin /showutdvec` (up-to-dateness vector per DC).
+- **`dcdiag`**: Runs a battery of diagnostic tests against a DC, including replication, DNS, SYSVOL, and FSMO role accessibility. `dcdiag /test:replications` is the most targeted for replication issues.
+
+Common replication failure causes include network connectivity problems between sites, DNS misconfiguration (DCs cannot locate partners), excessive replication latency creating USN rollback conditions, or a DC that was disconnected for longer than the tombstone lifetime (60 days by default in modern forests).
+
+## Key Takeaways
+
+Sites and site links give AD DS the information it needs to route replication intelligently across a real network topology. The KCC removes the operational burden of topology management, but understanding how it works is essential for diagnosing failures. Intrasite replication is fast and notification-driven; intersite replication is scheduled and compressed. SYSVOL requires its own replication mechanism (DFSR), and its health is as important as AD database replication. When things go wrong, `repadmin` and `dcdiag` are the primary tools for diagnosis.

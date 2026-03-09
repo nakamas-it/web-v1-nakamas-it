@@ -1,0 +1,96 @@
+---
+title: "Group Managed Service Accounts — Passwords Active Directory Manages for You"
+category: "microsoft"
+topic: "ad ds"
+summary: "Service accounts with manually managed passwords are a persistent security liability. Group Managed Service Accounts (gMSAs) solve this by having Active Directory generate, rotate, and distribute complex passwords automatically, with no human ever knowing the credential."
+tags: ["microsoft", "windows-server", "active-directory", "ad-ds", "gmsa", "service-accounts", "security", "kds"]
+order: 5
+draft: false
+---
+
+## Overview
+
+Every service that runs on a Windows server needs an identity. Historically, that meant creating a dedicated user account in Active Directory, setting a password, granting it the necessary permissions, and then hoping that the password was rotated regularly and stored securely. In practice, service account passwords were rarely rotated (rotating them meant coordinating changes across every server running that service), were often known to multiple administrators, and sometimes appeared in scripts, configuration files, or monitoring dashboards.
+
+Group Managed Service Accounts (gMSAs) eliminate this problem. With a gMSA, Active Directory generates and rotates a cryptographically complex password automatically. No administrator ever knows the password. No human sets it. No configuration file stores it. The service simply retrieves its own current password from AD at startup, and the rotation happens transparently.
+
+## The Problem with Traditional Service Accounts
+
+A standard service account is a regular AD user account used for a non-interactive purpose. The issues are structural:
+
+- **Password rotation is disruptive**: Changing the password requires updating every service, IIS application pool, scheduled task, or COM+ component that uses it — across potentially many servers — in a coordinated window.
+- **Passwords are shared**: Multiple administrators may know the password, increasing the attack surface.
+- **Passwords are often static**: Because rotation is painful, service account passwords are frequently set to "never expire" and left unchanged for years.
+- **Discovery risk**: Passwords stored in configuration files or retrieved via scripts can be exposed in log files, monitoring tools, or memory dumps.
+
+Standalone Managed Service Accounts (sMSAs, introduced in Windows Server 2008 R2) addressed some of these issues, but they were limited to a single host per account. A gMSA extends the same concept to multiple hosts simultaneously.
+
+## How gMSAs Work
+
+The mechanics of gMSA password derivation involve three components: the KDS root key, the gMSA account object, and the hosts authorised to retrieve the password.
+
+### The KDS Root Key
+
+The **Key Distribution Service (KDS)** root key is an object stored in AD under `CN=Master Root Keys,CN=Group Key Distribution Service,CN=Services,CN=Configuration,...`. It is the cryptographic seed from which all gMSA passwords are derived. A forest typically has one KDS root key, created with `Add-KdsRootKey`.
+
+There is a 10-hour propagation delay built into the `Add-KdsRootKey` cmdlet by default. This ensures that all DCs in the forest have replicated the key before any gMSA tries to use it. In lab environments, the `-EffectiveImmediately` parameter skips this delay, but it should not be used in production.
+
+### Password Derivation
+
+The gMSA password is not stored as a fixed value — it is derived on demand using a function that takes the KDS root key, the gMSA account name, and the current time window as inputs. The time window is typically 30 days. This means:
+
+- Every authorised host derives the same password for the current time window independently, without communicating with each other.
+- After the window expires, the derived password changes automatically. Services that retrieve the password at startup will pick up the new value on their next restart.
+- No single location stores the cleartext password.
+
+The password is 240 bytes of random data, far beyond what any offline attack could reach.
+
+### Authorised Hosts
+
+The gMSA object has an attribute — `PrincipalsAllowedToRetrieveManagedPassword` — that lists the AD computer accounts (or security groups containing computer accounts) that are permitted to retrieve the password from a DC. When a host needs the password, it contacts a DC, presents its computer account credentials, and receives the derived password if its account is in the allowed list.
+
+## Creating and Using a gMSA
+
+The workflow is straightforward:
+
+1. Ensure the KDS root key exists in the forest (one-time setup).
+2. Create the gMSA with `New-ADServiceAccount`, specifying the DNS host name, the hosts that can retrieve the password (`-PrincipalsAllowedToRetrieveManagedPassword`), and optionally the Kerberos service principal names.
+3. On each host that will run the service, install the account with `Install-ADServiceAccount`. This verifies that the host can successfully retrieve the password from AD.
+4. Configure the service, IIS application pool, or scheduled task to use the gMSA as its identity. The account name is entered in the form `DOMAIN\accountname$` (note the trailing dollar sign). The password field is left blank — Windows retrieves it from AD automatically.
+
+## What gMSAs Support
+
+gMSAs work with a range of service types, but not all:
+
+| Supported | Not Supported |
+|---|---|
+| Windows services (via Service Control Manager) | Interactive logon sessions |
+| IIS application pools | Remote Desktop logon |
+| Scheduled tasks (Windows Task Scheduler) | Services on non-Windows hosts |
+| COM+ applications | Accounts requiring a static password |
+| Services on Server Core | |
+
+The restriction on interactive logon is intentional — gMSAs are designed for non-interactive service identities. If a task requires an actual user to log in, a gMSA is the wrong tool.
+
+## gMSA vs sMSA
+
+| Feature | sMSA (Standalone MSA) | gMSA (Group MSA) |
+|---|---|---|
+| Automatic password rotation | Yes | Yes |
+| Multiple hosts | No (one host only) | Yes |
+| Requires KDS root key | No | Yes |
+| Minimum forest functional level | Windows Server 2008 R2 | Windows Server 2012 |
+| Use case | Single-server services | Clustered or load-balanced services |
+
+sMSAs still have a place for services that genuinely run on a single host, but gMSAs should be preferred in any environment with Windows Server 2012 or higher domain controllers.
+
+## Practical Use Cases
+
+- **Web farms**: An IIS application pool running on multiple servers behind a load balancer can use a single gMSA. All nodes retrieve the same password, and no configuration synchronisation is needed when the password rotates.
+- **SQL Server service accounts**: The SQL Server engine and Agent can run under gMSAs, eliminating a common vector for credential theft in database environments.
+- **Scheduled tasks on multiple servers**: A scheduled task running on several servers for a distributed data pipeline can share a single gMSA identity.
+- **Replacing long-lived service account passwords**: Any existing service account with a static, manually managed password is a candidate for migration to a gMSA.
+
+## Key Takeaways
+
+gMSAs solve a long-standing operational and security problem. By moving password management from human administrators into the AD cryptographic infrastructure, they eliminate the most common reasons that service account passwords are never rotated: it is simply no longer necessary. The implementation overhead is low — a one-time KDS root key setup, a single `New-ADServiceAccount` command, and a `Install-ADServiceAccount` on each host. The return is permanent: a class of credentials that are complex, rotating, and never known to any person.

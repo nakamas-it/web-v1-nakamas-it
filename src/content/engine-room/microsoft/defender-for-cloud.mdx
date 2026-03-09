@@ -1,0 +1,111 @@
+---
+title: "Microsoft Defender for Cloud — Security Posture and Threat Protection"
+category: "microsoft"
+topic: "defender"
+summary: "Microsoft Defender for Cloud combines cloud security posture management (CSPM) with cloud workload protection (CWP) into a single service. It continuously assesses your Azure, hybrid, and multi-cloud environments, produces a quantified secure score, and provides active threat detection through integration with Microsoft Defender for Endpoint."
+tags: ["microsoft", "azure", "defender", "security", "cspm", "cwp", "arc"]
+order: 15
+draft: false
+---
+
+## Overview
+
+Microsoft Defender for Cloud is a unified security management service that addresses two distinct but related problems: knowing how secure your environment is (posture management) and detecting and responding to active threats (workload protection). Prior to its current branding, these capabilities were shipped separately as Azure Security Center (posture) and Azure Defender (threat protection). They are now integrated into a single service with a tiered pricing model.
+
+Defender for Cloud applies to Azure-native resources, Azure Arc-enabled on-premises servers, and resources in other clouds (AWS and GCP) connected via cloud connectors. This breadth makes it the central security visibility tool in a hybrid Microsoft environment.
+
+## The Two Pillars
+
+### Cloud Security Posture Management (CSPM)
+
+CSPM is about knowing your attack surface and systematically reducing it. Defender for Cloud continuously evaluates your resources against security best practices and regulatory standards, then surfaces the results as actionable recommendations.
+
+CSPM does not require any paid Defender plans — a foundational free tier provides:
+
+- Continuous assessment of Azure resources.
+- A secure score reflecting the percentage of security controls currently passing.
+- Recommendations with remediation guidance.
+- Regulatory compliance dashboards (CIS, PCI-DSS, ISO 27001, and others).
+
+A paid CSPM tier (Defender CSPM) adds more advanced capabilities: attack path analysis, cloud security explorer for graph-based querying, and agentless vulnerability scanning.
+
+### Cloud Workload Protection (CWP)
+
+CWP covers active threat detection and response. Defender for Cloud offers separate Defender plans for different resource types:
+
+| Plan | Protects |
+|---|---|
+| Defender for Servers | Azure VMs and Arc-enabled servers |
+| Defender for Storage | Azure Blob, File, and Queue storage |
+| Defender for SQL | Azure SQL, SQL Server on VMs, and Arc-enabled SQL |
+| Defender for Containers | AKS clusters and container registries |
+| Defender for App Service | Azure-hosted web applications |
+| Defender for Key Vault | Key Vault access anomalies |
+| Defender for DNS | DNS-layer threat detection |
+
+Each plan is priced and enabled independently, allowing organisations to prioritise protection for their highest-value resources.
+
+## Secure Score
+
+The secure score is a percentage representing the proportion of security controls that your environment currently satisfies. It is calculated across a set of security controls, where each control groups related recommendations under a theme (e.g., "Enable MFA", "Remediate vulnerabilities", "Restrict management port access").
+
+Each control has a defined maximum score contribution. Implementing all recommendations within a control earns its full contribution. Partial implementation earns partial credit proportional to the unhealthy resources resolved.
+
+The secure score serves two purposes: it provides a single headline metric for executive reporting, and it drives prioritisation — recommendations are ranked by their potential score impact, guiding administrators toward the changes with the greatest security benefit.
+
+## Recommendations
+
+Recommendations are the actionable outputs of the CSPM assessment engine. Each recommendation describes:
+
+- What is wrong (e.g., "Management ports should be closed on your virtual machines").
+- Which resources are affected.
+- The score impact of remediating it.
+- Step-by-step remediation guidance, including the option to trigger automated remediation via Azure Policy.
+
+Common high-impact recommendations include:
+
+- Enable multi-factor authentication for accounts with privileged roles.
+- Encrypt OS and data disks with customer-managed keys.
+- Restrict RDP and SSH access to management ports (addressed by just-in-time access).
+- Install missing OS patches.
+- Enable endpoint protection on virtual machines.
+- Ensure storage accounts do not allow public blob access.
+
+## Defender for Servers
+
+Defender for Servers is the plan most directly relevant to Windows Server administrators. It extends workload protection to both Azure VMs and, through Azure Arc, to on-premises and multi-cloud servers.
+
+When Defender for Servers is enabled on a subscription, enrolled machines receive:
+
+**Microsoft Defender for Endpoint (MDE) integration** — the MDE EDR agent is automatically deployed. This provides endpoint detection and response: process tree analysis, network connection monitoring, behavioural detections, and response actions (isolate machine, run antivirus scan) directly from the Microsoft 365 Defender portal.
+
+**Vulnerability assessment** — an integrated scanner (Microsoft's built-in scanner or Qualys) evaluates installed software for known CVEs and reports findings as Defender for Cloud recommendations.
+
+**Just-in-time VM access** — management ports (RDP 3389, SSH 22, WinRM 5985/5986) are blocked by network security group rules by default. When an administrator needs access, they request it through the Azure portal, CLI, or API, specifying their source IP and a time window. Defender for Cloud temporarily opens the port for that IP and closes it when the window expires. This eliminates persistent management port exposure without requiring a bastion host for every server.
+
+**Adaptive application controls** — machine learning analyses which applications habitually run on a server and can generate allowlist recommendations. Alerts are raised when unexpected processes execute.
+
+**File integrity monitoring** — tracks changes to critical OS files, registry keys, and application binaries and alerts on unexpected modifications.
+
+## Just-in-Time VM Access in Depth
+
+Just-in-time access is worth examining in detail because it addresses one of the most persistent attack vectors: management ports exposed to the internet or broad internal ranges.
+
+The mechanism works as follows:
+
+1. Defender for Cloud applies a "deny all" network security group rule to configured management ports at a higher priority than any allow rules.
+2. An administrator submits a JIT access request specifying source IP(s) and duration (maximum configurable, default four hours).
+3. Defender for Cloud creates a temporary allow rule scoped to the requested IP(s).
+4. At expiry, the rule is automatically removed.
+
+All requests are logged in the Azure Activity Log, creating a full audit trail of who accessed which machine, from where, and when.
+
+## Integration with Azure Arc
+
+Arc-enabled servers participate in Defender for Cloud on the same terms as Azure-native VMs. Enabling Defender for Servers at the subscription level automatically extends coverage to all Arc-enrolled machines in that subscription. The MDE agent is deployed via the Arc extension mechanism, and JIT access, vulnerability assessment, and threat alerts all function identically.
+
+This parity is significant: it means an organisation's on-premises Windows Servers can have enterprise-grade EDR, centralised vulnerability management, and just-in-time access control without deploying any additional on-premises security infrastructure.
+
+## Summary
+
+Microsoft Defender for Cloud provides a layered security approach: CSPM continuously measures and prioritises posture improvements through the secure score and recommendations, while CWP plans deliver active threat detection and response capabilities for specific workload types. Defender for Servers is the plan most relevant to Windows Server infrastructure, extending MDE, vulnerability assessment, and just-in-time access to both cloud and Arc-enabled on-premises machines. For AZ-800 candidates, understanding the CSPM/CWP distinction and the mechanics of just-in-time access are the core conceptual anchors.

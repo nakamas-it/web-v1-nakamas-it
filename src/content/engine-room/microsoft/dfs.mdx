@@ -1,0 +1,76 @@
+---
+title: "DFS — Distributed File System Namespaces and Replication"
+category: "microsoft"
+topic: "dfs"
+summary: "The Distributed File System in Windows Server comprises two independently useful but complementary components: DFS Namespaces, which presents a unified virtual folder tree that maps to shares on multiple servers, and DFS Replication, which synchronises folder content between servers using an efficient delta-compression algorithm. Together they enable transparent, highly available file access across distributed environments."
+tags: ["microsoft", "windows-server", "dfs", "dfs-n", "dfs-r", "file-services", "az-800"]
+order: 31
+draft: false
+---
+
+## Overview
+
+Distributed File System (DFS) is a set of Windows Server role services that together solve two distinct but related problems in distributed file access: how to give users a single, consistent path to shared data regardless of which server actually hosts it, and how to keep that data synchronised across multiple servers. These two problems are addressed by DFS Namespaces and DFS Replication respectively. The two components are independent — a namespace can exist without replication, and replication can run without a namespace — but they are frequently deployed together.
+
+## DFS Namespaces
+
+A DFS Namespace creates a virtual folder hierarchy that is entirely separate from the underlying physical share locations. Users navigate to a single UNC path such as `\\corp.example.com\shared`, and the namespace transparently redirects them to the actual file server hosting the data. The physical share might be `\\fileserver1\data` or `\\fileserver2\data` — the user never needs to know.
+
+### Namespace Types
+
+Two types of namespaces exist, distinguished primarily by where their configuration data is stored and how availability is achieved.
+
+**Domain-based namespaces** store their configuration in Active Directory. This means the namespace is automatically replicated to all domain controllers, and multiple namespace servers can serve the same namespace simultaneously. Users access the namespace using the domain DNS name (`\\corp.example.com\namespace`), and if one namespace server fails, another serves the requests. Domain-based namespaces are the standard choice for production environments.
+
+**Standalone namespaces** store their configuration locally on the hosting server. They are available only as long as that server is running, making them a single point of failure. They are suitable for workgroups, small environments, or situations where Active Directory is unavailable.
+
+### Namespace Components
+
+| Component | Role |
+|---|---|
+| Namespace server | The Windows Server hosting the namespace; multiple servers can host the same domain-based namespace |
+| Namespace root | The top-level folder of the namespace — corresponds to the share name in the UNC path |
+| Folder | A virtual folder within the namespace |
+| Folder target | The actual UNC path (a share on a real server) that a folder maps to |
+
+A folder can have multiple folder targets — for example, `\\corp.example.com\shared\docs` might have targets on `\\site-a-fs\docs` and `\\site-b-fs\docs`. When a client accesses the folder, DFS uses site costing (based on Active Directory site topology) to direct the client to the closest available target. If that target becomes unavailable, the client is redirected to an alternate target automatically.
+
+## DFS Replication
+
+DFS Replication (DFS-R) is a file-level replication engine that keeps the content of designated folders consistent across multiple servers. It replaced the older File Replication Service (FRS) beginning with Windows Server 2008 R2.
+
+### Remote Differential Compression
+
+The core efficiency of DFS-R comes from Remote Differential Compression (RDC). When a file changes, DFS-R does not retransmit the entire file. Instead, it computes which blocks within the file have changed and transmits only those changed blocks to replication partners. For large files with small changes — common in document editing scenarios — RDC dramatically reduces replication bandwidth.
+
+### Replication Groups and Topology
+
+Servers that participate in replication are organised into replication groups. A replication group contains a set of servers and a set of replicated folders. Within the group, the replication topology defines which servers replicate directly with which other servers.
+
+Three common topologies are used:
+
+- **Full mesh**: every member replicates directly with every other member. Suitable for small groups (typically up to around 10 members).
+- **Hub and spoke**: spoke servers replicate only with a central hub server. Changes propagate from spoke to hub and hub to other spokes. Efficient for large numbers of branch offices.
+- **Custom**: any combination of connections between members, manually defined.
+
+### Conflict Resolution
+
+DFS-R allows multiple servers to accept writes to replicated folders simultaneously. When the same file is modified on two different servers between replication cycles, a conflict exists. DFS-R resolves conflicts using a last-writer-wins algorithm based on version vectors — the version with the later timestamp wins and is replicated to all partners. The losing version is not deleted; it is moved to a hidden folder called `DfsrPrivate\ConflictAndDeleted` on the server that held the losing version, where it can be recovered if needed.
+
+## SYSVOL and DFS-R
+
+One of the most significant uses of DFS-R in a Windows Server domain is SYSVOL replication. SYSVOL is a shared folder present on every domain controller that contains Group Policy Objects and logon scripts. In Windows Server 2008 R2 and later domain functional levels, SYSVOL is replicated between domain controllers using DFS-R, replacing the older FRS mechanism. The migration from FRS to DFS-R for SYSVOL is a one-way migration performed using the `dfsrmig` tool.
+
+## Use Cases
+
+| Scenario | DFS Component Used |
+|---|---|
+| Branch office file access | Namespace (single path) + DFS-R (local copy of data) |
+| Read-only content distribution | DFS-R with one authoritative source, multiple read-only targets |
+| High availability file shares | Namespace with multiple folder targets pointing to replicated servers |
+| Domain controller SYSVOL sync | DFS-R (built-in, managed separately from custom replication groups) |
+| Multi-site shared document library | Namespace + DFS-R with conflict resolution awareness |
+
+## Summary
+
+DFS Namespaces and DFS Replication are mature, well-understood Windows Server technologies for making file data available across a distributed environment. Namespaces decouple the user-visible path from the physical server location, enabling transparency and load distribution. DFS-R keeps data consistent across servers using efficient block-level delta transfer, making branch office synchronisation and SYSVOL replication practical even over limited WAN links. Understanding how namespaces, folder targets, replication groups, and conflict resolution work together is fundamental to designing file services for multi-site Windows Server environments.

@@ -1,0 +1,80 @@
+---
+title: "Windows Containers — Isolation Without the Hypervisor Overhead"
+category: "microsoft"
+topic: "containers"
+summary: "Windows containers package applications and their dependencies into portable, isolated units that share the host OS kernel rather than emulating full hardware. Understanding the two isolation modes, the available base images, and how Windows containers fit into a broader Kubernetes or Docker deployment is essential for modernising Windows Server workloads."
+tags: ["microsoft", "windows-server", "containers", "docker", "kubernetes", "hyper-v-isolation"]
+order: 22
+draft: false
+---
+
+## Overview
+
+Containers solve a problem that virtualisation solved differently: how to run multiple workloads on a single server without them interfering with each other. Where a virtual machine achieves isolation by emulating a complete hardware environment and running a full OS instance inside it, a container achieves isolation by using kernel-level namespaces and control groups to present each workload with a private view of the filesystem, network stack, process tree, and resource quotas — while all containers on the same host share the same underlying OS kernel.
+
+The result is dramatically faster startup times (seconds rather than minutes), far lower memory overhead (no per-instance OS), and simpler distribution (a container image bundles the application and all its dependencies into a single artifact). These properties made Linux containers ubiquitous. Windows Server 2016 introduced native Windows container support, bringing the same model to the Windows application ecosystem.
+
+## Isolation Modes
+
+Windows containers offer two distinct isolation modes, and the choice between them reflects a trade-off between density and security boundary strength.
+
+### Process Isolation
+
+In process isolation mode, containers share the Windows kernel with the host. The container OS and the host OS must match — a container built on Windows Server 2022 must run on a Windows Server 2022 host. This constraint exists because the shared kernel exposes kernel APIs to containers directly, and version mismatches cause incompatibilities.
+
+Process isolation provides the density and speed benefits containers are known for: minimal overhead, near-instant startup, and efficient memory usage. It is the right choice for trusted workloads on a dedicated host where all containers run the same OS version.
+
+### Hyper-V Isolation
+
+Hyper-V isolation runs each container inside a lightweight, highly optimised virtual machine with its own dedicated kernel instance. From the outside, it looks and is managed exactly like a process-isolated container. From a security perspective, it behaves like a VM — the container's kernel cannot directly interact with the host kernel.
+
+This eliminates the OS version matching requirement: a Windows Server 2019-based container image can run on a Windows Server 2022 host under Hyper-V isolation. More importantly, it provides a much stronger security boundary, making it the appropriate choice for multi-tenant environments, running code of uncertain provenance, or hosting workloads with strict isolation requirements. The cost is slightly higher overhead per container due to the lightweight VM layer.
+
+## Windows Base Images
+
+Microsoft provides several official base images for Windows containers, differentiated by size and included components:
+
+| Image | Size | Use Case |
+|---|---|---|
+| Windows Server Core | ~3–5 GB | General-purpose, runs most .NET Framework and IIS workloads |
+| Nano Server | ~100–300 MB | .NET Core / .NET 5+ applications, minimal attack surface |
+| Windows | ~10+ GB | Full Windows desktop experience, rarely used in containers |
+| Windows Server | ~5–8 GB | Windows Server APIs and features not in Server Core |
+
+Server Core is the most widely used base for containerising existing Windows Server applications. Nano Server's minimal footprint makes it attractive for cloud-native .NET workloads where image size and startup time matter.
+
+## Windows Containers vs Linux Containers
+
+Understanding where Windows containers fit requires clarity about what they are not. Linux containers are the dominant container ecosystem. Docker Hub, public container registries, and the vast majority of open-source containerised software all ship Linux images. Windows containers cannot run Linux images and Linux hosts cannot run Windows images — the isolation boundary is the kernel, and kernels are OS-specific.
+
+This means the decision to use Windows containers is driven by the application requirements, not by preference. If the workload is a legacy ASP.NET Framework application that depends on Windows-specific APIs, IIS, COM components, or Windows registry access, containerising it requires Windows containers. If the workload is a modern .NET 8 application, it almost certainly runs on Linux containers, which are more portable and have better ecosystem support.
+
+Windows also has no equivalent to Docker Desktop's WSL2 integration for development environments in the same way. Windows Server runs the Docker daemon natively, without requiring WSL2, which is an advantage in pure server deployments.
+
+## Docker on Windows Server
+
+Windows Server 2019 and 2022 support Docker Engine natively as a Windows feature or installable component. The Docker daemon runs as a Windows service, manages container images and networks, and executes containers either in process isolation or Hyper-V isolation mode. The command-line interface and Dockerfile syntax are identical to the Linux experience — the underlying container runtime is what differs.
+
+Windows containers use Windows-native networking (WinNAT for outbound NAT, transparent mode for direct network attachment, overlay networks for multi-host clustering) rather than Linux's iptables and veth pairs. The network model achieves equivalent results but through entirely different mechanisms.
+
+## Kubernetes and Windows Worker Nodes
+
+Kubernetes supports Windows worker nodes since version 1.14, with Windows Server 2022 providing the most complete and stable support. In a typical hybrid Kubernetes cluster, the control plane (API server, scheduler, etcd, controller manager) runs on Linux nodes, while Windows workloads are scheduled onto Windows worker nodes.
+
+Windows worker nodes support only Windows container workloads — they cannot run Linux containers. Scheduling is controlled via node selectors or node affinity rules in Pod specifications. Mixed-OS deployments are operationally more complex but allow organisations to consolidate Windows and Linux workloads into a single Kubernetes cluster rather than maintaining separate container platforms.
+
+## Use Cases
+
+The strongest use cases for Windows containers are:
+
+**Lift-and-shift of legacy .NET Framework applications** — ASP.NET MVC or WebForms applications that cannot be rewritten for .NET Core but benefit from container portability and consistent environment packaging.
+
+**IIS-hosted services** — Web applications or WCF services tightly coupled to IIS that are too expensive to replatform.
+
+**Windows-specific background services** — Processes that use Windows ACLs, registry, COM, or Windows-native authentication mechanisms.
+
+**Standardising dev/test/prod parity for Windows workloads** — Container images guarantee that the exact same application stack runs in development, CI pipelines, and production.
+
+## Summary
+
+Windows containers bring the container model to the Windows application ecosystem with two isolation modes that balance density against security boundary strength. Process isolation is lightweight and efficient for trusted workloads where the host and container OS versions align. Hyper-V isolation provides VM-level security with container-style management. The ecosystem is smaller than Linux containers and the appropriate use case is narrower — Windows containers exist to modernise Windows-specific workloads, not to replace Linux containers for cloud-native development.

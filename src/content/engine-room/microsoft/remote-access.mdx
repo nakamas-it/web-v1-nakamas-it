@@ -1,0 +1,80 @@
+---
+title: "Remote Access — VPN, DirectAccess, and Always On VPN"
+category: "microsoft"
+topic: "rras"
+summary: "Windows Server's Remote Access role has evolved from simple dial-up routing through RRAS VPN and DirectAccess to the modern Always On VPN architecture. Each technology was designed for a different threat model and management approach, and understanding the architectural differences — not just the configuration — explains when each applies and why Always On VPN is the current standard for managed Windows devices."
+tags: ["microsoft", "windows-server", "rras", "vpn", "directaccess", "always-on-vpn", "ikev2", "sstp", "remote-access"]
+order: 27
+draft: false
+---
+
+## Overview
+
+Remote access is one of the oldest problems in enterprise networking: employees need to reach internal resources from locations outside the corporate network. The challenge is not just connectivity but security — establishing an authenticated, encrypted channel that gives remote users appropriate access without exposing the internal network to untrusted devices or traffic. Microsoft has addressed this problem across three distinct generations: traditional RRAS-based VPN for on-demand manual connections, DirectAccess for always-on transparent connectivity, and Always On VPN as the modern successor that addresses DirectAccess's operational limitations while preserving the always-connected experience.
+
+## The Windows Server Remote Access Role
+
+The Remote Access server role in Windows Server is a consolidation of several related services: Routing (making the server act as a network router), VPN (accepting inbound VPN connections), DirectAccess, and Web Application Proxy (publishing internal applications externally, covered separately). These services share the Remote Access Management Console and PowerShell module but address different scenarios and can be enabled independently.
+
+## RRAS VPN — On-Demand Manual Connections
+
+RRAS (Routing and Remote Access Service) is the foundational Windows VPN server component, available since Windows NT. A Windows Server with RRAS configured as a VPN server accepts inbound connections from remote clients using standard VPN protocols. The client initiates the connection manually — the user opens a VPN client, selects a connection, and authenticates.
+
+RRAS supports four VPN tunnelling protocols with meaningfully different characteristics:
+
+| Protocol | Port | Authentication | Notes |
+|---|---|---|---|
+| PPTP | TCP 1723 | MS-CHAPv2 | Deprecated — known cryptographic weaknesses, avoid in new deployments |
+| L2TP/IPsec | UDP 500/4500 | User + machine cert or PSK | Strong encryption, common, blocked by some NAT devices |
+| SSTP | TCP 443 | User credentials | SSL-wrapped, traverses almost any firewall or proxy |
+| IKEv2 | UDP 500/4500 | Certificate or user | Fast reconnect, resilient to IP changes, recommended default |
+
+**IKEv2** is the recommended protocol for new deployments. Its MOBIKE extension allows a tunnel to survive IP address changes — when a roaming user's laptop switches from Wi-Fi to cellular, the IKEv2 session remaps to the new IP without reconnecting. It supports both certificate-based machine authentication and user credential authentication (via EAP inside the IKEv2 exchange). It requires UDP 500 and 4500 to reach the VPN server, which is occasionally blocked on restrictive networks.
+
+**SSTP** (Secure Socket Tunnelling Protocol) encapsulates VPN traffic inside an HTTPS session on TCP 443. Because almost every network allows outbound HTTPS, SSTP reaches corporate infrastructure from hotel networks, airport Wi-Fi, and restrictive corporate proxy environments where UDP is blocked and only port 443 is permitted. This makes it the reliable fallback for remote workers in constrained network environments.
+
+RRAS integrates with NPS for RADIUS authentication, allowing VPN users to authenticate against AD credentials with NPS Network Policies controlling access conditions and the Azure MFA extension adding a second factor. RRAS VPN is appropriate for small to medium deployments where on-demand manual connections are acceptable and the operational overhead of always-on technologies is not warranted.
+
+## DirectAccess — Always-On Predecessor
+
+DirectAccess, introduced in Windows Server 2008 R2 and significantly improved in Windows Server 2012, was Microsoft's first always-on remote access solution. The core design principle: managed Windows machines should always be connected to the corporate network when they have internet access, without requiring any user action.
+
+DirectAccess achieves this through IPv6 and IPsec. When a DirectAccess-enabled client detects that it is not on the corporate network, it automatically initiates an IPsec tunnel to the DirectAccess server using one of several IPv6 transition technologies (6to4, Teredo, IP-HTTPS). From that point, the machine behaves as if it is on the corporate network — Group Policy applies, SCCM client communicates with its management point, and IT can reach the machine for remote management without waiting for a user to manually connect.
+
+DirectAccess's operational model was genuinely transformative for device management. Laptops that spend months outside the office receive Group Policy updates and software deployments automatically whenever they connect to the internet, not only when a user decides to VPN in.
+
+The limitations were substantial: DirectAccess requires Windows Enterprise edition (not Pro or Home), requires an IPv6-capable infrastructure or transition technology, requires a PKI for certificates, is complex to configure correctly, and does not support non-Windows devices. Its IPv6 dependency made it difficult to deploy in environments that had not adopted IPv6 on their internal network. Microsoft has marked DirectAccess as a feature in maintenance mode — it remains supported but is not being enhanced.
+
+## Always On VPN — The Modern Standard
+
+Always On VPN (AOVPN) was introduced in Windows 10 1607 as the DirectAccess successor. It preserves the key operational benefit — automatic connection without user action — while replacing DirectAccess's architectural complexity with standard VPN protocols.
+
+AOVPN uses IKEv2 or SSTP as the tunnel protocol, both of which are well-understood, widely compatible, and firewall-friendly. It does not require IPv6 or IPv6 transition technologies. It works with Windows 10/11 Pro and Enterprise (not only Enterprise), and the third-party VPN client ecosystem can support it as well.
+
+### Device Tunnel and User Tunnel
+
+AOVPN introduces a two-tunnel architecture that maps cleanly onto the device lifecycle:
+
+**Device Tunnel** establishes before the user logs in, using the machine's computer certificate for authentication. This tunnel gives the machine access to domain controllers and management infrastructure before any user credentials are entered — it is what allows pre-logon Group Policy processing, cached credential renewal, and management agent communication regardless of whether a user session is active. The Device Tunnel is always-on at the machine level.
+
+**User Tunnel** establishes after a user logs in, using the user's credentials (typically certificate-based or EAP). This tunnel carries user-initiated traffic to corporate resources. It can enforce different access controls than the Device Tunnel — the user may access application servers and file shares that the pre-logon Device Tunnel does not expose.
+
+Both tunnels can coexist simultaneously, with routing split to ensure the right traffic uses the right tunnel.
+
+### Management and Deployment
+
+AOVPN VPN profiles are XML configurations distributed to managed devices via Microsoft Intune (for cloud-managed devices) or SCCM/ConfigMgr (for on-premises managed devices). There is no domain join requirement for User Tunnel — Azure AD-joined or hybrid-joined devices work equally well. This makes AOVPN viable for modern device management scenarios where machines are enrolled in Intune rather than joined to a traditional on-premises domain.
+
+## Choosing the Right Approach
+
+| Scenario | Recommended Technology |
+|---|---|
+| Small deployment, manual connection acceptable | RRAS VPN (IKEv2 or SSTP) |
+| Always-on, legacy Windows Enterprise fleet | DirectAccess (maintenance mode) |
+| Always-on, modern managed Windows 10/11 fleet | Always On VPN |
+| Hybrid cloud connectivity (Azure resources) | Azure VPN Gateway |
+| Third-party SSL VPN replacement on Windows | SSTP or IKEv2 via RRAS |
+
+## Summary
+
+The Windows Remote Access role's evolution reflects the changing operational requirements for remote workforce management. RRAS VPN remains valid for scenarios where on-demand connectivity is sufficient and simplicity is valued. DirectAccess demonstrated that always-on management connectivity is operationally superior to relying on users to manually connect, but its IPv6 and Enterprise-edition dependencies limited adoption. Always On VPN inherits DirectAccess's always-on management model while removing its architectural constraints — it is the current best practice for managed Windows device fleets, deployable through modern endpoint management tooling, and compatible with both cloud-managed and traditionally domain-joined environments.

@@ -1,0 +1,89 @@
+---
+title: "Entra Connect Health — Monitoring Your Hybrid Identity Pipeline"
+category: "microsoft"
+topic: "entra id"
+summary: "Hybrid identity failures are often silent — a sync error or DC issue can break cloud access for hundreds of users before anyone notices. Entra Connect Health provides centralised monitoring of the sync pipeline, domain controllers, and AD FS infrastructure, surfacing problems before they become outages."
+tags: ["microsoft", "entra-id", "azure-ad", "hybrid-identity", "connect-health", "monitoring", "ad-fs", "ad-ds", "az-800"]
+order: 9
+draft: false
+---
+
+## Overview
+
+A hybrid identity environment is only as reliable as its weakest monitored component. When Entra Connect sync fails, users may not be able to sign in to Microsoft 365. When a Domain Controller goes unhealthy, authentication across the on-premises environment degrades. When an AD FS certificate expires, federated authentication stops entirely. These failures are often **silent at first** — no alarm bell sounds, no service desk ticket is automatically created, and users begin to notice only after a cascading impact has already taken hold.
+
+**Entra Connect Health** (formerly Azure AD Connect Health) is a cloud-based monitoring service that collects telemetry from on-premises identity infrastructure — Entra Connect sync servers, Active Directory Domain Controllers, and AD FS servers — and surfaces it in the Microsoft Entra portal. It provides a single operational view of the hybrid identity pipeline, with built-in alerting for common failure conditions.
+
+## How It Works
+
+Entra Connect Health uses a **lightweight agent model**. A separate health agent is installed on each monitored server type:
+
+- **Microsoft Entra Connect Health agent for sync** — installed on the Entra Connect sync server
+- **Microsoft Entra Connect Health agent for AD DS** — installed on each Domain Controller to be monitored
+- **Microsoft Entra Connect Health agent for AD FS** — installed on each AD FS server and Web Application Proxy node
+
+Each agent collects local telemetry — performance counters, event log entries, replication status, authentication statistics — and sends it **outbound over HTTPS to Azure**. There are no inbound firewall requirements. Data is processed and stored in the Entra backend, and the results are rendered in the Entra portal under **Monitoring > Entra Connect Health**.
+
+Agents are lightweight and have no operational dependency on the portal — the monitored service continues to function normally regardless of agent or portal availability. The agents are decoupled from the services they monitor.
+
+## Monitoring Entra Connect Sync
+
+The sync monitoring view focuses on the health of the identity provisioning pipeline from on-premises AD to Entra ID.
+
+**Key metrics and signals**:
+
+- **Sync latency**: How long each sync cycle takes. Entra Connect runs sync cycles every 30 minutes by default. Sustained latency above threshold indicates a performance problem on the sync server or excessive object count changes.
+- **Sync errors**: Object-level errors where a specific user, group, or contact failed to synchronise. These are surfaced per object with error codes and the attribute that caused the failure. Common errors include duplicate attribute conflicts (two objects with the same UPN or proxy address), data validation failures, and export errors.
+- **Password Hash Sync status**: Whether PHS is running and current. A stalled PHS pipeline means that password changes made on-premises are not propagating to Entra ID, breaking cloud authentication after the next on-premises password change.
+- **Export counts**: Number of objects added, modified, or deleted per cycle — useful for detecting unexpected bulk changes that could indicate an accidental mass-delete or a misapplied sync rule.
+- **Staging server status**: Whether a staging mode server is registered and healthy.
+
+Sync errors deserve particular operational attention. Unlike a complete sync failure (which is visible and alarming), object-level errors are easily overlooked — the sync service reports success overall, but specific users quietly fail to synchronise. Over time these silent failures accumulate, and affected users end up with stale or absent cloud accounts.
+
+## Monitoring Active Directory Domain Controllers
+
+The AD DS monitoring view provides visibility into the health of Domain Controllers registered with the health agent.
+
+**Key metrics and signals**:
+
+- **Replication status**: Whether each DC is successfully replicating with its partners. Replication failures are surfaced with the specific error code (e.g., 8456, 8457 for replication disabled; 1722 for RPC unavailability).
+- **DC availability**: Whether each monitored DC is responding to queries. Extended unavailability is flagged as an alert.
+- **SYSVOL and NETLOGON share availability**: Whether the core shares that DCs must expose are accessible. Missing shares indicate a serious DC health problem.
+- **Outdated domain controller detection**: DCs running operating system versions approaching or past end-of-support are flagged.
+- **Replication topology overview**: A visual map of the replication relationships between monitored DCs, with status indicators.
+
+This view complements — rather than replaces — `repadmin` and `dcdiag`. Connect Health provides a persistent, cloud-accessible historical view; command-line tools provide deep, real-time diagnostic capability.
+
+## Monitoring AD FS
+
+For organisations using AD FS as their federation service rather than Entra ID native authentication, the AD FS monitoring view tracks the health of the federation infrastructure.
+
+**Key metrics and signals**:
+
+- **Token requests per second**: Volume of authentication requests being processed by AD FS. Sudden drops indicate a service interruption.
+- **Failed authentication rate**: The percentage of authentication attempts that are failing. A spike in failures — especially correlated with a specific relying party or client type — indicates a misconfiguration or an attack.
+- **Bad password attempts**: Volume of failed attempts attributable to incorrect credentials. A high count may indicate a password spray or brute-force attempt.
+- **Certificate expiry**: AD FS uses token-signing and token-decryption certificates. Connect Health monitors their expiry dates and alerts before they expire. An expired token-signing certificate causes all federated authentication to fail — this is one of the most common and avoidable AD FS outages.
+- **Proxy (Web Application Proxy) health**: Whether WAP nodes are healthy and able to forward requests to the AD FS farm.
+
+## Alerting and Notifications
+
+Entra Connect Health generates **built-in alerts** for a predefined set of conditions — replication failures, sync errors exceeding a threshold, certificate expiry, DC unavailability, and others. Alerts appear in the portal and can be configured to send email notifications to one or more addresses.
+
+Alert severity levels (Error, Warning, Informational) help prioritise response. Alerts auto-resolve when the underlying condition clears, providing a clean audit trail of incidents over time.
+
+## Licensing Requirement
+
+Entra Connect Health requires **Microsoft Entra ID P1 or P2** (formerly Azure AD Premium P1/P2). It is included in Microsoft 365 Business Premium, E3, E5, and various EMS bundles. Without a P1 or P2 licence, the Health portal is visible but most monitoring data is unavailable.
+
+This licensing requirement is worth factoring into hybrid identity planning. The cost of P1 licensing is typically far lower than the operational cost of an undetected sync failure or an AD FS outage.
+
+## Operational Value
+
+The core argument for deploying Entra Connect Health is simple: **hybrid identity failures are not always visible**. A sync server that stops running its cycles, a DC that falls behind in replication, or a service account password that locks out the AD FS service — each of these conditions can cause cloud authentication failures that affect all users, but none of them generate obvious on-premises alerts by default.
+
+Connect Health converts these invisible failure modes into monitored, alerted conditions. For any organisation where Microsoft 365 or Azure access is business-critical, the monitoring gap it fills is a genuine operational risk.
+
+## Key Takeaways
+
+Entra Connect Health is the observability layer for hybrid identity. Its agent-based architecture imposes minimal on-premises footprint while providing persistent, cloud-accessible telemetry for the three most critical identity components: the sync pipeline, the Domain Controllers, and the AD FS federation service. Deploy health agents on all monitored servers, configure email alerting, and treat sync object errors and certificate expiry warnings as priority signals — they are the early indicators of failures that, left undetected, become user-impacting outages.

@@ -1,0 +1,68 @@
+---
+title: "Data Deduplication — Eliminating Redundant Blocks on Windows Server"
+category: "microsoft"
+topic: "storage"
+summary: "Data Deduplication identifies and eliminates redundant data chunks across files on a volume, storing each unique chunk only once and replacing duplicates with lightweight pointers. Running as a post-process background job, it reduces storage consumption on eligible volumes without impacting write performance, and delivers the most dramatic savings on workloads with inherently repetitive data such as VDI environments and general-purpose file shares."
+tags: ["microsoft", "windows-server", "storage", "deduplication", "dedup", "az-800"]
+order: 33
+draft: false
+---
+
+## Overview
+
+Data Deduplication, available as a File and Storage Services role service in Windows Server, reduces the amount of physical disk space consumed by a volume by identifying duplicate data and storing it only once. Rather than keeping every copy of every identical block across every file on the volume, it builds a chunk store — a library of unique data blocks — and replaces duplicate occurrences with small pointer references back to the single stored copy. The transformation is transparent to applications and users; files appear fully intact and correctly sized from the filesystem's perspective.
+
+Windows Server deduplication is a post-process system: it analyses and deduplicates data as a scheduled background job after files are written, rather than at the moment of the write. This means the write path is unchanged and write performance is not affected by deduplication being enabled.
+
+## How the Chunk Store Works
+
+When the deduplication job runs, it reads files on the volume and divides them into variable-size chunks using a sliding window algorithm. Variable-size chunking is more effective than fixed-size chunking because it better accommodates insertions and deletions within files — a change in the middle of a file shifts fewer chunk boundaries.
+
+Each chunk is hashed (using SHA-256), and the hash is compared against the existing chunk store. If the chunk already exists in the store, the duplicate copy is replaced by a reparse point — a small metadata pointer that redirects to the chunk in the store. If the chunk is new, it is added to the store and the original data is replaced by the reparse point. The chunk store itself is stored in a hidden system folder (`System Volume Information`) on the deduplicated volume.
+
+This means a deduplicated volume contains two kinds of data: the chunk store (where the actual unique data lives) and optimised files (which are now mostly reparse points plus small amounts of non-deduplicated metadata and small files below the minimum file size threshold).
+
+## Supported Workloads and Savings Rates
+
+The effectiveness of deduplication depends entirely on the amount of redundant data in the workload. Windows Server provides predefined usage profiles that tune chunking and scheduling parameters for specific scenarios.
+
+| Workload | Typical Savings | Notes |
+|---|---|---|
+| General purpose file shares | 30–80% | Documents, installers, media — high repetition across users |
+| VDI (Virtual Desktop Infrastructure) | 80–95% | VHDX files share large amounts of identical OS data |
+| Software development shares | 50–60% | Build outputs, dependencies, binary artefacts |
+| Backup repositories (certain types) | 50–90% | Full backup sets with repeated base images |
+
+VDI workloads achieve the highest savings because every virtual desktop typically contains an identical copy of the base operating system image. Deduplication recognises that the OS blocks across hundreds of VHDX files are identical and stores them once.
+
+## Workloads Not Recommended
+
+Some workloads are unsuitable for deduplication and enabling it can degrade performance without meaningful storage savings.
+
+**Database workloads** (SQL Server, Exchange Server mailbox databases) involve frequent small random reads and writes to large files. The overhead of reparse point resolution adds latency to every random read, degrading database I/O performance. Microsoft explicitly does not support deduplication on SQL Server database files or Exchange mailbox databases.
+
+**Already-compressed data** — media files such as MP4, JPEG, MP3, and archive formats such as ZIP — achieves little or no additional compression from deduplication because the data entropy is too high for meaningful chunk sharing across files.
+
+**Very large volumes** may encounter limits around the practical capacity of the chunk store and rebuilding overhead.
+
+## Rehydration: Reading a Deduplicated File
+
+When an application or user opens a file that has been deduplicated, the deduplication filter driver (`dedup.sys`) intercepts the file read request. It reads the reparse points in the optimised file, looks up each chunk in the chunk store, and assembles the original data in memory before returning it to the caller. This process is called rehydration. It is transparent — the caller receives the complete file without any awareness that deduplication is involved.
+
+Rehydration adds a small amount of latency to cold reads compared to non-deduplicated volumes, because the I/O must jump between the optimised file metadata and the chunk store locations. On volumes with a healthy mix of hot data in the OS file cache, this overhead is rarely noticeable for interactive workloads. SSD-based volumes reduce the rehydration latency significantly by eliminating disk seek time from the chunk lookups.
+
+## Chunk Store Maintenance
+
+The chunk store requires ongoing maintenance to remain consistent and reclaim space when files are deleted or modified. Two background jobs manage this.
+
+**Garbage collection** runs periodically to identify chunks in the chunk store that are no longer referenced by any file on the volume. When files are deleted, their reparse points are removed but the chunks in the store are not immediately freed. Garbage collection sweeps the chunk store, identifies orphaned chunks, and removes them, reclaiming the disk space.
+
+**Integrity scrubbing** verifies the consistency of chunk store entries, detecting and flagging corruption. This is analogous to the integrity scrubbing found in other storage systems — it does not repair corruption but identifies it so that backup-based recovery can be initiated.
+
+## Interaction with Backup
+
+Backup software must be deduplication-aware to preserve the space savings when backing up a deduplicated volume. Deduplication-aware backup tools (such as Windows Server Backup and many enterprise backup products) back up the optimised data — the reparse points and chunk store — rather than rehydrating every file before backing it up. This means a backup of a heavily deduplicated volume requires storage proportional to the deduplicated size, not the logical file size. Non-deduplication-aware backup tools rehydrate files before backing them up, which consumes space proportional to the full logical size and defeats the storage savings in the backup target.
+
+## Summary
+
+Data Deduplication is a practical storage efficiency tool for Windows Server volumes hosting the right class of workloads. General purpose file shares and VDI environments derive the most benefit, often recovering the majority of raw capacity from duplicate data. Its post-process architecture keeps the write path clean, and transparent rehydration means applications require no modification. Understanding which workloads benefit, which should be excluded, and how the chunk store is maintained and protected is essential knowledge for designing efficient Windows Server storage deployments.

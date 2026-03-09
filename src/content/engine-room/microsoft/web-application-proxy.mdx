@@ -1,0 +1,68 @@
+---
+title: "Web Application Proxy — Publishing Internal Apps Securely"
+category: "microsoft"
+topic: "wap"
+summary: "Web Application Proxy is a Remote Access role service in Windows Server that publishes internal web applications and services to external users without placing servers in a DMZ or opening inbound firewall rules. It integrates tightly with AD FS to provide pre-authentication at the perimeter, ensuring unauthenticated requests never reach internal infrastructure."
+tags: ["microsoft", "windows-server", "wap", "adfs", "reverse-proxy", "remote-access", "az-800"]
+order: 28
+draft: false
+---
+
+## Overview
+
+Web Application Proxy (WAP) is a role service within the Remote Access server role introduced in Windows Server 2012 R2. Its purpose is to act as a reverse proxy at the network perimeter, allowing external users to reach internal web applications and services without those services being exposed directly to the internet. WAP sits in a DMZ or perimeter network and brokers connections between the outside world and internal servers.
+
+The key distinction from a simple reverse proxy is that WAP integrates with Active Directory Federation Services (AD FS) to enforce authentication before a request ever reaches the published application. This shifts the authentication boundary outward to the edge, reducing the attack surface on internal systems.
+
+## Publishing Modes
+
+WAP supports two publishing modes, and the choice between them determines how authentication is handled.
+
+**AD FS Pre-Authentication** is the primary mode and the one most relevant for enterprise scenarios. When a user tries to reach a published application, WAP redirects the unauthenticated request to AD FS. The user authenticates against AD FS, receives a security token, and only then is the request forwarded to the internal application. If authentication fails or is not completed, the internal server never sees the request. This mode requires the application to support claims-based authentication or for WAP to perform Kerberos Constrained Delegation (KCD) on behalf of the authenticated user.
+
+**Pass-Through** mode removes WAP from the authentication loop entirely. WAP forwards all traffic to the internal application unchanged, and the application handles authentication itself. This is appropriate for applications that cannot integrate with AD FS, or where the publishing goal is simply to avoid direct internet exposure rather than to centralise authentication.
+
+## Deployment Topology
+
+A standard WAP deployment places one or more WAP servers in a DMZ, separated from the internal network by firewalls. The internal network hosts the AD FS servers, the application servers, and the domain controllers. The firewall between the DMZ and the internet allows inbound HTTPS (443) to the WAP servers. The firewall between the DMZ and the internal network allows outbound connections from WAP to AD FS (443) and to the internal application servers.
+
+This topology means no inbound connections originate from the internet to the internal network. All internet-facing traffic terminates at WAP. The WAP server authenticates the user via AD FS over the internal firewall leg, then proxies the authenticated request to the application server.
+
+WAP servers themselves are not domain-joined. They communicate with AD FS over HTTPS using a trust established during WAP configuration.
+
+## AD FS Integration
+
+WAP and AD FS form the on-premises federated identity stack. AD FS acts as the Security Token Service (STS) — it authenticates users against Active Directory and issues signed tokens (SAML or OAuth/OIDC depending on configuration). WAP handles the external-facing portion of this flow: it receives the unauthenticated request, redirects to AD FS for authentication, collects the token, validates it, and then proxies the request to the application.
+
+When Kerberos Constrained Delegation is configured, WAP can impersonate the authenticated user when connecting to backend applications that require Windows integrated authentication. This allows seamless single sign-on for internal applications that were never designed for external access.
+
+## Common Use Cases
+
+WAP is frequently deployed to publish the following services to external users:
+
+| Application | Notes |
+|---|---|
+| Outlook on the Web (OWA) | Exchange web client — pre-auth with AD FS or pass-through |
+| SharePoint | Can use claims-based auth with AD FS pre-authentication |
+| Remote Desktop Web Access | Publishes RD Web Access portal to external users |
+| Line-of-business apps | Any internal web app accessible to remote workers |
+| AD FS itself | WAP proxies the AD FS sign-in endpoint for external federation |
+
+## WAP vs Azure AD Application Proxy
+
+Both WAP and Azure AD Application Proxy solve the same problem — providing external access to internal applications — but their architectures are fundamentally different.
+
+| Dimension | WAP | Azure AD Application Proxy |
+|---|---|---|
+| Infrastructure | WAP servers in DMZ (on-premises) | No DMZ servers — cloud-based proxy |
+| Connector | None — WAP is the edge | Lightweight connector installed on-premises, outbound-only |
+| Traffic direction | Inbound connections to WAP | Outbound from connector to Azure, no inbound firewall rules |
+| Authentication | AD FS (on-premises STS) | Azure AD (cloud identity) |
+| Management overhead | IIS certificates, WAP trust, AD FS farm | Connector registration, Azure AD configuration |
+| Prerequisite | Windows Server, AD FS | Azure AD (P1 licence for some features) |
+
+Azure AD Application Proxy is the strategic direction for organisations moving identity to the cloud. WAP remains relevant in fully on-premises environments or where AD FS is already deployed and the organisation is not ready to shift to cloud identity.
+
+## Summary
+
+Web Application Proxy provides a well-defined perimeter layer for publishing internal Windows Server-based applications. Its integration with AD FS makes it a natural fit for organisations already invested in the Microsoft federated identity stack. The pre-authentication mode ensures that only authenticated and authorised users consume resources on internal servers. Understanding WAP's topology, publishing modes, and relationship to AD FS is essential for designing secure hybrid access architectures on Windows Server.

@@ -1,0 +1,80 @@
+---
+title: "Windows Server DHCP — IP Address Assignment at Scale"
+category: "microsoft"
+topic: "dhcp"
+summary: "Windows Server DHCP extends the base DHCP protocol with Active Directory integration, failover redundancy, and centralised management features that make it suitable for enterprise-scale deployments. Understanding scope design, option precedence, failover modes, and the relay agent model is foundational for any Windows Server infrastructure role."
+tags: ["microsoft", "windows-server", "dhcp", "networking", "ipam", "failover", "active-directory"]
+order: 24
+draft: false
+---
+
+## Overview
+
+IP address management in a network of any meaningful scale cannot be static. Manually assigning addresses to every device is error-prone, impossible to scale, and produces no audit trail of who held which address at what time. DHCP (Dynamic Host Configuration Protocol) automates this assignment, and Windows Server's DHCP Server role extends the base protocol with enterprise features: integration with Active Directory for authorisation, multi-server failover for redundancy, and policy-based assignment for granular control. These features separate Windows Server DHCP from a simple DHCP daemon and make it the standard choice for Windows-centric environments.
+
+## Scopes
+
+A DHCP scope is the fundamental unit of address management. Each scope corresponds to a single IP subnet and defines:
+
+- A range of IP addresses available for assignment (start and end of the pool)
+- The subnet mask
+- Exclusions — specific addresses within the range that should never be assigned (typically addresses already statically assigned to servers, routers, or printers)
+- The lease duration — how long a client can hold an address before it must renew
+
+A DHCP server can host hundreds of scopes simultaneously, one per subnet it serves. Scopes can be grouped into a Superscope, which is a logical grouping of multiple scopes on the same physical segment — used in multinetting scenarios where a single network interface carries traffic from multiple subnets.
+
+## Scope Options
+
+Options are configuration parameters delivered to clients alongside the IP address. The most important are:
+
+| Option Code | Parameter |
+|---|---|
+| 003 | Default Gateway (Router) |
+| 006 | DNS Server addresses |
+| 015 | DNS Domain Name |
+| 051 | Lease Duration |
+| 060 | Vendor Class Identifier |
+
+Options are configured at three levels with a clear precedence hierarchy: **server options** apply to all clients on the server, **scope options** apply to all clients on a specific subnet, and **reservation options** apply to a single specific client. When options are configured at multiple levels, the most specific level wins: reservation overrides scope, scope overrides server.
+
+This hierarchy allows an administrator to configure a default DNS server at the server level, override it with a site-local DNS server at the scope level for certain subnets, and then override again at the reservation level for a specific device that requires non-standard DNS configuration.
+
+## DHCP Reservations
+
+A reservation permanently associates a specific IP address with a specific client, identified by MAC address. The client always receives the same IP address from the DHCP server, which combines the consistency of a static address with the manageability of DHCP — the address and all associated options remain managed centrally, and the client requires no manual network configuration.
+
+Reservations are the appropriate approach for devices that need a predictable address but should not be manually configured: network printers, management interfaces on unmanaged switches, IP phones, or servers in environments where DHCP-managed addresses are preferred for auditing purposes.
+
+## DHCP Failover
+
+Prior to Windows Server 2012, a DHCP server was a single point of failure. If it went offline, clients could not renew leases and eventually lost network connectivity. The standard workaround — running two DHCP servers with split scopes, each managing half the address pool — reduced failure impact but did not eliminate it, and doubled the complexity of scope management.
+
+DHCP Failover, introduced in Windows Server 2012, solves this properly. Two DHCP servers share a single scope, synchronising lease state between them in real time. Both servers are aware of every lease and can service any renewal request. The feature operates in one of two modes:
+
+**Load Balance mode** distributes new lease requests between the two servers according to a configurable ratio (default 50/50). Both servers actively serve clients simultaneously. If one server fails, the other takes over all traffic automatically.
+
+**Hot Standby mode** designates one server as active and one as standby. The standby server remains idle during normal operation and only activates if the active server becomes unavailable. The standby server holds a reserve percentage of the address pool for use during failover.
+
+Failover relationships are configured per scope and require the two servers to be able to communicate directly. A maximum client lead time (MCLT) parameter controls how long the standby server waits after losing contact with the active server before assuming full control.
+
+## DHCP Authorisation in Active Directory
+
+A Windows DHCP server must be authorised in Active Directory before it will begin serving leases. This is an AD forest-level check performed at DHCP service startup. An unauthorised DHCP server — whether accidentally misconfigured or deliberately installed by an attacker to perform a rogue DHCP attack — detects the presence of an authorised server in the forest and refuses to activate.
+
+This mechanism does not provide complete protection against rogue DHCP servers running non-Windows DHCP software, but it prevents accidental double-assignment problems in all-Windows environments and raises the barrier for insider attacks.
+
+## DHCP Relay Agents
+
+DHCP uses UDP broadcast messages for the client discovery phase. Routers do not forward broadcasts between subnets by default. This means a DHCP server can only directly serve clients on its own local subnet — a significant limitation in any routed network.
+
+A DHCP relay agent (also called a BOOTP relay or IP helper) solves this. The relay agent runs on a device with interfaces in multiple subnets — typically a Layer 3 switch or a router. When the relay receives a DHCP broadcast from a client, it unicasts the request to the configured DHCP server's IP address, inserting the client's source subnet information (the giaddr field) into the packet. The DHCP server uses this information to identify which scope to draw from and unicasts the response back to the relay, which forwards it to the client.
+
+In Windows environments, the relay function can be provided by the Windows Server Routing role, but it is almost always handled by the network infrastructure — Cisco routers use the `ip helper-address` command, and most managed Layer 3 switches have equivalent functionality.
+
+## IPAM Integration
+
+Windows Server IPAM (covered separately) integrates directly with Windows DHCP servers via WMI. IPAM can discover, monitor, and manage scopes across multiple DHCP servers from a single console, providing visibility into address utilisation, lease history, and configuration consistency. For environments with multiple DHCP servers across sites, this centralised view is operationally valuable even if day-to-day scope management continues to happen on individual servers.
+
+## Summary
+
+Windows Server DHCP is the most operationally straightforward of the Windows infrastructure roles, but its correct configuration has significant downstream effects. Scope design determines whether subnets scale cleanly as devices are added. Option hierarchy determines whether clients receive the right DNS and gateway information. DHCP Failover eliminates the single point of failure that plagued split-scope designs. AD authorisation adds a layer of protection against accidental rogue DHCP deployment. The relay agent model connects this single-subnet service to the entire routed network. Mastering these elements collectively provides the foundation for stable, auditable IP address assignment across a multi-site Windows infrastructure.
