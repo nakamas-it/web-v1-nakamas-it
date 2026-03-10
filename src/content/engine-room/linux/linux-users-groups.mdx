@@ -1,0 +1,226 @@
+---
+title: "Linux Users and Groups — Accounts, sudo, and Password Policy"
+category: "linux"
+topic: "linux-users-groups"
+summary: "How Linux manages user identities through the /etc/passwd and /etc/shadow databases, the commands for creating and modifying user accounts, how groups enable shared access to resources, and how sudo grants controlled privilege escalation without sharing the root password."
+tags: ["linux", "users", "groups", "sudo", "passwd", "rh124"]
+order: 5
+draft: false
+---
+
+## Overview
+
+Linux access control is built entirely on numeric identifiers: every user has a UID and every file has an owner UID. The kernel does not store usernames internally — it stores numbers. The files in `/etc` that map those numbers to human-readable names are a convenience layer on top of this numeric foundation. Understanding the structure of those files, the commands that manipulate them, and the mechanisms for controlled privilege escalation gives you a complete picture of how RHEL governs who can do what.
+
+---
+
+## /etc/passwd — User Database
+
+Every user account is a single line in `/etc/passwd`. The file is readable by all users; the kernel and utilities like `ls` read it to resolve UIDs to names. Seven colon-separated fields:
+
+```
+username:x:UID:GID:comment:home:shell
+student:x:1000:1000:Student User:/home/student:/bin/bash
+```
+
+| Field | Meaning |
+|---|---|
+| username | Login name |
+| x | Password is stored in `/etc/shadow` (always `x` on modern systems) |
+| UID | Numeric user identifier |
+| GID | Numeric primary group identifier |
+| comment | GECOS field — typically the user's full name; optional |
+| home | Absolute path to the user's home directory |
+| shell | Login shell; `/sbin/nologin` or `/bin/false` denies interactive login for service accounts |
+
+UID ranges on RHEL define account purpose:
+
+| UID Range | Account Type |
+|---|---|
+| 0 | root — superuser |
+| 1–200 | Static system accounts assigned by RPM packages at install time |
+| 201–999 | Dynamic system accounts created for services at install time (`useradd -r`) |
+| 1000+ | Regular interactive user accounts |
+
+---
+
+## /etc/shadow — Password Database
+
+`/etc/shadow` stores hashed passwords and password aging policy. It is readable only by root. Nine colon-separated fields:
+
+```
+username:hashed_password:lastchange:min:max:warn:inactive:expire:reserved
+```
+
+| Field | Meaning |
+|---|---|
+| username | Matches the name in `/etc/passwd` |
+| hashed_password | Salted hash; `!!` = account locked (no valid password); blank = no password required |
+| lastchange | Days since 1970-01-01 when the password was last changed |
+| min | Minimum days before the password may be changed again (0 = no minimum) |
+| max | Maximum days the password is valid before forced change (99999 = never expires) |
+| warn | Days before expiry when the user is warned |
+| inactive | Days after expiry before the account is locked |
+| expire | Absolute date the account expires (empty = never) |
+
+The hash format indicates the algorithm used:
+
+| Prefix | Algorithm | Status |
+|---|---|---|
+| `$6$` | SHA-512 | Current RHEL default — secure |
+| `$5$` | SHA-256 | Acceptable |
+| `$1$` | MD5 | Weak — avoid on modern systems |
+
+---
+
+## /etc/group — Group Database
+
+Four colon-separated fields:
+
+```
+groupname:x:GID:members
+wheel:x:10:student,admin
+```
+
+Every user has a **primary group** (the GID in `/etc/passwd`) and may belong to multiple **supplementary groups** (listed in `/etc/group`). The `id` command shows a user's UID, primary GID, and all group memberships. Files created by a user are owned by that user's primary group by default.
+
+---
+
+## Creating and Managing User Accounts
+
+### useradd
+
+| Option | Effect |
+|---|---|
+| `useradd username` | Create a user with defaults from `/etc/default/useradd` |
+| `-u UID` | Assign a specific UID |
+| `-g groupname` | Set the primary group |
+| `-G g1,g2` | Add to supplementary groups at creation time |
+| `-d /path` | Set the home directory path |
+| `-s /bin/bash` | Set the login shell |
+| `-c "comment"` | Set the GECOS comment field |
+| `-M` | Do not create a home directory |
+| `-r` | Create a system account (UID below 1000, no home directory, no expiry) |
+
+Files in `/etc/skel` are copied into the new user's home directory when `useradd` creates it. Placing template configuration files in `/etc/skel` ensures every new user starts with a consistent baseline.
+
+### usermod
+
+| Option | Effect |
+|---|---|
+| `usermod -aG groupname username` | Append the user to a supplementary group — the `-a` flag is critical; omitting it replaces all supplementary group memberships |
+| `usermod -l newname oldname` | Rename the account (does not rename home directory) |
+| `usermod -d /new/home -m username` | Change home directory and move its contents |
+| `usermod -s /bin/zsh username` | Change the login shell |
+| `usermod -L username` | Lock the account by prepending `!` to the shadow hash |
+| `usermod -U username` | Unlock the account |
+
+### userdel
+
+| Command | Effect |
+|---|---|
+| `userdel username` | Remove the account, leaving the home directory intact |
+| `userdel -r username` | Remove the account and delete the home directory and mail spool |
+
+### passwd
+
+| Command | Effect |
+|---|---|
+| `passwd` | Change your own password |
+| `passwd username` | Change another user's password (root only) |
+| `passwd -l username` | Lock the account |
+| `passwd -u username` | Unlock the account |
+| `passwd -e username` | Expire the password immediately — forces a change at the next login |
+
+---
+
+## Group Management
+
+| Command | Effect |
+|---|---|
+| `groupadd groupname` | Create a new group with the next available GID |
+| `groupadd -g 5000 groupname` | Create a group with a specific GID |
+| `groupmod -n newname oldname` | Rename a group |
+| `groupmod -g 6000 groupname` | Change a group's GID |
+| `groupdel groupname` | Delete a group (fails if it is any user's primary group) |
+
+---
+
+## Switching Users
+
+Two commands switch the active user identity within a session:
+
+**`su username`** starts a subshell as the specified user, but keeps the current environment — the working directory, `PATH`, and environment variables remain those of the original user. This is rarely what you want.
+
+**`su - username`** starts a full login shell as the target user: it changes to that user's home directory, loads their environment variables, and sets `PATH` appropriately. Always use `su -` when switching to root:
+
+```
+su -
+```
+
+Without the dash, root's `PATH` may not include `/sbin` and `/usr/sbin`, causing administrative commands to appear missing.
+
+---
+
+## sudo — Privilege Escalation Without Sharing root
+
+`sudo` allows specific users to run commands as root (or another user) without knowing the root password. Configuration lives in `/etc/sudoers` and the drop-in directory `/etc/sudoers.d/`. Always edit `/etc/sudoers` with `visudo` — it performs syntax checking before saving and prevents a malformed file from locking out all sudo access.
+
+### sudoers Syntax
+
+```
+user    ALL=(ALL)    ALL
+%wheel  ALL=(ALL)    ALL
+%wheel  ALL=(ALL)    NOPASSWD: ALL
+```
+
+- `user` — applies to a specific username; `%wheel` applies to members of the `wheel` group
+- First `ALL` — applies to connections from any host
+- `(ALL)` — may run commands as any user
+- Final `ALL` — allows any command
+- `NOPASSWD:` — does not prompt for the user's password before running
+
+On RHEL, members of the `wheel` group have full sudo access by default. Adding a user to `wheel` with `usermod -aG wheel username` is the standard way to grant administrative access.
+
+### Key sudo Commands
+
+| Command | Effect |
+|---|---|
+| `sudo command` | Run `command` as root |
+| `sudo -i` | Open an interactive root login shell (equivalent to `su -` but authenticated via sudo) |
+| `sudo -l` | List the commands the current user is permitted to run via sudo |
+| `sudo -u username command` | Run `command` as a specific user other than root |
+
+---
+
+## Password Aging with chage
+
+`chage` (change age) reads and writes the password aging fields in `/etc/shadow`:
+
+| Command | Effect |
+|---|---|
+| `chage -l username` | List all password aging settings for the user |
+| `chage -M 90 username` | Set maximum password age to 90 days |
+| `chage -m 7 username` | Set minimum days between password changes to 7 |
+| `chage -W 14 username` | Warn the user 14 days before the password expires |
+| `chage -I 7 username` | Lock the account 7 days after password expiry |
+| `chage -E 2026-12-31 username` | Set the account expiry date |
+| `chage -d 0 username` | Force a password change at the next login (equivalent to `passwd -e`) |
+
+System-wide defaults for new accounts are set in `/etc/login.defs`:
+
+| Directive | Meaning |
+|---|---|
+| `PASS_MAX_DAYS` | Maximum password age for new accounts |
+| `PASS_MIN_DAYS` | Minimum days between password changes for new accounts |
+| `PASS_WARN_AGE` | Days of warning before expiry for new accounts |
+| `UID_MIN` | Lowest UID assigned to regular users by `useradd` |
+| `SYS_UID_MAX` | Highest UID assigned to system accounts by `useradd -r` |
+
+Changes to `/etc/login.defs` apply to accounts created after the change, not to existing accounts. Use `chage` to update aging policy on existing accounts individually.
+
+---
+
+## Summary
+
+Linux user management centres on three flat-file databases: `/etc/passwd` maps usernames to UIDs and login shells; `/etc/shadow` stores password hashes and aging policy; `/etc/group` maps group names to GIDs and member lists. The `useradd`, `usermod`, and `userdel` commands manipulate these files safely. The `wheel` group and `sudo` provide controlled privilege escalation without exposing the root password — the preferred model for all interactive administrative work. Password aging enforced via `chage` and `/etc/login.defs` ensures credentials rotate on a defined schedule and that compromised accounts lock automatically after expiry.

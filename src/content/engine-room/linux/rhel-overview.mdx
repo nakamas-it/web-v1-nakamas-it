@@ -1,0 +1,126 @@
+---
+title: "Red Hat Enterprise Linux — Open Source, Distributions, and Subscriptions"
+category: "linux"
+topic: "rhel-overview"
+summary: "What Red Hat Enterprise Linux is — how open source licensing works, how Linux distributions differ from the kernel itself, and how RHEL's subscription model provides support, updates, and certifications for enterprise workloads running on the same Fedora/CentOS-derived codebase."
+tags: ["linux", "rhel", "red-hat", "open-source", "rh124"]
+order: 1
+draft: false
+---
+
+## Overview
+
+Linux powers the majority of the world's servers, cloud infrastructure, and embedded devices — yet "Linux" as most people say it refers to something larger than what Linus Torvalds wrote. The kernel is only one piece. Understanding what open source licensing means, how that kernel gets assembled into a usable system, and why enterprise buyers pay for software they could technically download for free sets the foundation for everything else in Red Hat system administration.
+
+---
+
+## Open Source Licensing
+
+Open source software is defined by the presence of source code that anyone can freely use, study, modify, and redistribute. The Free Software Foundation formalises this as four essential freedoms: the freedom to run the program for any purpose, to study how it works, to redistribute copies, and to distribute modified versions.
+
+Licences differ in what they require of people who redistribute modified versions. The two main families are copyleft and permissive:
+
+| Licence Type | Examples | Key Requirement |
+|---|---|---|
+| Copyleft (strong) | GPLv2, GPLv3 | Derivatives must be released under the same GPL licence |
+| Copyleft (weak) | LGPL, MPL | Libraries may be linked from proprietary code without copyleft obligation |
+| Permissive | MIT, BSD, Apache 2.0 | No copyleft requirement — derivatives may be proprietary |
+
+The Linux kernel is licensed under GPLv2. This means any software that incorporates kernel source code and is distributed must also be made available under GPLv2. Hardware vendors who write proprietary drivers face this constraint: a driver that runs in kernel space and statically links kernel headers is considered a derivative work under most interpretations of the GPL.
+
+Permissive licences such as MIT and Apache 2.0 place no such restriction on downstream use. A company can take MIT-licensed code, modify it, and ship it as part of a proprietary product without publishing the changes. Many core userspace tools — particularly those originating in BSD Unix — carry permissive licences.
+
+---
+
+## Linux Kernel vs Linux Distribution
+
+The Linux kernel is the core of the operating system: it manages hardware, schedules processes, handles memory, and provides system calls. Linus Torvalds maintains the authoritative kernel source at kernel.org, and the kernel alone does not constitute a usable system.
+
+A **Linux distribution** bundles the kernel with everything a user needs to actually work: GNU userspace tools (ls, cp, grep, bash), a package manager, an init system (systemd on modern distributions), documentation, and an installer. The distribution maintainer integrates all these components, tests them together, and ships them as a coherent product.
+
+Major distribution families differ in their package format and tooling:
+
+| Family | Package Format | Package Manager | Examples |
+|---|---|---|---|
+| Red Hat | RPM | dnf / yum | RHEL, Fedora, CentOS, AlmaLinux, Rocky Linux |
+| Debian | DEB | apt | Debian, Ubuntu, Linux Mint |
+| SUSE | RPM | zypper | SUSE Linux Enterprise, openSUSE |
+| Arch | pkg.tar.zst | pacman | Arch Linux, Manjaro |
+
+Binary compatibility within a family is not guaranteed across distributions — the packaging format is the same, but library versions and build flags may differ.
+
+---
+
+## Red Hat Enterprise Linux
+
+Red Hat Enterprise Linux is Red Hat's commercially supported Linux distribution, aimed at enterprise workloads where stability, hardware certification, and multi-year support matter. IBM acquired Red Hat in 2019; RHEL continues as its own product line.
+
+RHEL follows a 10-year lifecycle per major version, broken into a full support phase and a maintenance phase:
+
+| RHEL Version | Full Support Until | Maintenance Until |
+|---|---|---|
+| RHEL 8 | May 2024 | May 2029 |
+| RHEL 9 | May 2027 | May 2032 |
+
+A RHEL subscription is not a software licence in the traditional sense — RHEL's source code is open and free. The subscription pays for:
+
+- Software updates and security patches delivered through Red Hat's content delivery network
+- Technical support from Red Hat engineers
+- Access to the Red Hat Customer Portal, including documentation, knowledge base articles, and bug tracking
+- Certified hardware and software ecosystem: Red Hat tests RHEL against specific hardware platforms and certifies third-party software (databases, middleware) to run on it
+- Extended Update Support (EUS): the option to remain on a specific RHEL minor version and receive backported security patches, rather than being required to update to the latest minor release
+
+Without a subscription, RHEL can be downloaded and used (Red Hat offers a no-cost developer subscription for up to 16 systems), but no support is provided and updates require a paid subscription.
+
+---
+
+## Related Distributions
+
+Understanding the RHEL ecosystem clarifies which distribution to choose for different purposes:
+
+| Distribution | Relationship to RHEL | Status |
+|---|---|---|
+| Fedora | Upstream for RHEL — cutting-edge, 13-month lifecycle, free | Active |
+| CentOS Stream | Rolling preview of the next RHEL minor release; feeds changes into RHEL | Active |
+| AlmaLinux | Binary-compatible RHEL rebuild; community-supported, free | Active |
+| Rocky Linux | Binary-compatible RHEL rebuild; founded by CentOS's original creator, free | Active |
+| CentOS Linux | Downstream RHEL rebuild; reached end-of-life December 2021 | EOL |
+
+Fedora is where new technology lands first. Features that prove stable in Fedora are candidates for inclusion in the next RHEL major version. CentOS Stream sits between Fedora and RHEL — it receives changes before they are locked into a RHEL minor release, making it useful for developers who want to track where RHEL is heading.
+
+AlmaLinux and Rocky Linux exist because the CentOS Linux project was discontinued. Both rebuild RHEL from source with the Red Hat trademarks removed. They are suitable for workloads that need RHEL compatibility without a subscription, accepting that they have no Red Hat support contract.
+
+---
+
+## GNOME Desktop and Virtual Consoles
+
+RHEL 9's default graphical environment is GNOME Shell. The Activities overview (accessed by pressing the Super key or clicking Activities in the top-left corner) provides application search, running application overview, and virtual workspace switching.
+
+For server administration, GNOME Terminal provides a graphical shell session. On headless systems, administrators connect via SSH instead.
+
+Linux maintains multiple **virtual consoles** that allow separate login sessions on the same machine. RHEL 9 with a graphical install allocates:
+
+| Console | Access Shortcut | Default |
+|---|---|---|
+| tty1 | Ctrl+Alt+F1 | GNOME graphical desktop |
+| tty2–tty6 | Ctrl+Alt+F2 through F6 | Text-mode login prompts |
+
+Virtual consoles are useful when the graphical environment becomes unresponsive or when a second session is needed without opening a terminal emulator.
+
+---
+
+## Root and Regular Users
+
+Linux distinguishes two classes of interactive users:
+
+**Root (UID 0)** is the superuser. The root account has unrestricted access to every file, process, and system call on the machine. The shell prompt for root ends in `#`. Root can read any file, kill any process, install software system-wide, and modify kernel parameters.
+
+**Regular users** have UIDs of 1000 or higher on RHEL. Their shell prompt ends in `$`. Regular users can only read files they have permission to read, run commands available to all users, and modify files they own. They cannot modify system configuration, install system packages, or affect other users' processes.
+
+The practical rule is to perform day-to-day work as a regular user and escalate to root only when a task requires it — either by running `sudo command` to execute a single command with elevated privileges, or by running `su -` to open an interactive root shell. Working as root by default increases the blast radius of mistakes: a mistyped `rm -rf` from a root prompt removes files that a regular user could not have touched.
+
+---
+
+## Summary
+
+Red Hat Enterprise Linux is an enterprise Linux distribution built on the GPLv2-licensed Linux kernel and assembled with hundreds of open source components. The subscription model separates the software (freely available) from the support, certification, and update services (paid). Fedora is the upstream proving ground; CentOS Stream is the upstream pipeline into RHEL; AlmaLinux and Rocky Linux are free binary-compatible alternatives. The GNOME desktop and virtual consoles provide graphical and text-mode access, while the distinction between root and regular user accounts enforces the principle of least privilege from the first login.

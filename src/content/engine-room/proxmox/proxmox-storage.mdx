@@ -1,0 +1,220 @@
+---
+title: "Proxmox VE — Storage Backends"
+category: "proxmox"
+topic: "storage"
+summary: "Proxmox storage plugins — directory, LVM, LVM-Thin, NFS, iSCSI, and how to add and configure shared storage for VM disks and backups."
+tags: ["proxmox", "storage", "lvm", "nfs", "iscsi", "shared-storage"]
+order: 6
+draft: false
+---
+
+## Overview
+
+Proxmox VE does not manage disks directly — it manages storage through a plugin-based system where each plugin handles a different type of backend. Every storage definition you create in Proxmox tells the cluster what type of storage it is, how to connect to it, and what kind of content it is allowed to hold. That last point is important: a storage pool in Proxmox is not just a place to put files. It is a typed endpoint that declares whether it holds VM disk images, container rootfs volumes, ISO images, backup archives, container templates, or some combination of those.
+
+Understanding the storage model is foundational to Proxmox. Live migration, high availability, snapshots, and container storage all behave differently depending on which backend you are using. The right choice of storage backend is rarely about raw performance alone — it is about which features you actually need.
+
+---
+
+## Storage Content Types
+
+Every storage definition in Proxmox is configured with one or more **content types**. These tell Proxmox what kinds of files or volumes are allowed on that storage:
+
+| Content Type | Description |
+|---|---|
+| `images` | VM disk images (qcow2, raw, vmdk) |
+| `rootdir` | LXC container root filesystems |
+| `iso` | ISO installation images |
+| `vztmpl` | LXC container templates (.tar.gz, .tar.xz) |
+| `backup` | vzdump backup archives |
+| `snippets` | Hook scripts, cloud-init config files |
+
+Not all storage backends support all content types. Directory-based storage can hold all types. Block-based storage like raw LVM can only hold `images` and `rootdir`. This distinction becomes important when planning where to keep ISOs, backups, and VM disks in a multi-node cluster.
+
+---
+
+## Storage Backends Comparison
+
+| Backend | Thin Provisioning | Shared (multi-node) | Supported Content |
+|---|---|---|---|
+| Directory (dir) | Yes (qcow2) | No (unless on shared FS) | images, iso, vztmpl, backup, rootdir, snippets |
+| LVM | No | No | images, rootdir |
+| LVM-Thin | Yes | No | images, rootdir |
+| NFS | Yes (qcow2) | Yes | images, iso, vztmpl, backup, rootdir |
+| CIFS/SMB | Yes (qcow2) | Yes | images, iso, vztmpl, backup, rootdir |
+| iSCSI | No (raw only) | Yes | images (raw LUNs) |
+| ZFS (zfspool) | Yes (zvols) | No (per-node) | images, rootdir |
+| Ceph RBD | Yes (thin objects) | Yes | images, rootdir |
+| GlusterFS | Yes (qcow2) | Yes | images |
+
+The "shared" column is the critical one for live migration and high availability. A VM can only be live-migrated between nodes if its disk images live on storage that all nodes can access simultaneously. Local storage means offline migration only — the entire disk image is copied over the network using `rsync`, which causes downtime proportional to disk size.
+
+---
+
+## Local vs. Shared Storage
+
+Local storage is simpler, faster, and cheaper. Shared storage enables live migration, centralized backup, and HA failover. The tradeoff is summarized in the notes from the source book:
+
+| Feature | Local Storage | Shared Storage |
+|---|---|---|
+| Live migration | No | Yes |
+| High availability | No | Yes |
+| I/O performance | Native disk speed | Network overhead |
+| Cost | Lower | Higher |
+| Expandability | Limited to node | Scale across nodes |
+
+A common hybrid approach is to use local ZFS pools for VM disks and NFS for backups and ISOs. This gives good performance for running workloads and central backup storage without requiring a full shared-storage cluster like Ceph.
+
+---
+
+## Directory Storage (dir)
+
+Directory storage is the simplest backend. It stores all content as files in a directory on the host filesystem. The default local storage in Proxmox points to `/var/lib/vz` and is configured as directory storage.
+
+Directory storage supports multiple disk image formats:
+- **qcow2** — thin-provisioned, supports snapshots, larger I/O overhead
+- **raw** — fixed-size, fastest I/O, no snapshot support at this layer
+- **vmdk** — VMware-compatible, not recommended for production on Proxmox
+
+The storage configuration entry in `/etc/pve/storage.cfg` looks like this:
+
+```
+dir: local
+  path /var/lib/vz
+  content images,iso,vztmpl,rootdir
+  maxfiles 0
+```
+
+The `maxfiles` setting controls how many old backup files to retain for a given VM. Setting it to `0` means unlimited retention. Setting it to `3` means Proxmox will automatically delete older backups when a fourth is created.
+
+To add a second directory storage backend via the GUI: **Datacenter → Storage → Add → Directory**. Specify an ID (unique name), the path on disk, and which content types to allow.
+
+---
+
+## LVM Storage
+
+LVM (Logical Volume Manager) is a block-level storage backend. It operates faster than directory storage because there is no filesystem layer between Proxmox and the block device. Disk images are stored as raw logical volumes.
+
+Characteristics of LVM in Proxmox:
+- **No thin provisioning** — every disk image pre-allocates its full declared size
+- **No snapshot support** at the storage level without LVM-Thin
+- **Format: raw only** — fastest option for raw block I/O
+- Requires an existing volume group (VG) on the host
+
+```
+lvm: local-lvm
+  vgname pve
+  content rootdir,images
+```
+
+LVM is a good choice for performance-sensitive workloads where you can predict disk usage accurately. For VMs that benefit from snapshots, LVM-Thin or ZFS is a better fit.
+
+---
+
+## LVM-Thin Storage
+
+LVM-Thin extends standard LVM with thin-provisioning capabilities. A thin pool is a special LVM logical volume that allocates blocks on demand rather than at creation time. A 50 GB VM disk image on an LVM-Thin pool may only consume 5 GB of physical space initially, growing as data is written.
+
+Thin-provisioned volumes also support snapshots, which is required for Proxmox VM snapshot functionality and for certain backup modes.
+
+Key limitation: **LVM-Thin pools are not directly shareable between nodes**. Multiple nodes accessing the same thin pool simultaneously would corrupt data. To share LVM-Thin across nodes, you must build it on top of an iSCSI LUN that only one node accesses at a time — typically managed through SCSI reservations or cluster LVM (clvmd), which adds complexity.
+
+```
+lvmthin: local-lvm
+  thinpool data
+  vgname pve
+  content rootdir,images
+```
+
+---
+
+## NFS Storage
+
+NFS (Network File System) is the most common shared storage option in Proxmox environments that do not run Ceph. It provides a shared directory that all cluster nodes can mount simultaneously, enabling live migration and centralized backups.
+
+NFS stores disk images as `.qcow2` files by default, which gives thin provisioning, snapshots, and flexible content type support. The downside is network-dependent performance — NFS over a 1 GbE link will be slower than local disks, and NFS over a shared network will be impacted by other cluster traffic.
+
+```
+nfs: vm-nfs-01
+  path /mnt/pve/vm-nfs-01
+  server 192.168.145.11
+  export /mnt/pmxnas01
+  options vers=3
+  content images,vztmpl,backup,rootdir
+  maxfiles 1
+```
+
+Best practices for NFS in Proxmox:
+- Use a dedicated network interface and switch for storage traffic, separate from VM and cluster traffic
+- Specify `vers=3` or `vers=4` explicitly rather than relying on auto-negotiation
+- Use NFS for backup storage even if VMs live on local or Ceph storage — it is reliable and simple
+- Never use NFS for VM disks on a production cluster over an unreliable link — an NFS timeout will stall all I/O to VMs on that storage
+
+To add NFS via the GUI: **Datacenter → Storage → Add → NFS**. Fill in the server IP, export path, and allowed content types. Proxmox will automatically mount the share at `/mnt/pve/<storage-id>/` on all cluster nodes.
+
+---
+
+## iSCSI Storage
+
+iSCSI presents block storage over IP. From Proxmox's perspective, an iSCSI target appears as a raw block device (a LUN). Proxmox cannot use raw LUNs as VM disk image containers directly — they have content type `none` only, meaning Proxmox presents the raw devices but does not manage individual disk images within them.
+
+The typical pattern is to layer LVM on top of iSCSI:
+1. Add the iSCSI target as storage (content: none)
+2. Create an LVM or LVM-Thin volume group on the iSCSI LUN
+3. Add the LVM pool as a second storage entry with content: images, rootdir
+
+```
+iscsi: nas-iscsi
+  portal 192.168.10.50
+  target iqn.2020-01.com.nas:storage01
+  content none
+```
+
+iSCSI is a valid foundation for shared block storage in clusters that have a dedicated iSCSI SAN. Combined with LVM, it gives block-level performance over the network with the flexibility of logical volume management.
+
+---
+
+## Storage for Containers vs. VMs
+
+LXC containers and KVM VMs have different storage requirements. The `rootdir` content type is used for container root filesystems; `images` is used for VM disk images.
+
+On directory and NFS storage, container templates are stored as `.tar.gz` or `.tar.xz` archives and extracted to create the container's filesystem. On ZFS and LVM-Thin, container filesystems are stored as datasets or logical volumes and benefit from snapshot support.
+
+One important note: **Ceph RBD support for LXC containers** requires enabling the **KRBD** (Kernel RBD) option on the storage definition. Without KRBD, RBD volumes are accessed through the QEMU RBD driver, which is only available to KVM VMs.
+
+---
+
+## Adding Storage via the GUI
+
+All storage operations in Proxmox go through **Datacenter → Storage**. The storage definitions created here are written to `/etc/pve/storage.cfg` and automatically distributed to all cluster nodes via pmxcfs.
+
+To add storage:
+1. Navigate to **Datacenter → Storage → Add**
+2. Select the backend type from the dropdown (Directory, LVM, LVM-Thin, NFS, CIFS, iSCSI, ZFS, RBD, GlusterFS)
+3. Fill in the backend-specific fields (path, server, export, VG name, etc.)
+4. Select the content types this storage is allowed to hold
+5. Click **Add**
+
+The new storage immediately appears on all cluster nodes. For network-based storage (NFS, CIFS, iSCSI), Proxmox will attempt to connect from all nodes automatically.
+
+To restrict storage to specific nodes — useful when a storage backend is only physically accessible from certain hosts — uncheck **All Nodes** and select the specific nodes manually.
+
+---
+
+## Key Considerations
+
+**Backups should never share the same storage as production VM disks.** If the storage fails, you lose both the VMs and their backups simultaneously. Use a separate NFS share, a dedicated directory on a different physical disk, or an off-node storage target for backup archives.
+
+**Thin provisioning requires monitoring.** Both LVM-Thin and qcow2 on directory storage can overcommit physical space. If the underlying pool fills up, writes from VMs will fail with I/O errors — a situation that is difficult to recover from gracefully. Monitor storage usage and set conservative overcommit ratios.
+
+**IOPS measurement** with `ioping` helps establish a baseline before choosing a backend:
+
+```bash
+# Measure IOPS on a path
+ioping -c 100 /var/lib/vz
+
+# Measure IOPS on a block device
+ioping -c 100 /dev/sda
+```
+
+Understanding actual disk performance helps avoid bottlenecks when placing high-I/O VMs on shared storage.

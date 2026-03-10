@@ -1,0 +1,318 @@
+---
+title: "Proxmox VE — Ceph Distributed Storage"
+category: "proxmox"
+topic: "ceph"
+summary: "Ceph on Proxmox — deploying a hyper-converged Ceph cluster, OSDs, monitors, pools, and using Ceph RBD for VM storage."
+tags: ["proxmox", "ceph", "distributed-storage", "hyper-converged", "rbd", "ceph-osd"]
+order: 8
+draft: false
+---
+
+## Overview
+
+Ceph is a distributed storage system designed with one fundamental goal: no single point of failure. Unlike NFS (which has a single server) or iSCSI (which has a single target), Ceph distributes data across many nodes and many disks simultaneously. Any node or disk can fail and the cluster continues to serve data normally, automatically rebuilding redundant copies on remaining hardware.
+
+Proxmox VE has supported Ceph since version 3 and deeply integrated it starting with version 5. As of Proxmox VE 5.0, you can run Ceph directly on the same nodes that run your VMs — a configuration called **hyper-converged infrastructure (HCI)**. This eliminates the need for separate dedicated storage servers, making Ceph accessible to smaller environments that cannot justify dedicated storage hardware.
+
+Ceph integrates with Proxmox at two levels. **Ceph RBD** (RADOS Block Device) provides block storage for VM disk images, functioning like a shared SAN that all Proxmox nodes can access simultaneously — enabling live migration and high availability without NFS. **CephFS** provides a POSIX-compliant shared filesystem, useful for ISOs, backups, and container templates.
+
+---
+
+## Ceph Architecture
+
+Ceph is composed of several daemon types. Understanding what each one does is essential before deploying.
+
+### OSD — Object Storage Daemon
+
+An OSD (Object Storage Daemon) manages a single physical disk. Every drive in the Ceph cluster runs one OSD daemon. OSDs are responsible for:
+- Storing actual data as objects
+- Handling replication — an OSD writes its data and then replicates it to the appropriate peer OSDs
+- Reporting their status to monitors
+
+In a healthy Ceph cluster, each OSD handles reads, writes, and background replication concurrently. Adding more disks (more OSDs) linearly increases both capacity and throughput.
+
+### Monitor (MON)
+
+Monitors maintain the authoritative **cluster map** — the definitive record of which OSDs exist, which are up or down, and how data is distributed across them. Monitors use a Paxos-based quorum to agree on the cluster state. A three-monitor cluster can tolerate one monitor failure; a five-monitor cluster can tolerate two.
+
+Monitors do not store data. They are lightweight processes that coordinate cluster state. In small Proxmox clusters, monitors typically co-exist with OSD nodes.
+
+### Manager (MGR)
+
+The Ceph Manager daemon (MGR) handles cluster-wide metrics collection, the Ceph dashboard, and module-based extensions (including the Proxmox integration modules). At least one MGR must run in a healthy cluster. The Proxmox GUI Ceph management panel communicates through the MGR.
+
+### MDS — Metadata Server
+
+The Metadata Server is only required for **CephFS** — the POSIX-compliant shared filesystem layer. It stores filesystem directory trees and file metadata. If you are using Ceph only for RBD block storage (the most common Proxmox configuration), you do not need MDS.
+
+### CRUSH Map
+
+The CRUSH (Controlled Replication Under Scalable Hashing) algorithm determines where data is placed in the cluster without any centralized lookup. Given an object ID and a CRUSH map (describing the physical topology of the cluster — racks, hosts, OSDs), CRUSH computes which OSDs should store replicas of that object. This means no OSD ever needs to ask a central server where to write or read data.
+
+The CRUSH map also defines **failure domains**. In a properly configured cluster, Ceph ensures that replicas of the same data land on different hosts (or different racks, if the map is configured that way). This means losing an entire physical host does not cause data loss as long as replicas are on other hosts.
+
+---
+
+## Placement Groups (PGs)
+
+Ceph does not track individual objects directly against OSDs. Instead, objects are grouped into **Placement Groups (PGs)**. Each PG is assigned to a set of OSDs by CRUSH. When a new OSD is added or an existing one fails, Ceph rebalances PGs across OSDs, moving groups of objects rather than individual files.
+
+The number of PGs per pool affects cluster performance. Too few PGs causes uneven data distribution. Too many PGs wastes RAM (each PG has overhead on every OSD). The Ceph documentation provides a calculator, and the general formula is:
+
+```
+Total PGs = (Number of OSDs × 100) / Replica count
+Round up to the nearest power of 2
+```
+
+Example for a 6-OSD cluster with 3 replicas:
+
+```
+(6 × 100) / 3 = 200 → round up to 256 PGs
+```
+
+For a small Ceph cluster with fewer than 5 OSDs, Ceph recommends 128 PGs per pool. Adjust incrementally on a live cluster — PG changes trigger rebalancing and are resource-intensive.
+
+---
+
+## Minimum Requirements
+
+Ceph requires at least three nodes for a production cluster. This is non-negotiable for quorum and data safety:
+
+- **3 monitor nodes** (can be co-located with OSD nodes)
+- **3 OSD nodes** with at least one disk each
+- **3 replicas** configured (size=3, min_size=2) means the cluster tolerates one node failure
+
+A two-node Ceph cluster cannot achieve quorum — a single node failure creates a 1:1 split where neither side can declare itself authoritative. The cluster would stop accepting writes to protect data integrity.
+
+For the cluster network, two separate networks are strongly recommended:
+- **Ceph Public Network** — traffic between Proxmox nodes and Ceph OSDs (client I/O)
+- **Ceph Cluster/Sync Network** — internal OSD-to-OSD replication traffic
+
+Separating these networks prevents replication traffic from saturating the same network that serves VM disk I/O. Each network should be at least 10 GbE in production.
+
+---
+
+## Deploying Ceph from the Proxmox GUI
+
+As of Proxmox VE 5.0, the entire Ceph deployment can be managed from the Proxmox GUI. The process is:
+
+### Step 1 — Install Ceph on Each Node
+
+Navigate to **Node → Ceph → Install** for each node. This installs the Ceph packages from the Proxmox Ceph repository. After installation, the Ceph configuration tab becomes active.
+
+Via CLI:
+
+```bash
+pveceph install --version quincy
+```
+
+### Step 2 — Initialize Ceph Configuration (First Node Only)
+
+On the first node: **Node → Ceph → Configuration → Initialize**
+
+Specify the public network CIDR and (optionally) the separate cluster network CIDR.
+
+Via CLI:
+
+```bash
+pveceph init --network 192.168.20.0/24 --cluster-network 10.0.0.0/24
+```
+
+This creates `/etc/pve/ceph.conf`, which is symlinked to `/etc/ceph/ceph.conf` and distributed to all cluster nodes via pmxcfs.
+
+### Step 3 — Create Monitors
+
+Create a monitor on each of the three nodes: **Node → Ceph → Monitor → Create Monitor**
+
+Via CLI (run on each node):
+
+```bash
+pveceph createmon
+```
+
+### Step 4 — Create OSDs
+
+On each node, for each data disk: **Node → Ceph → OSD → Create OSD**, then select the disk.
+
+Via CLI:
+
+```bash
+# Create an OSD for disk /dev/sdb
+pveceph createosd /dev/sdb
+
+# Create OSD with a specific filesystem
+pveceph createosd -fstype ext4 /dev/sdb
+```
+
+Each disk becomes one OSD daemon. The disk is formatted and a new Ceph OSD starts automatically.
+
+### Step 5 — Create a Pool
+
+**Node → Ceph → Pools → Create Pool**. Set the pool name, PG count, and replication size.
+
+Via CLI:
+
+```bash
+# Create a pool named "vm-store" with 128 PGs
+pveceph createpool vm-store
+
+# Or with ceph commands directly
+ceph osd pool create vm-store 128 128
+ceph osd pool set vm-store size 3
+ceph osd pool set vm-store min_size 2
+```
+
+### Step 6 — Add Pool as Proxmox Storage
+
+**Datacenter → Storage → Add → RBD**. Enter the pool name, monitor IPs, and storage ID. This adds the Ceph pool as a Proxmox storage backend available to all cluster nodes for VM disk images.
+
+---
+
+## Pool Replication Settings
+
+| Setting | Value | Meaning |
+|---|---|---|
+| `size` | 3 | Data is written to 3 different OSDs |
+| `min_size` | 2 | Cluster accepts writes with at least 2 OSDs available |
+| `pg_num` | 128–1024 | Number of placement groups (size dependent) |
+
+With `size=3` and `min_size=2`, losing one complete node is tolerable — the cluster continues serving data from the two remaining replicas. Losing two nodes simultaneously drops the cluster below `min_size` and it stops accepting writes to protect integrity.
+
+Pool management commands:
+
+```bash
+# Set replica count
+ceph osd pool set rbd size 3
+
+# Set minimum replicas
+ceph osd pool set rbd min_size 2
+
+# Increase PG count (do in steps on live clusters)
+ceph osd pool set rbd pg_num 256
+ceph osd pool set rbd pgp_num 256
+
+# List all pools
+ceph osd lspools
+
+# Delete a pool (requires explicit confirmation flag)
+ceph osd pool delete vm-store vm-store --yes-i-really-really-mean-it
+```
+
+---
+
+## CephFS vs. RBD
+
+Proxmox supports two Ceph storage interfaces:
+
+### Ceph RBD
+
+RBD (RADOS Block Device) presents Ceph storage as raw block devices. Each VM disk is a separate RBD image — functionally equivalent to a raw disk from the VM's perspective. RBD is the recommended interface for VM disk images in Proxmox because:
+- Block-level I/O maps well to VM disk access patterns
+- Snapshots are supported natively
+- Images are thin-provisioned (objects are allocated on demand)
+
+For LXC containers, enable the **KRBD** option on the RBD storage definition. KRBD uses a kernel-level RBD driver that LXC can use for container root filesystems. Without KRBD, RBD is only accessible to QEMU/KVM VMs.
+
+### CephFS
+
+CephFS is a POSIX-compliant shared filesystem built on top of the same Ceph cluster. It requires the MDS daemon and provides a mountable directory rather than block devices. In Proxmox, CephFS is useful for:
+- ISO image storage (shared across all nodes)
+- Backup archives
+- Container templates
+
+CephFS is not recommended for VM disk images — POSIX filesystem semantics add overhead compared to direct RBD block access.
+
+---
+
+## OSD Journal
+
+Every Ceph OSD write goes to the **OSD journal** first. The journal is a small, fast-write partition where Ceph batches incoming writes before committing them to the OSD's main data area. The journal provides crash consistency — if an OSD crashes mid-write, the journal allows recovery.
+
+By default the journal is co-located with the OSD on the same disk. For better write performance, journals can be placed on separate SSDs:
+
+```bash
+# Create OSD with journal on separate SSD partition
+pveceph createosd /dev/sdb --journal /dev/sdc
+```
+
+Placing journals on enterprise SSDs with power-loss protection significantly improves write throughput for spinning-disk OSD clusters. The recommended ratio is one SSD journal device per 4–6 spinning OSD drives.
+
+**Important**: Losing an OSD's journal partition while an OSD is online causes data loss for that OSD. Always use enterprise-grade SSDs with power-loss protection for journal devices.
+
+---
+
+## Monitoring Ceph Health
+
+```bash
+# Cluster status summary
+ceph -s
+
+# Live event log
+ceph -w
+
+# Detailed health output (errors and warnings)
+ceph health detail
+
+# OSD tree (shows which OSDs are on which nodes)
+ceph osd tree
+
+# List pools with usage
+ceph df
+
+# Per-OSD statistics
+ceph osd df
+```
+
+During maintenance (disk replacement, node reboot), prevent Ceph from rebalancing data unnecessarily:
+
+```bash
+# Prevent OSDs from being marked out during maintenance
+ceph osd set noout
+
+# Perform maintenance (reboot node, replace disk, etc.)
+
+# Resume normal operation after maintenance
+ceph osd unset noout
+```
+
+Failing to set `noout` before rebooting a node causes Ceph to immediately start rebalancing data to other OSDs, generating heavy replication traffic and degrading cluster performance while the node is temporarily offline.
+
+---
+
+## Hyper-Converged vs. Dedicated Ceph Cluster
+
+**Hyper-converged (VMs and Ceph on same nodes):**
+- Fewer servers required — Proxmox nodes serve both compute and storage
+- Lower infrastructure cost
+- Simpler management — one platform for everything
+- Ceph I/O competes with VM CPU/RAM — sizing must account for both workloads
+- Suitable for small to medium clusters (3–12 nodes)
+
+**Dedicated Ceph cluster (separate storage nodes):**
+- Storage nodes are separate physical servers from Proxmox compute nodes
+- No resource competition between VM workloads and Ceph
+- Scales storage and compute independently
+- Higher infrastructure cost
+- Suitable for large deployments or workloads with demanding I/O requirements
+
+For most Proxmox deployments that are not running hundreds of VMs or extremely I/O-intensive workloads, hyper-converged Ceph on three nodes is a practical and cost-effective design.
+
+---
+
+## pveceph Command Reference
+
+| Command | Function |
+|---|---|
+| `pveceph install` | Install Ceph packages on the node |
+| `pveceph init --network <CIDR>` | Initialize Ceph configuration |
+| `pveceph createmon` | Create a monitor on the current node |
+| `pveceph createosd /dev/X` | Create an OSD for a disk |
+| `pveceph createpool <name>` | Create a new pool |
+| `pveceph destroymon <id>` | Remove a monitor |
+| `pveceph destroyosd <id>` | Remove an OSD |
+| `pveceph status` | Show cluster, monitor, OSD, and MDS status |
+| `pveceph start <service>` | Start a Ceph daemon |
+| `pveceph stop <service>` | Stop a Ceph daemon |
+| `pveceph purge` | Remove Ceph and all data from the node (destructive) |
+
+Ceph on Proxmox transforms a cluster of ordinary servers into a fault-tolerant, scale-out storage platform. When properly sized and networked, it provides the shared storage foundation that enables live migration and HA without any dedicated storage hardware.

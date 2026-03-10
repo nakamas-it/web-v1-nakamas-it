@@ -1,0 +1,131 @@
+---
+title: "Proxmox VE — High Availability"
+category: "proxmox"
+topic: "high-availability"
+summary: "Proxmox HA Manager — how it detects node failures, fencing mechanisms, HA groups, resource states, and the quorum requirement."
+tags: ["proxmox", "high-availability", "ha", "fencing", "corosync", "cluster"]
+order: 11
+draft: false
+---
+
+## What Proxmox HA Actually Does
+
+Proxmox High Availability (HA) is a software layer built on top of the Corosync cluster engine that automatically detects node failures and restarts the affected VMs and containers on a surviving node. The goal is to minimise the time a workload is offline after an unplanned hardware failure — not to eliminate it entirely.
+
+This distinction matters. **Proxmox HA does not provide zero-downtime failover** for hard failures. When a node loses power unexpectedly, the RAM state of its VMs is gone. There is no live migration happening. Instead, HA detects the failure, fences the crashed node, moves the VM configuration files to a healthy node, and restarts the VMs from scratch. The typical recovery window is **two to three minutes** from the moment the failure is detected to the moment the VM is running again on a new node.
+
+HA is managed by a software stack called **HA-manager**, which itself consists of two components running on every node in the cluster:
+
+- **CRM** (Cluster Resource Manager) — the cluster-wide coordinator. Exactly one CRM is the master at any time, elected by quorum. It tracks the state of all HA-managed resources, makes decisions about where VMs should run, and issues commands to the local resource managers.
+- **LRM** (Local Resource Manager) — runs on every node and carries out the CRM's instructions. When the CRM tells node B to start VM 105, the LRM on node B executes the start command and reports back.
+
+## The Three Hard Requirements
+
+Proxmox HA has exactly three requirements. If any one of them is missing, HA either cannot be configured or will not function reliably.
+
+**1. At least three nodes.** Quorum requires a strict majority vote. In a three-node cluster, quorum is held when at least two nodes are online and agree (2 of 3). In an eight-node cluster, five of eight must be online. A two-node cluster is fundamentally incompatible with quorum because a 1:1 tie can never produce a majority — neither node can know if the other is down or if it itself has lost network connectivity.
+
+**2. Shared storage.** When HA moves a VM to another node, it moves only the VM configuration file (a few kilobytes stored in `/etc/pve/nodes/<node>/qemu-server/<vmid>.conf`). The disk image itself stays where it is. For the destination node to start the VM, it must already have access to that disk image. This means VM disks must live on **shared storage** — Ceph RBD, NFS, or iSCSI. A VM with its disk image on local storage cannot be failed over by HA; the config will move but the new node cannot access the disk.
+
+**3. Fencing.** Fencing is the mechanism that guarantees only one node is running a given VM at any point in time. Without fencing, a scenario called split-brain becomes possible: the cluster network fails, node A thinks node B is dead and starts node B's VMs, but node B is actually still running those same VMs. Both nodes now have the same VMs running against the same shared disk — a recipe for filesystem corruption.
+
+Fencing works by ensuring the failed node is physically stopped before recovery begins. In production environments this is done with a **hardware watchdog** — a physical device (or IPMI/iDRAC remote management module) that the HA software must actively "pet" on a regular interval. If the node crashes and stops petting the watchdog, the watchdog triggers a hardware reset or power-off. The key property is that the fencing action happens regardless of whether the node can communicate with the cluster.
+
+For lab environments and nested virtualisation, Proxmox VE provides the **Linux softdog** — a software watchdog kernel module that provides the same reset behaviour without requiring physical hardware. As of Proxmox VE 5.0, a separate dedicated fencing device is no longer required; the softdog is sufficient for HA to function. The Fencing sub-menu under `Datacenter | HA` shows which watchdog is in use.
+
+One additional hardware requirement is often overlooked: **BIOS power-on after power loss**. Nodes must be configured to automatically boot when power is restored. If a fenced node is power-cycled by the watchdog but does not automatically come back up, it remains offline and reduces cluster capacity. Test this by physically unplugging a node and verifying it boots on its own when power is reconnected.
+
+## The Failover Sequence
+
+When a node becomes unresponsive, the following sequence occurs:
+
+1. The remaining cluster nodes detect loss of Corosync heartbeats from the failed node.
+2. HA waits **60 seconds** before taking action. This delay is intentional — it prevents false positives from brief network hiccups from triggering a full failover.
+3. After 60 seconds, fencing is initiated. The watchdog ensures the failed node is stopped.
+4. Once fencing is confirmed, the CRM moves the VM configuration files from the failed node's directory to the target node's directory in pmxcfs (the cluster filesystem, visible from all nodes).
+5. The LRM on the target node starts the VMs.
+
+After the failed node recovers and rejoins the cluster, its VMs are **not automatically moved back**. The cluster has no way to know whether the original node failure was temporary or if it is likely to happen again. Manual intervention is required if you want to rebalance VMs back to their original nodes. The **Nofailback** checkbox in HA Group settings documents this intent explicitly.
+
+## Configuring HA on a VM
+
+Navigate to `Datacenter | HA | Resources | Add`. Select the VM ID from the list. The options available are:
+
+- **Max. Restart** — how many times HA retries starting the VM on the target node if it fails to start. Default is one attempt.
+- **Max. Relocate** — how many times HA tries moving the VM to a different node before giving up and marking it as an error state.
+- **Request State** — the desired state for the resource: `started` (HA should keep it running), `stopped` (HA tracks it but does not auto-start), or `disabled` (HA ignores this resource temporarily without removing it from HA management).
+
+There are two requirements at the VM level for HA to be enabled: NUMA must be turned on in the VM's processor settings, and the VM must have a minimum of 1024 MB of RAM allocated.
+
+The right-click context menu on any VM in the GUI also offers a **Manage HA** shortcut that opens the same dialog.
+
+## HA Groups
+
+HA Groups define **which nodes are allowed to host a particular VM** and in what priority order. Without a group assignment, HA will pick any available node when failing over a VM. Groups allow you to express preferences like "this VM should run on node1, and if node1 is unavailable, try node2 before node3."
+
+Create a group at `Datacenter | HA | Groups | Create`. Assign nodes to the group and set a priority number for each — higher numbers mean higher preference. Assign the group to a VM in its HA resource configuration.
+
+Two important group settings:
+
+- **Restricted** — if checked and no node in the group is available, HA will stop the VM entirely rather than run it on an out-of-group node. This is useful for licensing or compliance scenarios where a VM must only run on specific hardware.
+- **Nofailback** — if checked, the VM will not automatically migrate back to a higher-priority node when that node recovers. It stays where it is until manually migrated.
+
+Group IDs are alphanumeric with underscores only and cannot be renamed after creation — choose names carefully.
+
+## HA Resource States
+
+The HA status display shows each managed resource in one of several states:
+
+| State | Meaning |
+|-------|---------|
+| **started** | VM is running and HA is actively monitoring it |
+| **stopped** | VM is stopped; HA will not auto-start it |
+| **disabled** | HA monitoring is paused for this resource |
+| **ignored** | Resource is excluded from HA management |
+| **error** | HA attempted recovery and exhausted all retries |
+| **migrate** | VM is being moved between nodes |
+| **relocate** | HA is relocating the VM due to node failure |
+| **freeze** | HA is halted for this resource (cluster in unstable state) |
+
+The **freeze** state deserves attention. When the cluster loses quorum or the HA software detects an ambiguous cluster state, it freezes all HA actions to prevent split-brain. No VMs are started, stopped, or moved until quorum is restored. This is the conservative, correct behaviour — it is better to leave VMs in an uncertain state than to risk running duplicates against shared storage.
+
+## Quorum and Corosync Tuning
+
+Quorum is managed by the Corosync engine, which runs on every node and handles cluster communication, membership tracking, and voting. The quorum configuration lives in `/etc/pve/corosync.conf` under the `quorum {}` block.
+
+```bash
+# Check cluster quorum status
+pvecm status
+
+# See vote counts and expected votes
+corosync-quorumtool
+
+# View Corosync log in real time
+journalctl -u corosync -f
+```
+
+In a three-node cluster, the expected vote count is 3 and quorum requires 2. If one node fails, the remaining two nodes still hold quorum (2 of 3) and HA can proceed. If two nodes fail, the surviving node has only 1 of 3 votes and quorum is lost — HA freezes.
+
+For a two-node cluster that absolutely cannot have a third physical node, Proxmox supports a **QDevice** — a lightweight quorum daemon that can run on a separate small VM or Raspberry Pi and provides a tie-breaking vote without running any Proxmox services. This is a valid configuration for small home labs but is not a substitute for proper three-node clusters in production.
+
+## The HA Simulator
+
+Proxmox provides a graphical HA simulator for learning and testing without risking production resources:
+
+```bash
+apt-get install pve-ha-simulator xorg xauth
+ssh root@<node> -Y
+pve-ha-simulator
+```
+
+The simulator presents a three-node, two-VM-per-node environment with clickable Power and Network buttons. You can simulate node failures and network partitions and watch the HA state machine work through its transitions in real time. This is the recommended way to understand HA behaviour before relying on it in production.
+
+## Testing HA in Production
+
+Two test approaches validate HA before you depend on it:
+
+**Graceful test:** Use the GUI or CLI to shut down a node cleanly (`systemctl poweroff` on the node). The cluster knows the node left intentionally. HA will migrate VMs off before shutdown if the node is properly drained, or will restart VMs on other nodes if shutdown is abrupt.
+
+**Hard failure test:** Pull the power cable on a node. This is the real test — the watchdog fires, fencing completes, and HA must restart the VMs from cold. Verify that the watchdog triggers a reset (check IPMI logs), that the VMs come up on the surviving nodes within the expected window, and that no filesystem corruption occurs on shared storage.
+
+Always test the hard failure case before trusting HA for critical workloads. Graceful tests do not exercise the fencing path.

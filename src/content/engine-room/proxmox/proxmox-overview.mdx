@@ -1,0 +1,126 @@
+---
+title: "Proxmox VE — Overview and Architecture"
+category: "proxmox"
+topic: "proxmox-ve"
+summary: "What Proxmox VE is — Type 1 hypervisor combining KVM and LXC on Debian Linux, its feature set, subscription tiers, and where it fits in the virtualisation landscape."
+tags: ["proxmox", "proxmox-ve", "kvm", "lxc", "hypervisor", "virtualisation"]
+order: 1
+draft: false
+---
+
+## What Is Proxmox VE?
+
+Proxmox Virtual Environment (VE) is an open-source, bare-metal Type 1 hypervisor built on top of **Debian Linux**. Rather than shipping a custom operating system kernel like some proprietary platforms, Proxmox sits directly on Debian and inherits its stability, package ecosystem, and long-term support model. This design means you are never starting from scratch with an unfamiliar environment — it is Debian underneath, with Proxmox layered on top.
+
+What makes Proxmox distinctive among Type 1 hypervisors is that it unifies **two entirely different virtualisation technologies** into a single management platform:
+
+- **KVM** (Kernel-based Virtual Machine) — full hardware virtualisation. KVM elevates the Linux kernel into a hypervisor using the `kvm` kernel module. Each KVM virtual machine gets emulated CPU, RAM, storage controllers, networking hardware, and peripherals. This full isolation means KVM can run any operating system that the host hardware can natively run: Linux, Windows, BSD, and even older systems that have no awareness they are running inside a hypervisor.
+
+- **LXC** (Linux Containers) — OS-level container virtualisation. LXC containers share the host kernel; there is no emulated hardware. The result is significantly lower overhead per workload and higher density. A host that might run 20 KVM VMs could comfortably host 100 LXC containers running the same Linux services. The trade-off is that LXC only supports Linux guests (or Linux-compatible distributions) and offers kernel-level rather than hardware-level isolation.
+
+Both are managed through the same web interface, on the same host, with unified storage, networking, backup, and firewall policies.
+
+## The Web GUI
+
+All Proxmox management is done through a built-in **HTML5 web GUI** accessible at:
+
+```
+https://<node_ip>:8006
+```
+
+No third-party management tool is needed. From day one, every operation — creating VMs, configuring storage, managing cluster membership, scheduling backups, defining firewall rules — is reachable through the browser. The GUI is organised hierarchically:
+
+- **Server View** — a tree showing Datacenter → Nodes → VMs and Containers on each node
+- **Folder View** — groups resources by type (all VMs together, all containers together)
+- **Storage View** — storage-centric, useful for managing volumes and backups
+- **Pool View** — shows resource pools used for RBAC delegation
+
+The Datacenter level manages cluster-wide settings. Each node level shows per-host resources and configuration. Each VM/Container level shows hardware, snapshots, backup history, and firewall rules for that workload.
+
+## Feature Set
+
+| Feature | Description |
+|---------|-------------|
+| **KVM** | Full hardware virtualisation; requires Intel VT-x or AMD-V CPU extensions |
+| **LXC** | OS-level container virtualisation; shares host kernel; higher density |
+| **Web GUI** | HTML5 interface at port 8006; no separate management software required |
+| **Built-in Firewall** | iptables-based; three-tier hierarchy (Datacenter, host, VM/container) |
+| **Open vSwitch** | Enterprise virtual switch; installed optionally via `apt-get install openvswitch-switch` |
+| **Storage Plugins** | Directory, iSCSI, LVM, LVM-Thin, NFS, ZFS, Ceph RBD, GlusterFS |
+| **HA Manager** | Automated VM failover on node failure; uses Corosync quorum and fencing |
+| **Backup (vzdump)** | Snapshot, suspend, and stop backup modes; LZO/gzip/pigz compression |
+| **VM Replication** | ZFS-backed incremental replication to remote nodes (pvesr) |
+| **Clustering** | Multi-node cluster with shared config via pmxcfs; live migration |
+
+## KVM vs LXC — When to Use Each
+
+The choice between KVM and LXC is driven by isolation requirements and guest OS compatibility.
+
+**Use KVM when:**
+- The guest operating system is Windows (LXC cannot run Windows)
+- You need strong hardware-level isolation between workloads
+- The workload requires kernel modules or kernel parameters specific to a particular OS version
+- You are running legacy applications that require a specific OS environment
+- The guest needs PCI passthrough (GPU, dedicated NIC, etc.)
+
+**Use LXC when:**
+- The workload is a Linux service (web server, database, DNS, etc.)
+- You need to run many instances and density matters
+- Startup time needs to be seconds, not tens of seconds
+- The workload shares sensible kernel parameters with the host
+
+LXC replaced the older OpenVZ container system starting with Proxmox VE 4.0. Unlike OpenVZ, which required a custom kernel, LXC runs on the standard Linux kernel, making it compatible with any Proxmox node without kernel modifications.
+
+## Subscription Tiers and Repositories
+
+Proxmox VE is entirely free to download and use. However, the package repositories are split across three tiers that reflect different levels of testing and support:
+
+| Repository | Package Source | Use Case |
+|-----------|---------------|---------|
+| **Enterprise** | `pve-enterprise` | Paid subscription required; packages go through the most comprehensive QA before release; correct choice for production |
+| **No-Subscription** | `pve-no-subscription` | Free; suitable for home labs and small business; slightly less tested |
+| **Test** | `pvetest` | Bleeding-edge pre-release packages; never use in production |
+
+The subscription page in the GUI (`Datacenter → Node → Subscription`) shows the current key status, server ID, socket count, last check date, and renewal date. Without a subscription key, the Enterprise repository will refuse connections with a 401 Unauthorized error, and you must switch to the No-Subscription repository.
+
+Post-installation repository configuration is done by editing `/etc/apt/sources.list.d/pve-enterprise.list` and adding (or verifying) the correct repository line, then running `apt update && apt dist-upgrade`.
+
+## Hardware Requirements
+
+For KVM virtual machines, the host CPU **must** support hardware virtualisation extensions:
+- **Intel VT-x** — required for Intel processors
+- **AMD-V** — required for AMD processors
+
+These extensions must be enabled in the system BIOS/UEFI. Without them, KVM acceleration is unavailable and VMs either will not start or will run at extremely reduced performance.
+
+LXC containers have no such requirement since they share the host kernel and do not emulate hardware.
+
+For production environments, the book *Mastering Proxmox* recommends:
+- **ECC RAM** — memory errors in a hypervisor corrupt all running VMs simultaneously; ECC detects and corrects single-bit errors
+- **At least 2 NICs** — one for management and cluster communication, one for VM traffic
+- **RAID or ZFS on OS drives** — the hypervisor host itself needs redundancy; ZFS mirror or RAID1 at minimum
+
+## Comparison with ESXi and Hyper-V
+
+| Aspect | Proxmox VE | VMware ESXi | Microsoft Hyper-V |
+|--------|-----------|-------------|-------------------|
+| Cost | Free (subscription optional) | Paid (free tier removed) | Included with Windows Server |
+| Base OS | Debian Linux | ESXi (custom) | Windows Server |
+| Container support | LXC (native) | None (separate vSphere) | None natively |
+| ZFS support | Native | None | None |
+| Ceph support | Native | None (vSAN is separate product) | None |
+| Cluster management | Built-in GUI | vCenter (separate) | SCVMM (separate) |
+| Live migration | Yes (shared storage) | vMotion (requires vCenter) | Live Migration |
+
+The key differentiator is that Proxmox ships with ZFS and Ceph integration out of the box, at no extra cost, with no separate management server required. A three-node Proxmox cluster with Ceph storage and HA failover is a complete, enterprise-capable stack built entirely from open-source components.
+
+## Key Use Cases
+
+- **Home labs and education** — full-featured platform at zero cost; run multiple VMs on a single machine
+- **Small business infrastructure** — replace aging physical servers with VMs on fewer hosts; reduce hardware costs
+- **Self-hosted cloud replacement** — run workloads locally that would otherwise go to public cloud
+- **Development and staging environments** — snapshot before testing, roll back instantly
+- **Network simulation** — run EVE-NG, GNS3, or router/switch VMs for network lab work
+- **Hybrid Ceph storage clusters** — converged compute and storage on commodity x86 hardware
+
+Proxmox VE's position in the market is as the practical open-source alternative to vSphere: production-capable, actively maintained (Proxmox Server Solutions GmbH), and without the licensing overhead that VMware's post-Broadcom acquisition pricing has introduced.

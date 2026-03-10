@@ -1,0 +1,258 @@
+---
+title: "Proxmox VE — Clustering with Corosync"
+category: "proxmox"
+topic: "clustering"
+summary: "Building a Proxmox cluster — Corosync quorum, pmxcfs, joining nodes, cluster network requirements, and managing cluster membership."
+tags: ["proxmox", "cluster", "corosync", "quorum", "pmxcfs", "high-availability"]
+order: 3
+draft: false
+---
+
+## Why Build a Cluster?
+
+A single Proxmox node works fine for isolated workloads, but a cluster unlocks the capabilities that make Proxmox VE genuinely competitive with enterprise virtualisation platforms:
+
+- **Shared configuration** — all nodes see the same VM definitions, storage pools, user accounts, and firewall rules through a replicated filesystem
+- **Live migration** — move a running KVM VM from one node to another with only milliseconds of downtime (requires shared storage)
+- **High Availability** — automatically restart VMs on a healthy node when the node they were running on fails
+- **Unified management** — manage every node, every VM, and every container from a single web GUI tab
+
+All of this is built on two core technologies: **Corosync** for cluster communication and quorum, and **pmxcfs** for replicated configuration storage.
+
+## Corosync — The Cluster Engine
+
+Corosync is the cluster messaging layer that every Proxmox node runs. It has two jobs:
+
+1. **Membership** — tracking which nodes are alive and which have failed
+2. **Quorum** — determining whether the cluster has enough healthy members to safely make decisions
+
+Corosync uses **multicast UDP** by default, sending heartbeat messages on ports 5404 and 5405. Every node multicasts its presence; nodes that stop responding are marked as failed after a configurable timeout.
+
+### Quorum
+
+Quorum is the principle that a cluster should only act when a majority of nodes agree on the cluster state. This prevents **split-brain** — the scenario where two isolated groups of nodes each believe they are the authoritative cluster and simultaneously start making conflicting changes.
+
+The quorum model is simple: a node needs **more than half the total votes** to form quorum. In a 3-node cluster, quorum requires 2 out of 3 votes. In a 5-node cluster, quorum requires 3 out of 5 votes.
+
+This is why:
+- **Two-node clusters cannot form reliable quorum** — a single node failure leaves each node with exactly 1 vote, and neither can determine it has a majority. The cluster stalls.
+- **Three nodes is the minimum for HA** — one node can fail and the remaining two (with 2 out of 3 votes) still have quorum and can continue operating and failing VMs over.
+- **Odd node counts are preferred** — 3, 5, 7. Even counts create scenarios where a single failure splits the cluster evenly.
+
+## pmxcfs — Proxmox Cluster Filesystem
+
+pmxcfs is Proxmox's custom cluster-aware filesystem. It is backed by **SQLite** internally and uses Corosync to replicate its contents to all cluster nodes in real time. It mounts at `/etc/pve/` on every node.
+
+The practical result is that every node always has an identical, up-to-date copy of:
+- All VM configuration files
+- All container configuration files
+- Storage pool definitions
+- User accounts, groups, and access control lists
+- Firewall rules
+- Cluster membership information
+
+When you create a VM on node 1, its configuration file immediately appears in `/etc/pve/nodes/node1/qemu-server/<vmid>.conf` on nodes 2 and 3 as well. When you migrate a VM, only the config file location changes — no binary data moves between nodes (assuming shared storage).
+
+**Quorum dependency:** pmxcfs requires quorum to **write**. Reads always succeed, even if the cluster has lost quorum. This means that if enough nodes fail and quorum is lost, VMs already running continue running, but no new configuration changes can be written until quorum is restored.
+
+**Key paths inside pmxcfs (`/etc/pve/`):**
+
+| Path | Contents |
+|------|---------|
+| `corosync.conf` | Corosync cluster engine configuration |
+| `storage.cfg` | Storage pool definitions (shared across all nodes) |
+| `user.cfg` | Users, groups, pools, and ACL entries |
+| `priv/shadow.cfg` | Encrypted passwords (not replicated to untrusted locations) |
+| `nodes/<name>/qemu-server/<vmid>.conf` | KVM VM configuration |
+| `lxc/<vmid>.conf` | LXC container configuration |
+| `firewall/cluster.fw` | Datacenter-level firewall rules |
+| `firewall/<vmid>.fw` | Per-VM firewall rules |
+| `.members` | Current cluster member list |
+| `.vmlist` | All VMs and their node assignments |
+
+## Network Requirements for Clustering
+
+### Multicast
+
+By default, Corosync uses **IP multicast** (UDP 5404/5405) for cluster communication. The physical network switches carrying cluster traffic must support multicast and have **IGMP snooping** enabled.
+
+IGMP snooping builds a table of which ports have registered interest in specific multicast groups. Without it, multicast packets are flooded to all ports, which causes excessive traffic on large switches. After enabling IGMP snooping, allow several hours for the snooping table to stabilise before relying on it.
+
+**Verifying multicast works:**
+
+Run `omping` simultaneously from two different nodes:
+
+```bash
+# On node 1:
+omping 192.168.10.51 192.168.10.52
+
+# On node 2 (run at the same time):
+omping 192.168.10.50 192.168.10.52
+```
+
+`omping` sends multicast test packets and reports round-trip times. If multicast is not working, `omping` shows 100% packet loss to the other nodes.
+
+### Dedicated Cluster Link
+
+While Proxmox will use whatever network interface is available for cluster traffic, best practice is to dedicate a separate low-latency link exclusively to Corosync communication. This isolates cluster heartbeats from VM traffic spikes that might otherwise delay Corosync messages, causing false node-failure detections.
+
+A direct Ethernet connection between nodes (bypassing the main switch entirely) is ideal for a small 2–3 node cluster where nodes are physically adjacent. For geographically distributed nodes, Corosync rings can be routed through VPN tunnels.
+
+## Creating a Cluster
+
+All cluster operations happen from the GUI at **Datacenter → Cluster**, or via the `pvecm` CLI tool.
+
+### Step 1: Create the Cluster (First Node Only)
+
+From the first node's GUI, go to **Datacenter → Cluster → Create Cluster**. Enter a cluster name. The name becomes part of the Corosync multicast address calculation, so choose it carefully — changing the cluster name later requires dissolving and rebuilding the cluster.
+
+Via CLI:
+```bash
+pvecm create my-cluster
+```
+
+After creation, the GUI will show the cluster as a single-node cluster with quorum status 1/1.
+
+### Step 2: Get the Join Information
+
+From the first node's GUI, go to **Datacenter → Cluster → Join Information**. This displays a join token — a base64-encoded block containing the cluster name, node IPs, and a cryptographic token. Copy this entire block.
+
+### Step 3: Join Additional Nodes
+
+On each node you want to add to the cluster, go to **Datacenter → Cluster → Join Cluster**. Paste the join information block and enter the root password of the first node (needed to authenticate the join operation).
+
+Via CLI (on the node being joined):
+```bash
+pvecm add 192.168.10.50    # IP of an existing cluster member
+```
+
+The joining node downloads the cluster configuration from the existing node, starts participating in Corosync quorum, and synchronises pmxcfs. Within seconds, all VMs and configuration from the existing nodes appear in the joining node's GUI.
+
+### Verifying Cluster Status
+
+```bash
+pvecm status    # Cluster quorum and votes
+pvecm nodes     # List cluster nodes with their IDs
+```
+
+Example healthy output from `pvecm status`:
+```
+Cluster information
+-------------------
+Name:             my-cluster
+Config Version:   3
+Transport:        knet
+Secure auth:      on
+
+Quorum information
+------------------
+Date:             Mon Mar  9 10:00:00 2026
+Quorum provider:  corosync_votequorum
+Nodes:            3
+Node state:       Established
+Quorum:           3 (quorate)
+```
+
+## Corosync Configuration File
+
+The Corosync configuration lives at `/etc/pve/corosync.conf` (inside pmxcfs, so replicated to all nodes). It has four main sections:
+
+```
+logging { }     — log facility and priority
+nodelist { }    — IP addresses of all cluster member nodes
+quorum { }      — quorum provider settings
+totem { }       — cluster transport parameters
+```
+
+A typical `totem` block for a 3-node cluster:
+```
+totem {
+  version: 2
+  cluster_name: my-cluster
+  config_version: 3
+  ip_version: ipv4
+  secauth: on
+  crypto_cipher: aes256
+  crypto_hash: sha1
+}
+```
+
+- `secauth: on` enables authentication and encryption of all Corosync messages — do not disable this in any environment where you do not fully control the network
+- `crypto_cipher: aes256` — AES-256 encryption for cluster messages
+- `crypto_hash: sha1` — HMAC-SHA1 for message authentication
+- `config_version` increments every time the configuration changes
+
+The `interface` block inside `totem` specifies the cluster network:
+```
+interface {
+  bindnetaddr: 172.16.2.71    # This node's cluster NIC IP
+  ringnumber: 0               # 0 for first ring
+  mcastaddr: 224.1.1.1        # Multicast address
+  mcastport: 5405             # Receiving port (sending = 5404)
+}
+```
+
+The multicast address is automatically derived from the cluster name if not specified manually.
+
+## Redundant Rings (RRP)
+
+Corosync supports **Redundant Ring Protocol (RRP)** — running cluster communication over two separate network paths simultaneously. If one path fails, Corosync fails over to the second without losing quorum.
+
+Configure RRP by adding a second `interface` block with `ringnumber: 1`:
+```
+interface {
+  ringnumber: 0
+  bindnetaddr: 172.16.2.71   # First ring NIC
+  mcastaddr: 224.1.1.1
+  mcastport: 5405
+}
+interface {
+  ringnumber: 1
+  bindnetaddr: 10.0.10.71    # Second ring NIC
+  mcastaddr: 225.1.1.1
+  mcastport: 5407
+}
+```
+
+Set `rrp_mode: passive` in the `totem` block (passive means both rings are active simultaneously; the cluster fails over automatically if one ring fails, without requiring manual intervention).
+
+RRP is especially useful for geographically distributed nodes where the two rings might travel through different paths, including VPN tunnels.
+
+## Managing Cluster Membership
+
+### Removing a Node
+
+Before removing a node from the cluster:
+1. Migrate or stop all VMs running on that node
+2. From another node in the cluster, run:
+
+```bash
+pvecm delnode <node_name>
+```
+
+If the node being removed is still online, run `pvecm delnode` from a different node. If the node is completely dead and cannot be brought online, run the command from a node that does have quorum.
+
+After removal, the deleted node's directory (`/etc/pve/nodes/<node_name>/`) remains in pmxcfs as an artifact. You can safely remove it manually if needed.
+
+### Emergency Quorum Override
+
+If multiple nodes fail simultaneously and quorum is lost, the surviving node(s) cannot write to pmxcfs. In an emergency where you are certain the failed nodes are genuinely offline (not just temporarily partitioned), you can force quorum on the surviving node:
+
+```bash
+pvecm expected 1
+```
+
+This tells Corosync to treat 1 vote as sufficient for quorum on this node. Use with extreme caution — if the "failed" nodes are actually running and isolated by a network partition, they will also believe they have quorum, resulting in split-brain where two nodes simultaneously manage the same VMs.
+
+After restoring the failed nodes and network connectivity, expected votes reset automatically as nodes rejoin.
+
+## Cluster Log Locations
+
+| Log | Location | Contents |
+|-----|---------|---------|
+| Corosync | `journalctl -u corosync` | Membership events, ring failures, quorum changes |
+| pmxcfs | `journalctl -u pve-cluster` | Config sync events, quorum state changes |
+| Cluster auth | `/etc/pve/.clusterlog` | Authentication events |
+| Task history | GUI → Node → Task History | All GUI-initiated operations |
+
+When troubleshooting a node that will not join a cluster, the Corosync journal is the first place to look. Common issues are multicast not reaching the node (switch configuration) or firewalls blocking UDP 5404/5405.

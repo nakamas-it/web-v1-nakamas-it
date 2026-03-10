@@ -1,0 +1,73 @@
+---
+title: "vSphere Lifecycle Manager — Patching and Upgrading ESXi Hosts"
+category: "vmware"
+topic: "vsphere-lifecycle-manager"
+summary: "How vSphere Lifecycle Manager manages the software lifecycle of ESXi hosts — offering both the legacy baseline-based approach for patching individual updates and the modern image-based approach that treats the entire host software stack as a single versioned image for consistent cluster-wide deployment."
+tags: ["vmware", "vlcm", "patching", "lifecycle", "vcpdcv"]
+order: 16
+draft: false
+---
+
+## Overview
+
+Keeping ESXi hosts patched and up to date is one of the more operationally intensive responsibilities in a vSphere environment. VMware addresses this through vSphere Lifecycle Manager (vLCM), which replaced the older vSphere Update Manager (VUM) as the primary tool for managing the software lifecycle of ESXi hosts. vLCM is integrated directly into vCenter Server and is accessible from the vSphere Client — there is no separate server to deploy or manage.
+
+The key architectural decision vLCM introduces is the distinction between two fundamentally different management modes, and the choice is made at the cluster level: a given cluster uses either baseline-based management or image-based management, never both simultaneously. The mode choice has significant implications for how uniformly software is applied across hosts, whether firmware updates are possible, and how much flexibility administrators have to maintain heterogeneous patch levels within the same cluster.
+
+## Baseline-Based Management
+
+Baseline-based management is the legacy model, carried forward from VUM, and is appropriate for environments that need to maintain compatibility with older tooling or prefer to patch incrementally rather than converging the entire software stack to a single defined state.
+
+A baseline is a container that holds patches, extensions, or upgrade packages. Two baseline types exist for patches:
+
+- **Fixed baselines** contain a specific, named set of patches. The contents do not change over time. This is useful when you need to pin a cluster to a known patch level for compliance or testing purposes.
+- **Dynamic baselines** define criteria rather than a fixed list — for example, "all security patches released by VMware for ESXi 8.x." The contents automatically update as VMware releases new patches into the depot, so hosts will always be scanned against the latest qualifying patches without administrator intervention.
+
+The remediation workflow follows a consistent pattern: attach the baseline to a host or cluster object, run a scan to assess which hosts are non-compliant, review the compliance report, and then remediate. Remediation requires the host to enter maintenance mode, which evacuates its running VMs — DRS handles this automatically in a DRS-enabled cluster. Hosts are remediated one at a time in a rolling fashion to maintain cluster availability.
+
+Baseline-based management allows hosts in the same cluster to carry different software versions. This flexibility can be a liability in environments where consistency matters — it becomes possible for one host to have a patch that another does not, creating subtle differences in behaviour that are difficult to troubleshoot.
+
+## Image-Based Management
+
+Image-based management is the modern approach introduced in vSphere 7.0 and is the recommended mode for new clusters. Instead of attaching individual patch baselines, the administrator defines a single desired software image for the entire cluster. Every host in the cluster is expected to run that exact image — same ESXi version, same vendor add-ons, same third-party components.
+
+An image is composed of three layers:
+
+1. **ESXi base image**: The core ESXi version obtained from VMware's software depot (online or local).
+2. **Vendor add-ons**: VMware-provided or OEM-specific packages that extend the base image — for example, drivers or management agents from Dell, HPE, or Cisco that are bundled as validated add-ons.
+3. **Firmware and drivers (hardware support manager)**: Firmware updates for physical components like NICs, HBAs, and storage controllers. This layer requires a hardware support manager plug-in provided by the server vendor — for example, Dell's OpenManage Integration for VMware vCenter (OMIVV) or HPE's iLO Amplifier Pack. Critically, firmware updates are only available in image-based mode — baseline-based clusters cannot use vLCM for firmware management.
+
+Before applying an image, the hardware compatibility check validates the proposed image against the VMware Hardware Compatibility List (HCL) for the hosts in the cluster. This pre-flight catches driver or firmware combinations that are unsupported before any changes are made to production hosts.
+
+## Remediation Process
+
+Regardless of mode, the remediation sequence is the same: scan, review, remediate.
+
+1. **Scan**: vLCM assesses each host's current software state against the desired baseline or image and reports compliance status — Compliant, Non-Compliant, or Unknown.
+2. **Review compliance**: The compliance report shows exactly which components are missing, outdated, or conflicting.
+3. **Enter maintenance mode**: The host must be in maintenance mode before updates can be applied. In a DRS Fully Automated cluster, vMotion migrates running VMs to other hosts automatically when maintenance mode is initiated.
+4. **Apply updates**: vLCM pushes the patches or image to the host and reboots as required.
+5. **Exit maintenance mode**: The host rejoins the cluster and DRS redistributes VMs.
+
+In a cluster, hosts are remediated in a rolling sequence — one at a time — so the cluster continues running workloads throughout the operation. For clusters without HA or DRS, parallel remediation is possible but requires that the administrator manually migrate VMs beforehand.
+
+## Upgrade Workflow
+
+When upgrading from one ESXi major version to another, the sequencing rule is firm: **vCenter must be upgraded before ESXi hosts**. A newer vCenter can manage older ESXi hosts, but an older vCenter cannot manage newer ESXi hosts. This means the upgrade window has a clear first step, and it is always vCenter.
+
+After vCenter is upgraded, ESXi hosts can be upgraded using vLCM by including the new ESXi base image in the desired image. Guest virtual machines do not need to be upgraded and continue running through the host upgrade process without modification.
+
+The **vSphere Update Planner** provides a pre-upgrade assessment report. It identifies interoperability issues — such as third-party VIBs that are incompatible with the target ESXi version, virtual hardware versions that may behave differently, or hardware components not on the HCL for the new release. Running Update Planner before beginning an upgrade cycle is the recommended way to surface problems when they are still cheap to fix.
+
+## Software Depots
+
+vLCM pulls patches and images from software depots. Two depot types are available:
+
+- **VMware online depot**: The default; requires internet access from vCenter. VMware's online depot provides ESXi image profiles, patches, and add-ons automatically as they are published.
+- **Local depot**: For air-gapped environments without internet access. An administrator downloads bundles from VMware Customer Connect and hosts them on an internal HTTP or HTTPS server. vLCM is configured to point at the local server instead of the internet.
+
+For image-based management, vendor add-ons from hardware partners also need to be imported from their respective depots or downloaded manually and imported into vLCM's local depot.
+
+## Summary
+
+vSphere Lifecycle Manager centralises ESXi host software management under a single workflow within vCenter. The choice between baseline-based and image-based management determines how much consistency is enforced across a cluster: baseline mode allows incremental, flexible patching at the cost of potential drift between hosts; image mode enforces a single defined state across the entire cluster and is the only mode that supports firmware lifecycle management through hardware vendor plug-ins. For most new deployments, image-based management is the preferred approach because cluster-wide uniformity simplifies troubleshooting and reduces the surface area for configuration drift.

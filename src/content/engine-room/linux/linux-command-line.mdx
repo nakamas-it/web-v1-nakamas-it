@@ -1,0 +1,124 @@
+---
+title: "The Linux Command Line — Bash, History, and Keyboard Shortcuts"
+category: "linux"
+topic: "linux-command-line"
+summary: "How to work efficiently at the Linux command line — understanding Bash shell command syntax, navigating and reusing command history, and using keyboard shortcuts that save time when typing long commands, editing mistakes, or searching for previous commands."
+tags: ["linux", "bash", "shell", "command-line", "rh124"]
+order: 2
+draft: false
+---
+
+## Overview
+
+The shell is the primary interface between an administrator and a Linux system. While graphical tools exist for specific tasks, the command line offers precision, repeatability, and the ability to combine tools in ways no GUI anticipates. Bash — the Bourne Again Shell — is the default interactive shell on RHEL and the one you will spend the most time in. Understanding how Bash processes input, how to navigate history without retyping, and which keyboard shortcuts accelerate common operations separates slow, error-prone sessions from efficient ones.
+
+---
+
+## Bash Shell Basics
+
+When you open a terminal on RHEL, Bash presents a prompt. The default prompt shows your username, the hostname, and your current working directory:
+
+```
+student@servera:~$
+```
+
+The `$` at the end signals a regular user session. The root prompt ends in `#`. Everything you type before pressing Enter is a **command line**, and Bash parses it according to a consistent structure:
+
+```
+command  [options]  [arguments]
+```
+
+Options modify how a command behaves. Short options are prefixed with a single dash (`-l`, `-a`, `-h`) and can usually be combined (`-lh`). Long options use two dashes (`--human-readable`). Arguments are the targets the command acts on — files, directories, usernames. Bash processes metacharacters that control flow between commands:
+
+| Metacharacter | Meaning |
+|---|---|
+| `;` | Run commands sequentially regardless of exit status |
+| `&&` | Run second command only if first succeeds (exit 0) |
+| `\|\|` | Run second command only if first fails (exit non-zero) |
+| `\|` | Pipe stdout of left command to stdin of right command |
+
+---
+
+## Command Types
+
+Not every command on RHEL is a file on disk. Bash distinguishes two types:
+
+**External commands** are binary executables stored in directories listed in `$PATH`. When you type `ls`, Bash searches each directory in `$PATH` in order until it finds `/usr/bin/ls` and executes it. `which ls` shows which file would be run.
+
+**Built-in commands** are part of the Bash interpreter itself — `cd`, `echo`, `pwd`, `export`, `alias`, `source`, and others. They run faster than external commands because no new process is forked. `type command` reports whether a command is a built-in, an external file, or an alias.
+
+---
+
+## Essential Commands
+
+| Command | What It Does |
+|---|---|
+| `whoami` | Print the current username |
+| `hostname` | Print the system's hostname |
+| `date` | Display the current date and time; `date +%Y-%m-%d` for custom format |
+| `passwd` | Change your own password; `passwd username` changes another user's (root only) |
+| `id` | Show current UID, primary GID, and all supplementary group memberships |
+| `uname -r` | Print the running kernel version |
+| `uptime` | Show how long the system has been running, plus the 1/5/15-minute load averages |
+
+These commands require no arguments and produce immediate, useful output — they are diagnostic first steps when logging into an unfamiliar system.
+
+---
+
+## Command History
+
+Bash records every command you run in an in-memory history list and writes it to `~/.bash_history` when the session ends. The number of entries kept in memory is controlled by `HISTSIZE`; the number written to disk is controlled by `HISTFILESIZE`. On RHEL the defaults are 1000 in memory and 2000 on disk.
+
+| History Syntax | Effect |
+|---|---|
+| `history` | Print the numbered history list |
+| `!N` | Re-run command number N from history |
+| `!!` | Re-run the immediately previous command |
+| `!string` | Re-run the most recent command that begins with `string` |
+| `!string:p` | Print (but do not run) the command that would be recalled by `!string` |
+| `history -c` | Clear the in-memory history list |
+
+The most powerful history tool is **reverse incremental search**: press `Ctrl+R`, then start typing any substring of a previous command. Bash displays the most recent match and updates it as you type. Press `Ctrl+R` again to cycle to the next earlier match. Press Enter to execute, or `Esc` to edit the recalled command before running it.
+
+---
+
+## Keyboard Shortcuts
+
+The Bash readline library provides a set of keyboard shortcuts for editing the current command line and controlling the terminal session. These are worth memorising because they eliminate the need to retype long commands when a small change is needed.
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+A` | Move cursor to the beginning of the line |
+| `Ctrl+E` | Move cursor to the end of the line |
+| `Alt+B` | Move cursor back one word |
+| `Alt+F` | Move cursor forward one word |
+| `Ctrl+U` | Delete everything from the cursor to the beginning of the line |
+| `Ctrl+K` | Delete everything from the cursor to the end of the line |
+| `Ctrl+W` | Delete the word immediately before the cursor |
+| `Ctrl+Y` | Paste (yank) text that was previously deleted with Ctrl+U, Ctrl+K, or Ctrl+W |
+| `Ctrl+C` | Send SIGINT to the foreground process — interrupt and terminate it |
+| `Ctrl+D` | Send EOF — exits the current shell if the line is empty |
+| `Ctrl+Z` | Suspend the foreground process (send SIGTSTP); resume with `fg` or `bg` |
+| `Ctrl+L` | Clear the screen, equivalent to running `clear` |
+| `Ctrl+R` | Enter reverse incremental history search |
+| `Ctrl+X Ctrl+E` | Open the current command line in `$EDITOR` for multi-line editing |
+
+The delete-and-yank shortcuts (`Ctrl+U` / `Ctrl+K` / `Ctrl+W` paired with `Ctrl+Y`) function as a simple cut-and-paste buffer. This is useful when you need to move an argument from one part of a command to another without retyping it.
+
+---
+
+## Tab Completion
+
+Bash can complete commands, file paths, and variable names automatically. Press `Tab` once to complete a unique match instantly. If multiple completions are possible, a single `Tab` does nothing — press `Tab` a second time to list all candidates. This works for:
+
+- **Commands**: typing `sys` then Tab Tab lists all commands starting with `sys`
+- **File paths**: typing `/etc/sys` then Tab lists matching files and directories under `/etc/`
+- **Variables**: typing `$HI` then Tab expands to `$HISTSIZE` if that is the only match
+
+Some tools extend Tab completion to cover their own options and subcommands. `dnf install` followed by Tab Tab, for example, can suggest package names if the completion package for dnf is installed.
+
+---
+
+## Summary
+
+Bash processes commands as a `command options arguments` structure, distinguishes built-in commands from external binaries, and records every command in a history list accessible via `history`, `!N`, and `Ctrl+R` incremental search. The readline keyboard shortcuts — particularly the cursor-movement pairs (`Ctrl+A`/`Ctrl+E`, `Alt+B`/`Alt+F`) and the delete-and-yank pairs (`Ctrl+U`/`Ctrl+K` with `Ctrl+Y`) — eliminate most of the friction in working with long command lines. Tab completion reduces both typing time and the risk of path typos. These habits compound across every session.

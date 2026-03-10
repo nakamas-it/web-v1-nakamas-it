@@ -1,0 +1,229 @@
+---
+title: "GCP — BigQuery"
+category: "google"
+topic: "bigquery"
+summary: "GCP's serverless data warehouse — how BigQuery stores and queries petabyte-scale data, its pricing model, and integration with the analytics ecosystem."
+tags: ["gcp", "google-cloud", "bigquery", "data-warehouse", "analytics", "sql"]
+order: 9
+draft: false
+---
+
+## Overview
+
+BigQuery is Google's serverless, petabyte-scale data warehouse. It has been a foundational GCP service since 2010 and represents one of Google's most differentiated offerings — the combination of enormous scale, standard SQL, and a pay-per-query pricing model with no infrastructure to manage set it apart from traditional data warehouse products that require cluster provisioning, tuning, and capacity planning.
+
+The defining characteristic of BigQuery is the **separation of compute and storage**. Your data sits in Google's Colossus distributed file system, and query compute (Dremel) is provisioned on-demand when a query runs. You do not pre-allocate a cluster. You write a SQL query, BigQuery allocates thousands of workers to execute it in parallel across your data, returns the result, and deallocates. From your perspective, the query runs — you don't manage the infrastructure that ran it.
+
+---
+
+## Architecture
+
+### Storage — Capacitor and Colossus
+
+BigQuery stores data in **Capacitor**, Google's proprietary columnar format, on top of **Colossus**, Google's distributed filesystem. Columnar storage means that all values for a single column are stored together, rather than row-by-row. This has a profound effect on analytics queries:
+
+- A query that scans `SELECT revenue FROM orders WHERE year = 2024` reads only the `revenue` and `year` columns from disk — not the hundreds of other columns in the table
+- Columnar data compresses extremely well because adjacent values in the same column tend to be similar (e.g., a country code column in a US-only dataset is almost all "US")
+- Read amplification is minimized — the I/O cost of a query scales with the number of columns selected, not the total row width
+
+BigQuery does **not** use indexes. There is no B-tree, no hash index, no way to look up a specific row by a key in O(log n) time. Every query is a full column scan, but on petabyte-scale data distributed across thousands of machines, that scan completes in seconds. The combination of columnar storage and massive parallelism is what makes this work.
+
+### Compute — Dremel
+
+**Dremel** is Google's distributed SQL execution engine, developed internally in 2006 and described in a landmark 2010 paper. Query execution proceeds through a tree of servers:
+
+1. A **root server** receives the query, parses and optimizes it, and distributes work
+2. **Intermediate servers** (mixers) aggregate intermediate results
+3. **Leaf servers** read column data from Colossus and perform filter, projection, and aggregation operations locally
+
+Thousands of leaf servers can work in parallel on a single BigQuery query, each reading a different shard of the data. Results bubble up the tree, are aggregated at each level, and the final result is returned to the root. A query that would take hours on a single machine completes in seconds when distributed this way.
+
+---
+
+## Datasets, Tables, and Data Organization
+
+### Hierarchy
+
+BigQuery organises data in a three-level hierarchy: **Project → Dataset → Table**. A dataset is the logical container for related tables — similar to a database in traditional RDBMS. Datasets have a location (region or multi-region) that determines where their data is stored and cannot be changed after creation.
+
+### Table Types
+
+| Table Type | Description | Use Case |
+|------------|-------------|----------|
+| **Native (standard)** | Data stored in BigQuery's Capacitor format | Default for most workloads |
+| **External** | Metadata in BigQuery; data in Cloud Storage, Google Drive, or Bigtable | Query data in place without loading; useful for ad-hoc queries on existing data |
+| **Partitioned** | Table divided into segments by a partition column; each segment stored separately | Large tables queried by date/time or numeric range; dramatically reduces scan cost |
+| **Clustered** | Data within partitions physically sorted by one or more columns | High-cardinality filter/group-by queries; further reduces scan cost |
+
+### Partitioning
+
+Partitioning divides a table's data into separate physical segments. When a query filters on the partition column, BigQuery reads only the relevant partitions and skips the rest — this is called **partition pruning** and is the primary cost-reduction mechanism for large tables.
+
+Three partitioning strategies:
+- **Ingestion-time partitioning**: Automatically partitions by the time data was loaded; `_PARTITIONTIME` pseudo-column
+- **Column partitioning by DATE/TIMESTAMP**: Partition on a date/timestamp column in your data
+- **Integer range partitioning**: Partition on an integer column with defined start, end, and interval
+
+Best practice: every large table (> 1 GB) that is consistently filtered by time should be partitioned by a date column. Partition pruning can reduce scan cost — and therefore query cost — by orders of magnitude.
+
+### Clustering
+
+Clustering sorts data within each partition by one or more columns (up to four). Unlike a traditional index, clustering does not allow O(log n) lookups, but it does ensure that rows with similar values are stored contiguously, allowing BigQuery to skip entire block ranges when filters match cluster columns.
+
+Partitioning and clustering work best together: partition to eliminate whole partitions from the scan, cluster to eliminate blocks within the remaining partitions. A partitioned + clustered table on `(date, customer_id, product_category)` is far cheaper to query for `WHERE date = '2024-01-01' AND customer_id = '12345'` than a raw unpartitioned table.
+
+---
+
+## Querying
+
+BigQuery supports **Standard SQL** (ANSI 2011 compliant with extensions) as the default dialect. A legacy SQL dialect exists for backwards compatibility with early BigQuery users but should not be used for new queries.
+
+Queries are submitted via:
+- BigQuery Console (web UI) with an interactive query editor and result viewer
+- `bq query` CLI tool
+- BigQuery API (REST or gRPC)
+- Client libraries (Python, Java, Go, Node.js, etc.)
+- Connectors from BI tools (Looker, Data Studio/Looker Studio, Tableau, etc.)
+
+Query results up to 10 GB are stored in a temporary table (24-hour retention) for free; larger results must be written to a destination table.
+
+---
+
+## Pricing Models
+
+### On-Demand Pricing
+
+You pay per terabyte of data scanned by each query. Pricing is approximately $5–6 per TB scanned (varies by region). The first 1 TB per month is free.
+
+Implications of on-demand pricing:
+- `SELECT *` from a 1 TB table costs money every time it runs; `SELECT id, name` from the same table costs a fraction
+- Partitioning and clustering directly translate to cost savings
+- Poorly written queries (full table scans on large unpartitioned tables, `SELECT *`) generate unexpectedly large bills
+
+### Flat-Rate / Capacity Pricing (Reservations)
+
+Instead of paying per byte scanned, you can purchase **slots** — units of BigQuery processing capacity. 1 slot ≈ 1 vCPU with associated memory. Queries from your project consume slots from your reservation; you are not charged per byte.
+
+Capacity pricing options:
+- **Standard reservations**: Commit to a baseline slot count; auto-scale above the baseline using on-demand capacity
+- **Enterprise reservations**: Committed monthly or annual baseline with predictable billing
+- **Flex Slots**: Short-commitment slot purchases (60-second minimum) for burst capacity
+
+Flat-rate pricing makes sense when your BigQuery spend exceeds a certain threshold on on-demand pricing, or when you run many queries and want predictable billing.
+
+**Slot reservations** allow allocation of slot capacity to specific projects, folders, or the entire organisation. This prevents one team's expensive analytical queries from consuming all available capacity and impacting others.
+
+---
+
+## Views and Materialized Views
+
+### Views
+
+A BigQuery **view** is a saved SQL query that acts as a virtual table. When you query a view, BigQuery executes the underlying query and returns results. Views do not store data — they are purely a query abstraction layer. They add no performance benefit (the underlying query runs on every access) but provide reusable query logic, simplified access for consumers, and column-level abstraction.
+
+### Authorized Views
+
+An **authorized view** is a view that has been granted access to the underlying table directly, rather than requiring the view's caller to have access to the underlying table. This enables data sharing without exposing raw table data:
+
+- Table `orders_raw` contains sensitive customer PII
+- View `orders_summary` exposes only aggregated metrics
+- Authorize the view on the source dataset → users can query the view and see only the summary, never the raw data
+- The view caller does not need `roles/bigquery.dataViewer` on `orders_raw` — only on the view's dataset
+
+Authorized views are the standard pattern for row-level and column-level access control in BigQuery without copying data.
+
+### Materialized Views
+
+A **materialized view** pre-computes and stores the result of a query. Unlike a regular view, a materialized view physically stores data — queries against it read pre-computed results rather than executing the full underlying query. BigQuery automatically keeps materialized views synchronized when the source tables are updated (within 5 minutes).
+
+Materialized views improve query performance and reduce costs for expensive aggregate queries that are run repeatedly on slowly changing data.
+
+---
+
+## BigQuery ML
+
+**BigQuery ML** (BQML) allows you to create, train, evaluate, and use machine learning models using standard SQL syntax directly within BigQuery, without exporting data to Vertex AI or any other ML platform.
+
+Supported model types:
+- Linear regression and logistic regression
+- K-means clustering
+- Matrix factorization (recommendation systems)
+- Time series forecasting (ARIMA+)
+- XGBoost and random forest
+- Deep Neural Networks (DNN)
+- Import and serve TensorFlow SavedModels and AutoML models
+
+The workflow: `CREATE MODEL → EVALUATE → PREDICT` — all in SQL. This brings ML to analysts who know SQL but not Python, and eliminates the data movement overhead of training on exported data.
+
+---
+
+## BigQuery Omni
+
+**BigQuery Omni** extends BigQuery's query engine to analyse data stored in **AWS S3** or **Azure Blob Storage** without moving the data to GCP. Queries run on Google-managed compute deployed in AWS or Azure regions (using Anthos under the hood), and results are returned to BigQuery.
+
+Use cases: organisations with data in multiple clouds who want unified analytics without data movement costs; cross-cloud BI; regulatory requirements that prohibit data movement between clouds.
+
+---
+
+## Security Features
+
+### Row-Level Security
+
+BigQuery **row-level access policies** restrict which rows a user can see when querying a table, based on their Google identity. A row access policy defines a filter expression and the principals it applies to:
+
+```sql
+CREATE ROW ACCESS POLICY europe_users_only
+ON dataset.orders
+GRANT TO ("group:europe-team@example.com")
+FILTER USING (region = 'EU');
+```
+
+Users in `europe-team` see only rows where `region = 'EU'`. Other users see all rows (or no rows, depending on additional policies). Row-level policies are enforced transparently — queries against the table automatically apply the filter.
+
+### Column-Level Security
+
+BigQuery column-level security is implemented via **policy tags** (from Data Catalog). Sensitive columns (SSN, credit card numbers, dates of birth) are tagged with a policy tag. Access to columns with policy tags is restricted to principals with the `roles/datacatalog.categoryFineGrainedReader` role for that specific tag.
+
+Users without the appropriate policy tag access see the column as `NULL` or receive an error. Column masking rules can also be applied to show a redacted version (e.g., `XXXXX`) instead of blocking access entirely.
+
+### BigQuery Data Transfer Service
+
+The **Data Transfer Service** automates recurring data ingestion into BigQuery from:
+- Google services: Google Ads, YouTube, Campaign Manager, Google Play, Search Ads 360
+- Third-party SaaS: Salesforce, Facebook Ads, etc. (via partner connectors)
+- Other data warehouses: Amazon Redshift, Teradata, Amazon S3
+
+Transfers run on a schedule and can backfill historical data. This eliminates the need to build and maintain custom ETL pipelines for common data source integrations.
+
+---
+
+## The Storage Write API
+
+The **BigQuery Storage Write API** is the recommended method for high-throughput data ingestion into BigQuery. It supports two consistency models:
+
+- **At-least-once mode**: High throughput; duplicates possible; simpler to implement
+- **Exactly-once mode**: Stream data in ordered rows with transaction semantics; commit only after all rows are verified; no duplicates
+
+The Storage Write API replaces the older streaming inserts API for most use cases. Streaming inserts charged per row and had limitations on deduplication; the Storage Write API offers higher throughput, lower cost, and exactly-once semantics when needed.
+
+For batch loads (not streaming), **BigQuery Load Jobs** are free — you pay only for storage, not for loading data from Cloud Storage. Load jobs support CSV, JSON, Avro, Parquet, and ORC formats.
+
+---
+
+## Cost Management Best Practices
+
+BigQuery costs can scale quickly with careless query patterns. The most impactful habits:
+
+1. **Always specify columns**: `SELECT id, revenue` instead of `SELECT *`. BigQuery scans the columns you request, not the full row.
+
+2. **Partition all large tables**: Any table consistently filtered by date or a numeric range should be partitioned. Partition pruning is free savings — it reduces bytes scanned proportionally.
+
+3. **Cluster after partitioning**: Add clustering on high-cardinality filter columns for further scan reduction.
+
+4. **Preview costs before running**: BigQuery's UI shows estimated bytes scanned before you run a query. Use `--dry_run` in the `bq` CLI to get the estimate programmatically.
+
+5. **Use materialized views for repeated aggregations**: Pre-compute expensive aggregates rather than re-scanning TB of data repeatedly.
+
+6. **Set project-level quotas**: Apply daily query limits per user or per project in BigQuery settings to prevent runaway queries.
+
+7. **Consider flat-rate pricing**: At high enough query volume, committing to slots is cheaper and more predictable than on-demand per-byte billing.

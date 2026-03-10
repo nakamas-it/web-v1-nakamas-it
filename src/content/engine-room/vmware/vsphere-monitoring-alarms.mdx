@@ -1,0 +1,129 @@
+---
+title: "vSphere Monitoring — Alarms, Performance Charts, and esxtop"
+category: "vmware"
+topic: "vsphere-monitoring"
+summary: "How vSphere surfaces health and performance data — predefined alarms that trigger on host and VM conditions with configurable notifications, performance charts that visualise historical CPU, memory, network, and disk metrics, and esxtop for real-time deep-dive diagnostics directly on the ESXi host."
+tags: ["vmware", "monitoring", "alarms", "performance", "esxtop", "vcpdcv"]
+order: 18
+draft: false
+---
+
+## Overview
+
+A vSphere environment running dozens of hosts and hundreds of virtual machines generates a continuous stream of operational data: CPU utilisation, memory pressure, storage latency, network throughput, and hardware health signals. Without structured monitoring, problems surface only when users report an impact — by which point the window for preventive action has already closed.
+
+vSphere provides three complementary visibility tools that operate at different timescales and levels of detail. Alarms watch for threshold breaches and trigger notifications or actions automatically. Performance charts in the vSphere Client provide a graphical view of historical metrics over configurable time ranges. esxtop provides a real-time, per-second breakdown of every resource consumed on a specific ESXi host, at a granularity that no other tool in the stack matches. Understanding when to use each tool, and how to interpret the metrics they surface, is the practical skill set for diagnosing performance problems in a vSphere environment.
+
+## vSphere Alarms
+
+Alarms are monitoring rules defined at any inventory object — a datacenter, cluster, host, VM, or datastore — that watch for a condition and take action when it occurs. vCenter ships with a set of predefined alarms covering the most common operational conditions. Administrators can create custom alarms to extend coverage to any metric, event, or state change that the predefined set does not cover.
+
+Every alarm has three components: a **trigger**, a **state**, and one or more **actions**.
+
+### Trigger Types
+
+- **Metric threshold triggers**: Activate when a metric crosses a configured value for a defined period. For example: host CPU usage exceeds 80% for five consecutive minutes, or a datastore's free space drops below 10%. The duration requirement prevents alarms from firing on brief spikes that resolve on their own.
+- **State change triggers**: Activate when an inventory object enters or leaves a specific state — for example, a host entering the Disconnected state, or a VM being suspended.
+- **Event-based triggers**: Activate when a specific event appears in the vCenter event stream — for example, a VM migration failing, or a vSAN disk entering a degraded state.
+
+Alarm states follow a three-level model: **Normal** (green), **Warning** (yellow), and **Alert** (red). Each transition between levels is configurable independently, so an alarm can warn at 75% CPU and escalate to alert at 90%, for instance.
+
+### Alarm Actions
+
+When an alarm transitions to Warning or Alert, configured actions fire. Available action types include:
+
+- **Send email notification**: Requires an SMTP server configured in vCenter. Multiple recipients can be specified per action.
+- **Send SNMP trap**: Integrates with external SNMP-based monitoring systems.
+- **Run script**: Executes a script on the vCenter Server. Useful for automated remediation, such as opening a ticket in an ITSM system or triggering a workflow.
+- **Send HA notification**: Signals vSphere HA about a condition — used for custom failure detection scenarios.
+
+A **repeat frequency** setting controls how often alarm actions re-fire while the condition persists. Without this, an alarm that stays in Alert state indefinitely would send a notification email every minute. Setting a repeat frequency of once per hour prevents notification flooding while still providing reminders that the problem is unresolved.
+
+### Custom Alarms
+
+Custom alarms are created in the vSphere Client by navigating to the target inventory object and selecting Configure → Alarm Definitions → Add. The alarm scope matters: an alarm created on a datacenter object applies to all hosts, clusters, and VMs within that datacenter. An alarm created on a specific VM applies only to that VM. Placing alarms at the appropriate level reduces duplication and simplifies management.
+
+## Performance Charts
+
+The vSphere Client exposes historical performance data through the Advanced Charts interface, available on any inventory object by selecting the Monitor tab and then Performance. Charts are rendered for the selected object and can display any combination of metrics over a configurable time range.
+
+### Time Ranges and Sampling
+
+| Time Range | Sample Interval | Notes |
+|---|---|---|
+| Real-time | 20 seconds | Last ~60 minutes; highest granularity |
+| Last day | 5 minutes | Averaged from 20-second samples |
+| Last week | 30 minutes | Further averaged |
+| Last month | 2 hours | Coarser resolution |
+| Last year | 1 day | Trend-level visibility only |
+
+For incident investigation, real-time charts provide the sharpest view of what is happening right now. For capacity planning and trend analysis, weekly or monthly charts reveal patterns that real-time data obscures.
+
+### Key Performance Metrics
+
+**CPU metrics:**
+
+- **Usage%**: The percentage of the allocated virtual CPU time actually being used. High usage alone is not necessarily a problem — it becomes one when combined with CPU Ready or Co-stop values.
+- **Ready% (READY)**: The percentage of time a VM was ready to run but could not because no physical CPU was available. Values above 5% indicate CPU contention at the host level. This is the most actionable CPU metric for VM performance troubleshooting.
+- **Co-stop% (CSTP)**: Time a VM's vCPUs were forced to wait for each other before running (relevant for multi-vCPU VMs on NUMA-sensitive workloads). Values above 3% suggest the VM has more vCPUs than can be efficiently scheduled together.
+
+**Memory metrics:**
+
+- **Active**: Memory the guest OS is actively using. This is the true working set.
+- **Consumed**: Total host memory allocated to the VM, including memory that has been touched.
+- **Balloon**: Memory reclaimed from the guest by inflating the balloon driver inside the VM, forcing the guest to page out its own memory. Any non-zero balloon value indicates the host is under memory pressure.
+- **Swap**: Memory the hypervisor has moved to the ESXi swap file because even ballooning was insufficient. Non-zero swap is a serious performance indicator — swap I/O is vastly slower than RAM access.
+
+**Disk metrics:**
+
+- **Latency (ms)**: End-to-end I/O latency as seen by the VM. Values above 20 ms suggest a storage bottleneck. Above 50 ms, application-level symptoms become common.
+- **IOPS and throughput**: Useful for identifying whether a storage device is saturated.
+
+**Network metrics:**
+
+- **Data receive/transmit rate**: Bytes per second in each direction. Useful for identifying bandwidth saturation on a VM's virtual NIC.
+
+## esxtop
+
+esxtop is a command-line tool that runs directly on the ESXi host, either through the local ESXi Shell or via SSH. It provides per-second real-time statistics for every resource domain on the host — CPU, memory, storage, and network — at a granularity that the vSphere Client's performance charts cannot match.
+
+### Interactive Mode
+
+Launch esxtop with no arguments to enter interactive mode. The display refreshes every five seconds by default. Key navigation presses:
+
+- `c` — CPU view
+- `m` — memory view
+- `d` — disk adapter view
+- `u` — disk device (LUN) view
+- `n` — network view
+- `h` — help screen listing all key bindings
+
+**Critical CPU fields in esxtop:**
+
+- `%RDY`: CPU ready — time the VM was waiting for a physical CPU. Above 5% is a problem.
+- `%CSTP`: Co-stop — multi-vCPU scheduling stall. Above 3% warrants investigation.
+- `%WAIT`: Time the VM was waiting on I/O or other events. High values combined with low CPU usage suggest the bottleneck is elsewhere (storage or network).
+
+**Critical memory fields:**
+
+- `MCTLSZ`: Balloon driver size in MB. Any value above 0 means the host is reclaiming memory from this VM.
+- `SWCUR`: Current swap usage. Non-zero means the host is swapping — severe memory pressure.
+- `CACHEUSD`: Host cache usage — memory reclaimed to a flash caching layer, if configured.
+
+### Batch Mode
+
+For extended data collection — during load tests, overnight capacity runs, or when you need data over a period longer than what interactive mode provides — esxtop supports batch output:
+
+```
+esxtop -b -d 5 -n 720 > /tmp/esxtop_output.csv
+```
+
+This runs 720 iterations with a 5-second delay between each, producing one hour of data in CSV format. The output file can be imported into Microsoft Excel or analysed with the performance analysis tool included in VMware's support tooling.
+
+## Aria Operations and Log Insight
+
+For environments where manual chart inspection and esxtop are insufficient — large clusters, multi-site deployments, compliance-driven logging requirements — VMware's Aria suite provides dedicated management tooling. **Aria Operations** (formerly vRealize Operations) aggregates metrics from all vCenter servers, applies machine-learning-based capacity models, and generates actionable recommendations for right-sizing VMs and reclaiming wasted resources. **Aria Log Insight** (formerly vRealize Log Insight) collects and indexes syslog and event data from ESXi hosts, vCenter, NSX, and guest VMs, providing full-text search and structured alerting across the entire log stream. Both integrate with vCenter via API and appear as extensions within the vSphere Client.
+
+## Summary
+
+vSphere's monitoring stack covers three distinct operational needs. Alarms provide automated, event-driven notification when a condition crosses a configured threshold — they are the first-responder layer that surfaces problems without requiring an administrator to be watching. Performance charts provide the historical context needed to determine whether an incident is isolated or part of a longer trend. esxtop provides the real-time, sub-second visibility needed to pinpoint CPU contention, memory pressure, or storage latency on a specific host during an active incident. Used together, these tools give vSphere administrators the information they need to diagnose problems accurately and intervene before workloads are materially affected.

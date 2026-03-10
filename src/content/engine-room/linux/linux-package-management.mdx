@@ -1,0 +1,265 @@
+---
+title: "Linux — Package Management with DNF"
+category: "linux"
+topic: "dnf"
+summary: "RPM package management on RHEL 9 — DNF commands, repositories, modules and AppStreams, and subscription-manager basics."
+tags: ["linux", "rhel", "dnf", "rpm", "package-management", "appstream"]
+order: 13
+draft: false
+---
+
+## Overview
+
+Software on Red Hat Enterprise Linux is distributed as **RPM packages** — self-contained archives that bundle compiled binaries, configuration files, documentation, and metadata describing the package name, version, dependencies, and every file it owns. The RPM format is the foundation; the tooling built on top handles dependency resolution and repository management automatically.
+
+Two layers of tooling exist on RHEL:
+
+- **RPM** (`rpm` command) — the low-level package manager that installs, removes, queries, and verifies individual `.rpm` files directly. It does not resolve dependencies: if a package requires a library that is not installed, RPM reports an error and stops. RPM is primarily used for querying the package database and verifying installed file integrity.
+
+- **DNF** (Dandified YUM, `dnf` command) — the high-level package manager that reads from configured repositories, resolves the complete dependency graph automatically, and calls RPM to execute the changes. For virtually all day-to-day administration, DNF is the correct tool. The `yum` command is a compatibility symlink to `dnf` on RHEL 9.
+
+A third prerequisite for accessing Red Hat's official repositories is a **subscription**, managed by `subscription-manager` and the Red Hat Subscription Manager (RHSM) service.
+
+---
+
+## RPM Package Format
+
+Every RPM filename follows a predictable naming convention:
+
+```
+name-version-release.architecture.rpm
+```
+
+Example: `httpd-2.4.51-7.el9.x86_64.rpm`
+
+| Field | Example | Meaning |
+|---|---|---|
+| name | `httpd` | Package name |
+| version | `2.4.51` | Upstream software version |
+| release | `7.el9` | RPM build number; `.el9` indicates built for RHEL 9 |
+| architecture | `x86_64` | Target CPU architecture |
+
+Common architecture values:
+- `x86_64` — 64-bit Intel and AMD (most servers)
+- `aarch64` — 64-bit ARM
+- `noarch` — architecture-independent (shell scripts, pure-Python, documentation)
+
+The RPM database at `/var/lib/rpm` tracks all installed packages, their file lists, and their checksums. Every `rpm` query operation reads from this database.
+
+---
+
+## rpm Command Reference
+
+```bash
+# Query installed packages
+rpm -q packagename              # Is this package installed? Shows version if yes.
+rpm -qa                         # List all installed packages (pipe to grep for search)
+rpm -qi packagename             # Detailed info: description, install date, size, vendor
+rpm -ql packagename             # List all files installed by this package
+rpm -qf /path/to/file           # Which package owns this file?
+rpm -qR packagename             # Packages and libraries this package requires
+rpm -q --changelog packagename  # Show the package changelog
+
+# Query a local .rpm file (not yet installed)
+rpm -qip package.rpm            # Info about a downloaded RPM file
+rpm -qlp package.rpm            # Files that a downloaded RPM would install
+
+# Verify package integrity
+rpm -V packagename              # Compare installed files against RPM database checksums
+rpm -Va                         # Verify all installed packages
+
+# Install and remove (use dnf for these instead when possible)
+rpm -ivh package.rpm            # Install local RPM (verbose, progress bar)
+rpm -Uvh package.rpm            # Upgrade or install
+rpm -e packagename              # Remove (erase) a package
+```
+
+The `rpm -qf` command is invaluable for troubleshooting: given any file on the system, it immediately identifies which package installed it, allowing you to investigate, reinstall, or remove the owning package.
+
+The `rpm -V` output lines use single-character codes to indicate what changed: `S` for file size, `M` for mode/permissions, `5` for MD5 checksum, `T` for modification timestamp. A package whose files have not been tampered with produces no output.
+
+---
+
+## DNF Package Manager
+
+**DNF** is the default package manager for RHEL 9, Fedora, and CentOS Stream. The `yum` command on RHEL 9 is a compatibility alias that maps to `dnf-3`.
+
+### Information and Search Commands
+
+```bash
+dnf list                                # List all installed and available packages
+dnf list installed                      # Installed packages only
+dnf list available                      # Packages available in enabled repositories
+dnf list kernel                         # Show all installed kernel versions
+dnf search keyword                      # Search package name and summary fields
+dnf search all keyword                  # Search all metadata fields (slower but thorough)
+dnf info packagename                    # Detailed information including repo, size, description
+dnf provides /usr/bin/htpasswd          # Which package provides this file?
+dnf provides "command"                  # Which package provides this command name?
+```
+
+`dnf provides` is the DNF equivalent of `rpm -qf` for packages not yet installed. When a build or script fails because a binary or header file is missing, `dnf provides /path/to/file` identifies the package to install.
+
+### Install, Update, and Remove
+
+```bash
+dnf install packagename                 # Install package and all dependencies
+dnf install /path/to/package.rpm        # Install a local RPM file with dependency resolution
+dnf remove packagename                  # Remove package and any packages depending solely on it
+dnf update                              # Update all installed packages to latest versions
+dnf update packagename                  # Update a specific package only
+dnf downgrade packagename               # Install the previous version of a package
+dnf reinstall packagename               # Reinstall from repository (useful after accidental deletion)
+```
+
+### Groups
+
+Package groups bundle related packages for a purpose:
+
+```bash
+dnf group list                          # List all available package groups
+dnf group list hidden                   # Include hidden groups
+dnf group info "Development Tools"      # Show packages in a group
+dnf group install "Development Tools"   # Install all packages in the group
+dnf group remove "Development Tools"    # Remove all packages from a group
+```
+
+### Transaction History and Rollback
+
+One of DNF's most powerful features is its complete transaction history and the ability to undo any past transaction:
+
+```bash
+dnf history                             # List all transactions with IDs, dates, and summaries
+dnf history info N                      # Detailed information about transaction N
+dnf history undo N                      # Reverse transaction N (uninstall what was installed)
+dnf history redo N                      # Repeat transaction N
+```
+
+Transaction history is stored in `/var/lib/dnf/` and logs to `/var/log/dnf.rpm.log`. This log records every package installation and removal with timestamps, making it a valuable audit trail.
+
+### Cleanup
+
+```bash
+dnf clean all                           # Remove all cached package metadata and downloads
+dnf autoremove                          # Remove packages installed as dependencies that are no longer needed
+```
+
+---
+
+## Repository Configuration
+
+DNF reads from repositories defined in `.repo` files in `/etc/yum.repos.d/`. Each file can define one or more repositories in INI format:
+
+```ini
+[repo-id]
+name=Descriptive Repository Name
+baseurl=https://mirror.example.com/repo/
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-example
+```
+
+Key fields:
+- `enabled=1` / `enabled=0` — active or inactive without deleting the file
+- `gpgcheck=1` — verify package signatures against the GPG key (always recommended)
+- `baseurl` — URL or local path; `mirrorlist=` is an alternative pointing to a list of mirrors
+
+```bash
+dnf repolist                              # List all enabled repositories
+dnf repolist all                          # All repositories including disabled ones
+dnf config-manager --add-repo URL         # Add a new .repo file from a URL
+dnf config-manager --enable repo-id       # Enable a disabled repository
+dnf config-manager --disable repo-id      # Disable an enabled repository
+
+# Temporary overrides (for a single dnf command only)
+dnf install --enablerepo=repo-id package  # Enable a repo just for this operation
+dnf install --disablerepo=repo-id package # Disable a repo just for this operation
+```
+
+Always import the GPG key for any new repository before installing packages:
+
+```bash
+rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-example
+```
+
+---
+
+## DNF Module Streams and Application Streams
+
+RHEL 9 ships with two primary content repositories:
+
+- **BaseOS** — core OS content as individual RPM packages, with the full RHEL 9 lifecycle
+- **AppStream** — applications, runtimes, and development tools, with their own individual lifecycles
+
+**AppStream** can deliver software in two forms: traditional RPMs and **modules**. A module groups related packages for a specific version of an application stack. Multiple versions of the same software are available as separate **streams** (e.g., `nodejs:18` and `nodejs:20`). Only one stream per module may be active on a system at a time.
+
+### Module Commands
+
+```bash
+dnf module list                                # All available modules and their streams
+dnf module list module-name                    # Streams for a specific module
+dnf module info module-name                    # Detailed module information
+dnf module info module-name:stream             # Info about a specific stream
+dnf module info --profile module-name:stream   # Package sets for each profile
+```
+
+### Enabling and Installing a Module
+
+```bash
+dnf module enable nodejs:20                    # Enable the Node.js 20 stream
+dnf module install nodejs                      # Install packages from the enabled stream
+dnf module install nodejs:20/development       # Install a specific profile
+```
+
+Profiles define which subset of module packages to install. Common profiles: `default`, `minimal`, `server`, `client`, `development`.
+
+### Switching or Resetting a Module Stream
+
+To switch from one stream to another:
+
+```bash
+dnf module reset nodejs                        # Reset to unset state
+dnf module enable nodejs:18                    # Enable the new stream
+dnf distro-sync                                # Sync installed packages to the new stream
+```
+
+Or combined:
+
+```bash
+dnf module switch-to nodejs:18                 # Switch stream in one command
+```
+
+---
+
+## Red Hat Subscription Manager
+
+RHEL systems require a subscription to access the Red Hat Content Delivery Network (CDN) and receive official updates. `subscription-manager` handles registration, subscription attachment, and repository management.
+
+```bash
+subscription-manager register                           # Register (prompts for username/password)
+subscription-manager register --username USER --password PASS  # Non-interactive
+subscription-manager register --auto-attach             # Register and attach best subscription
+
+subscription-manager list --available                   # Show available subscriptions for this account
+subscription-manager attach --pool=POOL_ID              # Attach a specific subscription by pool ID
+subscription-manager attach --auto                      # Attach the best matching subscription automatically
+
+subscription-manager list --consumed                    # Show currently attached subscriptions
+subscription-manager status                             # Overall subscription compliance status
+
+subscription-manager repos --list                       # List all available repositories
+subscription-manager repos --enable=repo-id             # Enable a specific repository
+subscription-manager repos --disable=repo-id            # Disable a repository
+
+subscription-manager unregister                         # Remove system from subscription service
+```
+
+When a system is registered and a subscription is attached, RHSM automatically creates `/etc/yum.repos.d/redhat.repo` with the CDN repository URLs and certificates. DNF then uses these repositories without any additional configuration.
+
+**Simple Content Access (SCA)** simplifies subscription management. With SCA enabled on the Customer Portal or Red Hat Satellite, every registered system can access all repositories from all subscriptions in the organization — no per-system subscription attachment is required. This removes the need for `subscription-manager attach` in most enterprise environments.
+
+---
+
+## Summary
+
+RPM is the package format and low-level management tool: use `rpm -q` to query installed packages, `rpm -qf` to find which package owns a file, and `rpm -V` to verify file integrity against the RPM database. DNF is the high-level package manager: it resolves dependencies from configured repositories, tracks a complete undoable transaction history, manages module streams for parallel software versions, and handles cleanup of orphaned dependencies. Repository definitions live in `/etc/yum.repos.d/` as `.repo` files. Red Hat systems must be registered with `subscription-manager` to access the CDN; Simple Content Access eliminates per-system subscription attachment in enterprise environments. AppStream module streams allow multiple versions of the same software (Node.js, Python, Ruby) to be available simultaneously, with only one stream active per system.

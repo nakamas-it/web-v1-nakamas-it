@@ -1,0 +1,165 @@
+---
+title: "Linux Process Management — ps, Signals, Job Control, and Load Average"
+category: "linux"
+topic: "linux-processes"
+summary: "How Linux manages running programs as processes — identifying processes with ps and top, controlling foreground and background jobs within a terminal session, sending signals to communicate with processes including terminating unresponsive ones, and understanding load average as a measure of system demand."
+tags: ["linux", "processes", "signals", "job-control", "ps", "rh124"]
+order: 7
+draft: false
+---
+
+## Overview
+
+Every running program on a Linux system exists as one or more **processes**. A process is an instance of a program in execution — the kernel allocates it memory, assigns it a process ID (PID), tracks its owner, and schedules it on the CPU. Understanding how to observe, control, and terminate processes is one of the most frequently exercised skills in Linux system administration.
+
+The Linux process model is hierarchical. When the system boots, the kernel starts a single userspace process (PID 1, which is `systemd` on RHEL 9). Every subsequent process is a child of some other process, forming a tree. When a process creates a child (`fork`), the child inherits the parent's environment, file descriptors, and UID. The relationship between parent and child is tracked via the PPID (parent PID) field.
+
+Each process has an owner — the UID under which it runs — which determines what resources it can access. Processes also carry a priority value (nice number) that influences how the scheduler allocates CPU time.
+
+---
+
+## Process States
+
+At any moment, a process is in one of a small set of states:
+
+| State | Code | Meaning |
+|---|---|---|
+| Running / Runnable | R | Currently on the CPU or waiting for CPU time in the run queue |
+| Sleeping (interruptible) | S | Waiting for an event (I/O completion, timer, signal) — the most common state |
+| Sleeping (uninterruptible) | D | Waiting for I/O; cannot be interrupted by signals; usually transient |
+| Stopped | T | Paused by a signal (e.g., SIGSTOP or Ctrl+Z) |
+| Zombie | Z | Process has exited but its parent has not yet collected its exit code |
+
+A zombie process occupies a PID and a row in the process table but consumes no CPU or memory. It disappears as soon as its parent calls `wait()`. Persistent zombies indicate a bug in the parent process.
+
+---
+
+## Identifying Processes with ps
+
+The `ps` command provides a snapshot of the current process list. The most commonly used forms:
+
+```bash
+ps                # Processes attached to the current shell
+ps aux            # All processes, user-oriented format (a=all users, u=detailed, x=include no-TTY)
+ps -ef            # All processes, full format (shows UID, PID, PPID, C, STIME, TTY, TIME, CMD)
+ps -o pid,comm,pcpu,pmem   # Custom output columns
+ps --sort=-pcpu   # Sort by CPU usage, descending
+ps --sort=-pmem   # Sort by memory usage, descending
+```
+
+In `ps aux` output: `USER` is the owner, `%CPU` and `%MEM` are percentages of total CPU and physical memory, `VSZ` is virtual memory size in KB, `RSS` is resident set size (physical RAM in use), `STAT` is the process state, and `COMMAND` is the command name with arguments.
+
+---
+
+## Monitoring with top
+
+The `top` command provides a real-time, continuously updating view of the system and its processes. It refreshes every 3 seconds by default.
+
+The header section shows:
+- **Uptime** and number of logged-in users
+- **Load average**: three numbers representing average system load over the last 1, 5, and 15 minutes
+- **Tasks**: counts of total, running, sleeping, stopped, and zombie processes
+- **CPU%**: breakdown of user space, system, nice, idle, I/O wait, hardware/software interrupt time
+- **Memory**: total, free, used, and buffer/cache
+
+The process table below the header is sorted by CPU usage by default. Key interactive commands within `top`:
+
+| Key | Action |
+|---|---|
+| `q` | Quit |
+| `k` | Kill a process (prompts for PID and signal) |
+| `r` | Renice a process (change its priority) |
+| `M` | Sort by memory usage |
+| `P` | Sort by CPU usage |
+| `u` | Filter by username |
+| `1` | Toggle per-CPU breakdown in the header |
+| `f` | Field management — add or remove columns |
+
+---
+
+## Job Control
+
+Job control allows a shell session to manage multiple processes without opening multiple terminal windows. A **job** is a pipeline or command that the shell is tracking.
+
+```bash
+long_command &        # Run in background immediately; shell prints [job_number] PID
+jobs                  # List all background and stopped jobs for this shell
+fg %1                 # Bring job 1 to the foreground
+bg %1                 # Resume stopped job 1 in the background
+Ctrl+Z                # Suspend (stop) the current foreground job — sends SIGTSTP
+Ctrl+C                # Interrupt the current foreground job — sends SIGINT
+```
+
+The `%N` notation refers to job number N in the current shell's job table. You can also refer to jobs by name using `%string` (the most recent job whose name begins with that string).
+
+Job control is purely a property of the shell session. Background jobs started in one shell are not visible in another shell's `jobs` output. If you close the terminal, background jobs receive a SIGHUP and typically terminate unless protected by `nohup` or `disown`.
+
+---
+
+## Signals
+
+Signals are software interrupts sent to processes to notify them of events or request a state change. Most processes have default signal handlers, but some signals can be caught and handled by the application. Two signals cannot be caught or ignored: SIGKILL (9) and SIGSTOP (19).
+
+| Signal | Number | Default Action | Common Use |
+|---|---|---|---|
+| SIGHUP | 1 | Terminate | Reload configuration (many daemons handle this) |
+| SIGINT | 2 | Terminate | Ctrl+C — polite interrupt |
+| SIGQUIT | 3 | Core dump | Ctrl+\\ — quit with core |
+| SIGKILL | 9 | Terminate (uncatchable) | Force-kill an unresponsive process |
+| SIGTERM | 15 | Terminate | Graceful shutdown — default signal for `kill` |
+| SIGCONT | 18 | Continue | Resume a stopped process |
+| SIGSTOP | 19 | Stop (uncatchable) | Pause a process unconditionally |
+| SIGTSTP | 20 | Stop | Ctrl+Z — terminal stop, can be caught |
+
+**Sending signals:**
+
+```bash
+kill PID              # Send SIGTERM (15) to PID — request graceful shutdown
+kill -9 PID           # Send SIGKILL — force terminate, no cleanup possible
+kill -SIGTERM PID     # Same as kill PID, explicit signal name
+kill -l               # List all signal names and numbers
+killall nginx         # Send SIGTERM to all processes named nginx
+pkill -u alice        # Send SIGTERM to all processes owned by user alice
+pgrep httpd           # List PIDs matching the name httpd (no signal sent)
+```
+
+The standard sequence for terminating an unresponsive process is: try SIGTERM first, wait a few seconds, then use SIGKILL if the process has not exited. SIGKILL is a last resort because it does not allow the process to flush buffers or release locks.
+
+---
+
+## Nice Values and Priority
+
+The **nice value** influences the kernel scheduler's allocation of CPU time. Nice ranges from -20 (highest priority, least nice to other processes) to +19 (lowest priority, most courteous). The default nice value for new processes is 0.
+
+```bash
+nice -n 10 command           # Start command with nice value 10 (lower priority)
+nice -n -5 command           # Start with nice -5 (higher priority; requires root)
+renice -n 5 -p PID           # Change the nice value of a running process
+renice -n 5 -u alice         # Renice all processes owned by alice
+```
+
+Regular users can only increase the nice value of their own processes (making them lower priority). Decreasing the nice value below 0 — giving a process higher-than-default priority — requires root privileges.
+
+In `top` output, the `PR` column shows the actual kernel priority (nice 0 = PR 20), and `NI` shows the nice value directly.
+
+---
+
+## Load Average
+
+The three numbers shown by `uptime` and in the `top` header — for example, `0.52 0.38 0.21` — are the **load average** over the last 1, 5, and 15 minutes respectively. Load average counts the average number of processes that are either running on the CPU or waiting in the run queue at any given moment.
+
+On a single-core system, a load average of 1.0 means the CPU is exactly fully utilised. On a four-core system, 4.0 means all cores are fully utilised. Values above the number of CPU cores indicate that processes are queued and waiting — the system is saturated.
+
+```bash
+uptime                    # One-line view: time, users, load averages
+nproc                     # Number of processing units available
+cat /proc/loadavg         # Raw load average data from the kernel
+```
+
+A load average that is consistently above the number of cores, combined with high `%wa` (I/O wait) in `top`, points to I/O saturation rather than CPU saturation — the processes are waiting on disk or network, not the scheduler.
+
+---
+
+## Summary
+
+Linux processes are tracked by PID, owned by a UID, and exist in states ranging from running to zombie. The `ps` command provides a snapshot; `top` provides a live view. Job control with `&`, `fg`, `bg`, and Ctrl+Z manages multiple processes within a single shell session. Signals communicate with processes — SIGTERM requests graceful exit, SIGKILL forces it unconditionally. Nice values adjust scheduler priority, and load average measured against available CPU cores indicates whether the system is operating within or beyond its processing capacity.

@@ -1,0 +1,162 @@
+---
+title: "systemd — Service Management, Units, and Targets"
+category: "linux"
+topic: "linux-systemd"
+summary: "How systemd manages the Linux system from boot to shutdown — organising daemons and resources as units with declarative configuration files, controlling services with systemctl, and using targets as dependency-based milestones that replace traditional SysV runlevels."
+tags: ["linux", "systemd", "services", "units", "targets", "rh124"]
+order: 8
+draft: false
+---
+
+## Overview
+
+**systemd** is PID 1 on RHEL 9. It is the first userspace process started by the kernel at boot, and it is responsible for initialising the system, starting and managing services throughout the system's operational life, and coordinating the shutdown sequence. It replaces the traditional SysV init system and Upstart that were used on older RHEL versions.
+
+The core advantage of systemd over SysV init is **parallel service startup**. SysV init started services sequentially using numbered shell scripts in `/etc/rc.d/` — each service had to complete before the next could begin. systemd tracks dependencies between services and starts independent services simultaneously, dramatically reducing boot time on modern systems with multiple CPU cores.
+
+Beyond faster boot, systemd provides socket activation (services started on-demand when a connection arrives on their socket), D-Bus activation, on-demand mounting of filesystems, and tight integration with **cgroups** (control groups) for resource accounting and limiting. All logs produced by systemd-managed services are captured by `systemd-journald`, which stores them in a structured binary format queryable with `journalctl`.
+
+---
+
+## Units
+
+systemd organises everything it manages as a **unit**. A unit is a configuration file that describes a resource, service, or relationship. Units are identified by their filename, which ends in a suffix indicating the unit type.
+
+| Unit Type | Suffix | Purpose |
+|---|---|---|
+| Service | `.service` | A daemon process or one-shot command |
+| Socket | `.socket` | A network or IPC socket; activates a service when traffic arrives |
+| Path | `.path` | A filesystem path watcher; activates a service when path changes |
+| Timer | `.timer` | A cron-like scheduled trigger for activating another unit |
+| Target | `.target` | A synchronisation point grouping other units — analogous to a runlevel |
+| Mount | `.mount` | A filesystem mount point |
+| Device | `.device` | A kernel device, auto-created from udev data |
+| Slice | `.slice` | A cgroup hierarchy node for resource control |
+
+When you refer to a unit without a suffix, systemd assumes `.service`. So `systemctl start nginx` and `systemctl start nginx.service` are equivalent.
+
+---
+
+## Unit File Locations
+
+Unit files exist in three locations with a defined precedence order (highest to lowest):
+
+| Location | Precedence | Purpose |
+|---|---|---|
+| `/etc/systemd/system/` | Highest | Administrator customisations; overrides vendor defaults |
+| `/run/systemd/system/` | Middle | Runtime-generated units; temporary, cleared at reboot |
+| `/usr/lib/systemd/system/` | Lowest | Vendor and package-provided defaults; do not edit directly |
+
+When a package installs a service (for example, nginx or sshd), its unit file goes into `/usr/lib/systemd/system/`. To customise a vendor unit without modifying the original, create an override in `/etc/systemd/system/` — either a complete replacement or a drop-in directory (`/etc/systemd/system/nginx.service.d/override.conf`) containing only the settings you want to change.
+
+---
+
+## Controlling Services with systemctl
+
+The `systemctl` command is the primary interface for managing units:
+
+| Command | Effect |
+|---|---|
+| `systemctl start unit` | Start the unit immediately |
+| `systemctl stop unit` | Stop the unit |
+| `systemctl restart unit` | Stop then start (full restart) |
+| `systemctl reload unit` | Ask the unit to reload its configuration without restarting |
+| `systemctl enable unit` | Create a symlink so the unit starts at boot |
+| `systemctl disable unit` | Remove the symlink; unit will not start at boot |
+| `systemctl status unit` | Show current state, recent log lines, and PID |
+| `systemctl is-active unit` | Exit code 0 if active; useful in scripts |
+| `systemctl is-enabled unit` | Exit code 0 if enabled for boot |
+| `systemctl mask unit` | Symlink to `/dev/null` — prevents any attempt to start |
+| `systemctl unmask unit` | Reverse a mask |
+| `systemctl daemon-reload` | Reload all unit files from disk |
+| `systemctl list-units` | Show all currently loaded and active units |
+| `systemctl list-unit-files` | Show all units and their enabled state |
+
+**Enabling** a unit makes it start automatically at boot by creating a symbolic link in the appropriate `.wants/` or `.requires/` directory of the default target. It does **not** start the unit immediately. Use `systemctl enable --now unit` to enable and start in one step.
+
+**Masking** is stronger than disabling. A masked unit cannot be started manually or as a dependency. It is used when you want to guarantee that a unit never runs — for example, masking `firewalld.service` if a different firewall tool is deployed.
+
+**`systemctl daemon-reload`** must be run after creating or modifying unit files in `/etc/systemd/system/`. Without it, systemd continues using the version of the unit it loaded at startup and ignores your changes.
+
+---
+
+## Service Unit File Structure
+
+A `.service` unit file has three sections:
+
+```ini
+[Unit]
+Description=My Application Server
+Documentation=https://example.com/docs
+After=network.target
+Requires=postgresql.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=appuser
+WorkingDirectory=/opt/myapp
+ExecStart=/opt/myapp/bin/server --config /etc/myapp/config.toml
+ExecStop=/opt/myapp/bin/server --stop
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**`[Unit]` section** — metadata and dependency declarations:
+- `After=` — this unit starts after the listed units, but does not require them to be present
+- `Requires=` — hard dependency; if the required unit fails, this unit fails too
+- `Wants=` — soft dependency; the required unit is started alongside this one, but failure of the dependency does not cause this unit to fail
+
+**`[Service]` section** — how the process runs:
+- `Type=simple` — the `ExecStart` process is the main process; systemd considers the service started once that process is running. Other types: `forking` (service daemonises itself), `oneshot` (runs to completion then stops), `notify` (service sends a notification via `sd_notify` when ready)
+- `Restart=on-failure` — automatically restart if the process exits with a non-zero exit code
+
+**`[Install]` section** — where to hook this unit when enabled:
+- `WantedBy=multi-user.target` — enabling this service creates a symlink in `/etc/systemd/system/multi-user.target.wants/`
+
+---
+
+## Targets
+
+A **target** is a synchronisation point that groups related units. When systemd activates a target, it activates all units that the target requires or wants. Targets replaced SysV runlevels.
+
+| Target | Equivalent Runlevel | Description |
+|---|---|---|
+| `emergency.target` | — | Minimal root shell, no filesystems mounted |
+| `rescue.target` | 1 | Single-user maintenance mode |
+| `multi-user.target` | 3 | Non-graphical multi-user system |
+| `graphical.target` | 5 | Multi-user with graphical display manager |
+| `reboot.target` | 6 | Reboot the system |
+| `poweroff.target` | 0 | Halt and power off |
+
+```bash
+systemctl get-default                    # Show the default target (boots into this)
+systemctl set-default graphical.target   # Change default target
+systemctl isolate rescue.target          # Switch to target immediately (like changing runlevel)
+systemctl isolate multi-user.target      # Drop to text mode without rebooting
+```
+
+`systemctl isolate` activates the specified target and stops all units not required by it. This allows switching between graphical and text modes on a live system, or entering rescue mode without a reboot.
+
+---
+
+## Practical Workflow
+
+A typical workflow for deploying a custom service unit:
+
+1. Create the unit file at `/etc/systemd/system/myapp.service`
+2. Run `systemctl daemon-reload` to make systemd aware of the new file
+3. Run `systemctl start myapp` to test it
+4. Check `systemctl status myapp` and `journalctl -u myapp -f` for errors
+5. Run `systemctl enable myapp` to make it persistent across reboots
+6. Verify with `systemctl is-enabled myapp`
+
+---
+
+## Summary
+
+systemd is PID 1 on RHEL 9 and manages all system resources through a unit file model. Service units define how daemons run; socket and timer units enable on-demand and scheduled activation; target units group units into dependency-based boot milestones that replace SysV runlevels. The `systemctl` command is the single interface for starting, stopping, enabling, disabling, and inspecting all units. Always run `systemctl daemon-reload` after modifying unit files in `/etc/systemd/system/` — without it, systemd will silently continue using the old configuration.

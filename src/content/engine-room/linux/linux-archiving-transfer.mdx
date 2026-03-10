@@ -1,0 +1,157 @@
+---
+title: "Linux Archiving and File Transfer — tar, rsync, and sftp"
+category: "linux"
+topic: "linux-archiving"
+summary: "How to archive and transfer files on Linux — creating and extracting compressed archives with tar, securely copying files between systems with scp and sftp, and efficiently synchronising directories between hosts with rsync including its important trailing-slash behaviour."
+tags: ["linux", "tar", "rsync", "sftp", "scp", "rh124"]
+order: 12
+draft: false
+---
+
+## Overview
+
+Archiving and file transfer are daily operations in Linux administration. Systems must be backed up, configurations bundled and shipped to remote hosts, and large directory trees synchronised between servers — all efficiently and securely. Linux provides a set of purpose-built tools for each of these tasks that have remained consistent across distributions and decades: `tar` for creating archives, SSH-based `scp` and `sftp` for secure point-to-point transfers, and `rsync` for efficient differential synchronisation.
+
+Understanding when to use each tool is as important as knowing the syntax. Tar bundles and optionally compresses files into a single archive suitable for backup or distribution. Scp and sftp move files over an encrypted SSH channel without any additional configuration beyond a working SSH connection. Rsync analyses the difference between source and destination and transfers only what has changed, making it the right tool for large directories that are synchronised regularly.
+
+---
+
+## tar — Creating and Extracting Archives
+
+**tar** (tape archive) creates a single archive file from one or more source files or directories. By default tar does not compress — it simply bundles. Compression is added through option flags that invoke external compression programs (gzip, bzip2, xz) transparently.
+
+### tar Options
+
+| Option | Meaning |
+|---|---|
+| `c` | Create a new archive |
+| `x` | Extract files from an archive |
+| `t` | List (table of) contents without extracting |
+| `f` | Specify the archive filename — always required when working with files |
+| `v` | Verbose: print each file as it is processed |
+| `z` | Compress or decompress with gzip (`.tar.gz` or `.tgz`) |
+| `j` | Compress or decompress with bzip2 (`.tar.bz2`) |
+| `J` | Compress or decompress with xz (`.tar.xz`) |
+| `C` | Change to the specified directory before performing any actions |
+
+Options are typically combined without dashes in traditional tar usage, though both `tar -czf` and `tar czf` are accepted.
+
+### Common tar Commands
+
+| Command | Purpose |
+|---|---|
+| `tar -czf archive.tar.gz /path/` | Create a gzip-compressed archive of `/path/` |
+| `tar -xzf archive.tar.gz` | Extract a gzip-compressed archive in the current directory |
+| `tar -czf backup.tar.gz -C /home user1` | Archive `user1` relative to `/home`, so paths inside start with `user1/` |
+| `tar -xzf archive.tar.gz -C /restore/` | Extract into a specific destination directory |
+| `tar -tvf archive.tar.gz` | List archive contents with sizes and timestamps |
+| `tar -xzf archive.tar.gz file.txt` | Extract a single named file from the archive |
+
+The `-C` flag is important for controlling path structure inside the archive. Without it, archiving an absolute path like `/home/user1` embeds the full path in the archive. Using `-C /home user1` stores only `user1/` as the top-level directory, making extraction cleaner.
+
+---
+
+## Compression Tools
+
+Compression can be applied independently of archiving when working with single files:
+
+| Tool | Command | Notes |
+|---|---|---|
+| gzip | `gzip file` | Compresses and replaces with `.gz`; fast, good ratio |
+| gunzip | `gunzip file.gz` | Decompresses a `.gz` file |
+| gzip -k | `gzip -k file` | Keep the original uncompressed file |
+| bzip2 | `bzip2 file` | Better compression than gzip, slower |
+| xz | `xz file` | Best compression ratio, slowest speed |
+| zip | `zip archive.zip files` | Windows-compatible; archives and compresses in one step |
+| unzip | `unzip archive.zip` | Extract zip archives |
+
+When bundling for transfer to Windows systems or when the recipient expects a single compressed file rather than a tarball, `zip` is the practical choice. For Linux-to-Linux transfers and backups, `tar -czf` with gzip or `tar -cJf` with xz is the standard.
+
+---
+
+## scp — Secure Copy
+
+**scp** transfers files between a local system and a remote system (or between two remote systems) over an SSH connection. It is non-interactive — the source and destination paths are specified as arguments, and scp connects, transfers, and exits. Authentication uses the same mechanisms as SSH: password or public key.
+
+| Command | Purpose |
+|---|---|
+| `scp file user@host:/path/` | Copy a local file to a remote host |
+| `scp user@host:/path/file .` | Copy a remote file to the current local directory |
+| `scp -r dir/ user@host:/path/` | Recursively copy a local directory to a remote host |
+| `scp -P 2222 file user@host:/path/` | Specify a non-default SSH port (note capital P) |
+
+Scp is well-suited for simple one-off transfers. For repeated synchronisation of large directories, rsync is preferred because scp always transfers the full file even if only a small portion has changed.
+
+---
+
+## sftp — Interactive Secure File Transfer
+
+**sftp** provides an interactive session for browsing and transferring files over SSH. Once connected, it presents a prompt where remote and local filesystem operations can be performed side by side.
+
+```bash
+sftp user@host
+```
+
+Inside an sftp session:
+
+| Command | Purpose |
+|---|---|
+| `put localfile remotepath` | Upload a local file to the remote host |
+| `get remotefile localpath` | Download a remote file to the local system |
+| `ls` | List files in the current remote directory |
+| `cd remotedir` | Change the current remote directory |
+| `pwd` | Show the current remote directory |
+| `lls` | List files in the current local directory |
+| `lcd localdir` | Change the current local directory |
+| `lpwd` | Show the current local directory |
+| `mkdir remotedir` | Create a directory on the remote host |
+| `rm remotefile` | Delete a file on the remote host |
+| `bye` or `exit` | Close the sftp session |
+
+Sftp is appropriate when the transfer requires browsing the remote filesystem first, or when uploading and downloading multiple files interactively. For scripted or automated transfers, scp or rsync are better choices because they do not require interactive input.
+
+---
+
+## rsync — Efficient Synchronisation
+
+**rsync** is the standard tool for synchronising directories, both locally and over a network. Its efficiency comes from the rsync algorithm: rather than transferring entire files, rsync computes checksums of file blocks and transfers only the blocks that differ between the source and destination. On large directories with small changes, this reduces transfer time and bandwidth dramatically.
+
+By default rsync uses SSH as its transport for remote operations, so no additional configuration is needed beyond a working SSH connection.
+
+### rsync Options
+
+| Option | Meaning |
+|---|---|
+| `-a` | Archive mode: recursive, preserves permissions, timestamps, symbolic links, owner, and group |
+| `-v` | Verbose: show each file being transferred |
+| `-z` | Compress file data during transfer |
+| `-P` | Show progress per file and keep partially transferred files |
+| `--delete` | Remove files from the destination that are not present in the source |
+| `-n` or `--dry-run` | Simulate the operation without making any changes |
+| `--exclude=pattern` | Exclude files matching the pattern from the transfer |
+
+### Common rsync Commands
+
+| Command | Purpose |
+|---|---|
+| `rsync -av src/ dest/` | Sync contents of `src/` into `dest/` verbosely |
+| `rsync -avz src/ user@host:/dest/` | Sync to a remote host over SSH with compression |
+| `rsync -av user@host:/src/ /dest/` | Pull from a remote host to a local directory |
+| `rsync -av --delete src/ dest/` | Mirror `src/` into `dest/`, deleting anything in `dest/` not in `src/` |
+| `rsync -av --dry-run src/ dest/` | Preview what would be transferred without doing it |
+| `rsync -av --exclude="*.log" src/ dest/` | Sync, skipping files that match `*.log` |
+
+### Trailing Slash Behaviour
+
+The presence or absence of a trailing slash on the **source** path has a significant and frequently confusing effect on rsync's behaviour:
+
+- **`rsync -av src/ dest/`** — copies the **contents** of `src/` directly into `dest/`. The result is that files from inside `src/` appear directly inside `dest/`, not in a subdirectory called `src/`.
+- **`rsync -av src dest/`** — copies the **directory itself** into `dest/`. The result is a directory `dest/src/` containing the original files.
+
+The trailing slash on the source means "this directory's contents." The lack of a trailing slash means "this directory itself." The destination trailing slash has no such effect. This distinction is critical when writing backup scripts — using the wrong form results in either nested directories accumulating over repeated runs, or files being placed at the wrong level of the hierarchy. Always verify with `--dry-run` before running rsync in a destructive context such as a mirror with `--delete`.
+
+---
+
+## Summary
+
+Tar creates portable archives with optional gzip, bzip2, or xz compression. Scp handles quick non-interactive file transfers over SSH. Sftp provides an interactive session for browsing and transferring files on remote systems. Rsync efficiently synchronises directories by transferring only changed file blocks, and its trailing-slash convention on the source path determines whether the directory itself or its contents are the unit being synced.

@@ -1,0 +1,97 @@
+---
+title: "vSphere Fault Tolerance — Zero-Downtime VM Protection"
+category: "vmware"
+topic: "vsphere-fault-tolerance"
+summary: "How vSphere Fault Tolerance creates a continuously synchronised shadow VM on a separate host — providing zero RPO and near-zero RTO by instantly taking over if the primary host fails — and the strict requirements and limitations that govern which workloads FT can protect."
+tags: ["vmware", "fault-tolerance", "ft", "zero-downtime", "vcpdcv"]
+order: 10
+draft: false
+---
+
+## Overview
+
+vSphere High Availability restarts VMs after a host failure — it takes minutes and results in a cold reboot for the protected workload. For most applications, that is acceptable. For a small class of workloads, it is not: payment processing systems, real-time control applications, and tier-0 databases where even a brief interruption is commercially or operationally unacceptable.
+
+vSphere Fault Tolerance (FT) addresses this by running a live shadow copy of the protected VM on a separate host at all times. The shadow VM — called the secondary VM — runs in perfect lockstep with the primary VM. Every CPU instruction, every memory write, every I/O operation is replicated to the secondary in real time. If the primary host fails, the secondary VM takes over instantly — no restart, no data loss, no interruption. The failover is transparent to the guest OS and to any clients connected to the VM.
+
+## How FT Works — vLockstep
+
+FT uses a technology called vLockstep to keep the primary and secondary VMs in synchrony. The primary VM runs normally on the source host. Every non-deterministic event — interrupts, timer ticks, DMA results — is captured and replayed on the secondary host so that the secondary produces identical execution to the primary at all times.
+
+The replication stream flows over a dedicated VMkernel network called the FT Logging network. This network carries a continuous stream of execution events and memory updates from the primary to the secondary. The secondary host is constantly processing this stream, maintaining a VM that is always at most a few milliseconds behind the primary's current state.
+
+When the secondary takes over after a primary host failure, it is already running and fully current. Clients experience a brief pause at most — the duration of the last unacknowledged network packet — rather than the minutes of a VM restart.
+
+## FT vs vSphere HA
+
+| Characteristic | vSphere HA | Fault Tolerance |
+|---|---|---|
+| Recovery mechanism | VM restarts on another host | Secondary VM takes over instantly |
+| RPO (data loss) | Data in flight at the time of failure is lost | Zero — secondary is always current |
+| RTO (downtime) | Minutes (VM restart + boot time) | Near-zero (sub-second) |
+| Resource overhead | Minimal — no duplicate VM | High — secondary consumes equal CPU and memory |
+| Scope of protection | Host failure | Host failure |
+| Configuration complexity | Low | High |
+| Licence requirement | Included with vSphere | Enterprise Plus for more than 2 vCPUs |
+
+FT is not a replacement for HA — it is a complement. HA remains enabled on the cluster and handles FT's own recovery orchestration (choosing where to create a new secondary if the current secondary fails, for example).
+
+## Licensing
+
+The number of vCPUs a Fault Tolerance-protected VM can have depends on the vSphere licence:
+
+- **Standard licence**: FT protects VMs with up to 2 vCPUs
+- **Enterprise Plus licence**: FT protects VMs with up to 8 vCPUs
+
+Legacy FT (pre-vSphere 6.5) was limited to 1 vCPU regardless of licence. SMP FT, introduced in vSphere 6.0 and matured in 6.5, extended protection to multi-vCPU VMs. vSphere 8.0 maintains the 8 vCPU maximum with Enterprise Plus.
+
+## FT Requirements
+
+FT imposes stricter prerequisites than HA or DRS because the replication mechanism is more demanding:
+
+- **vSphere HA must be enabled** on the cluster — FT relies on HA for secondary VM management and orchestration after a failover
+- **Shared storage**: VM files (configuration, logs, swap) must be on shared storage accessible by both the primary and secondary host
+- **Hardware virtualisation**: The host CPU must support hardware-assisted memory management (Intel EPT or AMD RVI/NPT). This is enabled in the host BIOS and required by the vLockstep mechanism
+- **CPU compatibility**: Both the primary and secondary host CPUs must be vMotion-compatible. FT can work without EVC but EVC is recommended in mixed-generation clusters
+- **FT Logging VMkernel**: A dedicated VMkernel adapter tagged for FT Logging traffic must exist on each participating host. 10 GbE is required; the network should be dedicated and low-latency
+- **SSL certificate checking**: Must be enabled in vCenter Server settings
+- **No active snapshots**: FT cannot be enabled on a VM that currently has snapshots
+
+## Unsupported Features
+
+The lockstep replication mechanism imposes constraints on which VM features can be active while FT is enabled:
+
+| Unsupported feature | Reason |
+|---|---|
+| Snapshots | State diverges between primary and secondary when a snapshot is taken |
+| Storage vMotion | Disk location changes cannot be replicated via vLockstep |
+| Linked clones | Not compatible with FT's disk requirements |
+| vVols datastores | FT requires VMFS or NFS shared storage |
+| Disk encryption | I/O filter used for encryption is incompatible with FT |
+| TPM (Trusted Platform Module) | Not supported |
+| VBS (Virtualization-based Security) | Not supported |
+| Physical RDMs | Only virtual RDMs are supported (and only for legacy 1-vCPU FT) |
+| USB/sound/serial/parallel ports | Device pass-through cannot be replicated |
+| NPIV | N-Port ID Virtualisation incompatible |
+| Virtual disks larger than 2 TB | Not supported |
+| Hot-plug of devices | Device state changes cannot be replicated mid-flight |
+
+Note that VADP (vSphere Storage APIs for Data Protection) disk-only snapshots are supported and can be used for backup of FT-protected VMs, provided the backup software uses VADP rather than native snapshot management.
+
+## FT and DRS
+
+DRS does not automatically migrate FT secondary VMs. The secondary is placed by vCenter when FT is enabled and remains on that host unless an administrator intervenes or FT itself triggers a new secondary placement after a failover event. DRS does manage the primary VM normally.
+
+Anti-affinity between the primary and secondary is maintained automatically — vCenter ensures they never run on the same host. If DRS would otherwise want to migrate the primary to the host running the secondary, it will not do so.
+
+## Operational Considerations
+
+**Resource overhead**: Every FT-protected VM effectively doubles the CPU and memory consumption in the cluster — the secondary consumes equal resources on a second host even though it produces no output while the primary is running. This cost is the trade-off for zero RPO and near-zero RTO.
+
+**Bandwidth consumption**: The FT Logging network carries a continuous real-time stream. A VM with high CPU activity or high memory write rates generates more FT traffic. 10 GbE dedicated to FT Logging is the minimum recommendation; in environments with multiple FT-protected VMs, bandwidth planning for the FT network is essential.
+
+**Failure of the secondary**: If the secondary host fails (rather than the primary), the primary VM continues running normally. vCenter detects the secondary failure and automatically creates a new secondary on another host in the cluster, re-establishing protection. During the period between secondary failure and new secondary placement, the primary VM is unprotected — HA will restart it if the primary host then also fails, but without FT's zero-RPO guarantee.
+
+## Summary
+
+vSphere Fault Tolerance is the strongest availability option in the vSphere toolbox, delivering zero RPO and sub-second RTO by continuously running a synchronised shadow VM on a separate host. The cost is proportional resource consumption and strict operational constraints — no snapshots, no storage migrations, limited vCPU count, and dedicated high-bandwidth network. FT is appropriate for a small number of critical workloads where availability requirements genuinely exceed what HA can provide, rather than as a general-purpose protection mechanism for an entire cluster.

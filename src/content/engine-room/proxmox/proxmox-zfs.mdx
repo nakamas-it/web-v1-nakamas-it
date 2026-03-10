@@ -1,0 +1,325 @@
+---
+title: "Proxmox VE — ZFS Storage"
+category: "proxmox"
+topic: "zfs"
+summary: "ZFS on Proxmox — pool types, datasets and zvols, snapshots, send/receive replication, ARC caching, and integrating ZFS as a Proxmox storage backend."
+tags: ["proxmox", "zfs", "storage", "snapshots", "replication", "arc"]
+order: 7
+draft: false
+---
+
+## Overview
+
+ZFS is a combined filesystem and volume manager originally developed at Sun Microsystems and released as open source. It has been integrated into Proxmox VE since early versions and is the recommended local storage option for any production Proxmox node. The Proxmox installer itself offers ZFS RAID configurations directly on the OS installation screen — no pre-configuration needed.
+
+What makes ZFS distinct from traditional filesystems is that it owns the entire storage stack from disk to filesystem. It handles RAID, data integrity checking, caching, snapshots, and replication in a single coherent layer rather than stacking separate tools. This design eliminates entire classes of failure modes: silent data corruption is caught and repaired automatically, no separate volume manager is needed, and snapshots are instant and space-efficient regardless of how much data is on the pool.
+
+In Proxmox, ZFS pools appear as storage backends with content types `images` and `rootdir`. Each VM disk image is stored as a ZFS dataset (for containers) or a ZFS zvol (for KVM VMs), giving every disk its own independent snapshot, compression, and replication capabilities.
+
+---
+
+## Core ZFS Concepts
+
+### Copy-on-Write (CoW)
+
+ZFS never overwrites data in place. When a block is modified, ZFS writes the new version to a new location on disk and updates the block pointer. The old version remains on disk until the block pointer is freed. This has two consequences:
+
+1. **Snapshots are instant** — a snapshot is just a frozen set of block pointers. Taking a snapshot consumes no disk space initially because the original data is still in place.
+2. **Data corruption is detectable** — because ZFS knows exactly where every block should be, it can verify data integrity on every read.
+
+### Checksumming and Self-Healing
+
+Every block in a ZFS pool has a checksum stored in the block's parent metadata. On every read, ZFS verifies the checksum. If the data does not match its checksum, ZFS detects the corruption. If the pool has redundancy (mirror, RAIDZ), ZFS reads the correct copy from another disk and repairs the corrupted block automatically. This is called **self-healing**.
+
+This means ZFS catches what RAID controllers cannot: silent data corruption where the disk reports a successful read but returns wrong data. A traditional RAID-5 array has no way to know which mirror copy is corrupt. ZFS does.
+
+### Native Encryption
+
+ZFS supports dataset-level encryption without requiring a separate tool. Encryption keys can be stored as passphrases or as key files. Encrypted datasets can be unmounted and their keys unloaded, making the data completely inaccessible even to root.
+
+---
+
+## Pool Types
+
+A ZFS pool is built from one or more virtual devices (vdevs). The pool type determines redundancy and performance:
+
+| Pool Type | Disks Required | Redundancy | Notes |
+|---|---|---|---|
+| Stripe (no redundancy) | 1+ | None | Maximum performance; any disk failure loses all data |
+| Mirror | 2+ (even number) | N-1 disks can fail | Best read performance; 50% usable space |
+| RAIDZ1 | 3+ | 1 disk failure | Like RAID-5; better space efficiency than mirror |
+| RAIDZ2 | 4+ | 2 disk failures | Like RAID-6; production recommended for larger arrays |
+| RAIDZ3 | 5+ | 3 disk failures | Maximum redundancy; rare in practice |
+
+A mirror pool with two disks gives the best read performance (ZFS can read from either disk) and is the simplest configuration. RAIDZ1 and RAIDZ2 trade read performance for better space efficiency at larger drive counts.
+
+**Never use a stripe pool for production data.** A stripe pool has no redundancy — a single drive failure destroys the entire pool. A stripe pool is only appropriate for temporary scratch space or testing environments.
+
+---
+
+## Creating ZFS Pools
+
+### Via GUI
+
+In Proxmox: **Node → Disks → ZFS → Create: ZFS**
+
+Select the RAID level, choose the disks to include, set the compression algorithm, and click Create. Proxmox creates the pool and automatically adds it as a storage backend.
+
+### Via CLI
+
+```bash
+# Mirror pool (two disks)
+zpool create zfs_pool mirror /dev/sda /dev/sdb
+
+# RAIDZ1 pool (three disks, one drive fault tolerance)
+zpool create zfs_pool raidz /dev/sda /dev/sdb /dev/sdc
+
+# RAIDZ2 pool (four disks, two drive fault tolerance)
+zpool create zfs_pool raidz2 /dev/sda /dev/sdb /dev/sdc /dev/sdd
+
+# Check pool status
+zpool status zfs_pool
+
+# List all pools and usage
+zpool list
+```
+
+**Important**: Always reference disks by their stable `/dev/disk/by-id/` paths in production, not by `/dev/sda` style names. Device names can change between reboots if disks are added or moved; ID-based paths remain stable.
+
+```bash
+# List disks by stable ID
+ls -la /dev/disk/by-id/
+
+# Create mirror using stable IDs
+zpool create zfs_pool mirror \
+  /dev/disk/by-id/ata-WDC_WD10EZEX_12345678 \
+  /dev/disk/by-id/ata-WDC_WD10EZEX_87654321
+```
+
+---
+
+## Datasets vs. Zvols
+
+ZFS provides two primary storage objects: **datasets** (filesystems) and **zvols** (block devices).
+
+### Datasets
+
+A dataset is a ZFS filesystem — a mountable directory that inherits properties from its parent pool. Datasets are used for LXC container root filesystems in Proxmox. Each container gets its own dataset, inheriting compression and deduplication settings from the pool.
+
+```bash
+# Create a dataset
+zfs create zfs_pool/containers
+
+# Set properties on a dataset
+zfs set compression=lz4 zfs_pool/containers
+zfs set atime=off zfs_pool/containers
+
+# List datasets
+zfs list
+```
+
+### Zvols
+
+A zvol is a ZFS block device — it looks like a raw disk to the rest of the system. Proxmox uses zvols for KVM VM disk images. Each VM disk is a separate zvol, which means each disk can have its own snapshot, size, and compression settings.
+
+```bash
+# Create a zvol (8G block device)
+zfs create -V 8G zfs_pool/vm-101-disk-0
+
+# The zvol appears at /dev/zvol/zfs_pool/vm-101-disk-0
+```
+
+---
+
+## Dataset Properties
+
+ZFS datasets are configured through properties. Key properties for a Proxmox storage pool:
+
+| Property | Recommended Value | Effect |
+|---|---|---|
+| `compression` | `lz4` | Inline compression; lz4 is fast with good ratio |
+| `atime` | `off` | Disable access time updates; reduces unnecessary writes |
+| `recordsize` | `16k` for VMs, `1M` for backups | Block size for sequential vs random I/O workloads |
+| `dedup` | `off` (usually) | Deduplication; high RAM cost, rarely worth it |
+| `sync` | `standard` | Write sync behavior; `disabled` gives performance but risks data loss |
+
+For VM workloads, `compression=lz4` is almost always a net win — it reduces I/O (fewer blocks to read/write) while adding negligible CPU cost on modern processors.
+
+---
+
+## ZFS Snapshots
+
+Snapshots are one of ZFS's most powerful features and the reason Proxmox recommends ZFS for local VM storage. A ZFS snapshot is an instant, read-only copy of a dataset or zvol at a point in time. Because ZFS uses copy-on-write, taking a snapshot requires no I/O and consumes no space initially. Space is only consumed as the live dataset diverges from the snapshot.
+
+```bash
+# Take a snapshot of a dataset
+zfs snapshot zfs_pool/vm-101-disk-0@before-upgrade
+
+# List all snapshots
+zfs list -t snapshot
+
+# Roll back to a snapshot (destroys changes made after the snapshot)
+zfs rollback zfs_pool/vm-101-disk-0@before-upgrade
+
+# Delete a snapshot
+zfs destroy zfs_pool/vm-101-disk-0@before-upgrade
+```
+
+Snapshots in Proxmox are managed through the VM's **Snapshots** tab in the GUI. When you take a snapshot via the Proxmox GUI, it creates ZFS snapshots for all disks of that VM automatically. The snapshot can optionally include the VM's RAM state for a complete point-in-time capture of a running system.
+
+---
+
+## ZFS Send and Receive — Replication
+
+`zfs send` and `zfs receive` are the ZFS native tools for replication. They serialize a dataset or snapshot into a stream that can be piped over SSH to another ZFS pool on a remote host.
+
+```bash
+# Send an initial full snapshot to a remote host
+zfs send zfs_pool/vm-101-disk-0@snap1 | \
+  ssh root@backup-node zfs receive backup_pool/vm-101-disk-0
+
+# Send only the changes since the last snapshot (incremental)
+zfs send -i @snap1 zfs_pool/vm-101-disk-0@snap2 | \
+  ssh root@backup-node zfs receive backup_pool/vm-101-disk-0
+```
+
+Proxmox VE includes a built-in **Replication** feature (`pvesr`) that automates this process. From the GUI, navigate to the VM → **Replication** → **Add**. Specify the target node and replication interval (minimum 15 minutes). Proxmox will automatically manage snapshot creation, incremental sends, and cleanup.
+
+Replication requires that both the source and target nodes use ZFS for the relevant VM storage. The feature is designed for cluster-internal replication between nodes, providing a near-realtime copy of VM disks on a second node without requiring shared storage.
+
+---
+
+## ZFS ARC — Adaptive Replacement Cache
+
+ZFS uses system RAM as a read cache called the **ARC** (Adaptive Replacement Cache). Unlike a traditional LRU cache, ARC tracks both recently used blocks and frequently used blocks, balancing between them dynamically to maximize cache hit rates.
+
+The ARC can consume the majority of available RAM on a busy Proxmox node. This is intentional behavior — unused RAM is wasted RAM, and ZFS uses it productively. However, on a Proxmox node running many VMs, RAM is also needed by the VMs themselves.
+
+To check ARC statistics:
+
+```bash
+# ARC size and hit ratio
+arc_summary
+
+# Or from /proc
+cat /proc/spl/kstat/zfs/arcstats | grep -E "^size|^hits|^misses"
+```
+
+To limit ARC size so VMs get enough RAM:
+
+```bash
+# Limit ARC to 8 GB (add to /etc/modprobe.d/zfs.conf)
+echo "options zfs zfs_arc_max=8589934592" > /etc/modprobe.d/zfs.conf
+
+# Apply without rebooting
+echo 8589934592 > /sys/module/zfs/parameters/zfs_arc_max
+```
+
+A good rule of thumb is to allow ARC to use up to 50% of total RAM, leaving the rest for VMs and the OS.
+
+---
+
+## L2ARC and SLOG/ZIL
+
+### L2ARC
+
+The L2ARC (Level 2 ARC) is a secondary read cache on a fast SSD, extending the ARC beyond RAM. Blocks evicted from the RAM ARC are written to the L2ARC device instead of being discarded.
+
+```bash
+# Add an SSD as L2ARC to an existing pool
+zpool add zfs_pool cache /dev/sdc
+```
+
+L2ARC is beneficial for read-heavy workloads with a working set larger than available RAM. It is less effective for write-heavy or sequential I/O patterns.
+
+### SLOG / ZIL
+
+The ZIL (ZFS Intent Log) is a write journal. Synchronous writes are committed to the ZIL first, then acknowledged to the application. The ZIL is normally stored within the pool itself, which means it competes with other I/O on the same disks.
+
+A **SLOG** (Separate Intent Log) device moves the ZIL onto a dedicated fast SSD, dramatically reducing synchronous write latency. This matters for applications that issue synchronous writes (databases, NFS exports, iSCSI targets).
+
+```bash
+# Add a dedicated SSD as SLOG
+zpool add zfs_pool log /dev/sdd
+
+# Check that the SLOG is listed in pool status
+zpool status zfs_pool
+```
+
+Use an enterprise-grade SSD with power-loss protection for SLOG devices. Loss of the SLOG device itself causes minor transaction rollback (no data loss), but a SLOG device without power-loss protection can corrupt the ZIL on an unexpected power failure.
+
+---
+
+## Integrating ZFS with Proxmox Storage
+
+When you create a ZFS pool in Proxmox, it is automatically added to the storage configuration. The pool appears in `/etc/pve/storage.cfg`:
+
+```
+zfspool: zfs-01
+  pool zfs_pool
+  content images,rootdir
+  sparse 1
+```
+
+The `sparse` flag enables thin-provisioned zvols — disk images are created as sparse volumes that allocate space on demand, matching the default behavior of qcow2 on directory storage.
+
+---
+
+## Scrub Schedule
+
+A ZFS scrub reads every block in the pool and verifies checksums. It detects and repairs silent corruption. Proxmox schedules scrubs automatically via a cron job.
+
+```bash
+# Run a scrub manually
+zpool scrub zfs_pool
+
+# Check scrub status
+zpool status zfs_pool
+
+# View scrub history
+zpool history zfs_pool | grep scrub
+```
+
+Schedule regular scrubs — monthly at a minimum, weekly for important pools. Scrubs can run while the pool is in active use, though they add background I/O load.
+
+---
+
+## Replacing a Failed Disk
+
+When a disk fails in a ZFS mirror or RAIDZ pool, the pool enters a degraded state. Replace it promptly — a degraded pool with a second failure will lose data.
+
+```bash
+# Show which disk failed
+zpool status zfs_pool
+
+# Replace the failed disk with a new one
+# (old disk must still be present or use its /dev/disk/by-id path)
+zpool replace zfs_pool /dev/disk/by-id/old-failed-disk /dev/disk/by-id/new-disk
+
+# Monitor resilver (rebuild) progress
+zpool status zfs_pool
+```
+
+The resilver process copies data from surviving disks to the replacement disk. Resilver time depends on pool size and disk speed. Do not remove the replacement disk during resilver.
+
+---
+
+## ZFS Command Reference
+
+```bash
+# Pool management
+zpool create, destroy, status, list, import, export, scrub, replace
+
+# Dataset management
+zfs create, destroy, snapshot, rollback, clone, send, receive
+
+# Property management
+zfs get all <dataset>          # Show all properties
+zfs set compression=lz4 <ds>   # Set a property
+zfs inherit compression <ds>   # Reset to inherited value from parent
+
+# Check pool I/O statistics
+zpool iostat -v 5              # Live I/O stats every 5 seconds
+```
+
+ZFS on Proxmox is a robust, integrated choice for local storage. Its snapshot capabilities, data integrity guarantees, and built-in replication support make it the preferred local backend for production Proxmox nodes.

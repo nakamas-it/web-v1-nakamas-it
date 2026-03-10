@@ -1,0 +1,99 @@
+---
+title: "vSphere Storage — Protocols, Datastores, and Storage Policies"
+category: "vmware"
+topic: "vsphere-storage"
+summary: "How vSphere connects to and organises storage — the block and file protocols that carry VM disk data, the VMFS and NFS datastore types that hold virtual machine files, raw device mappings for direct SAN access, and Storage Policy-Based Management that abstracts storage capabilities from the VM."
+tags: ["vmware", "vsphere", "storage", "vmfs", "san", "vcpdcv"]
+order: 5
+draft: false
+---
+
+## Overview
+
+Virtual machines need storage for their disk images, memory swap files, configuration data, and snapshots. vSphere abstracts this storage through a set of protocols, datastore types, and policy mechanisms that decouple where data lives from how a virtual machine accesses it. Knowing which protocol carries which type of I/O, which datastore format supports which capabilities, and how Storage Policy-Based Management (SPBM) automates placement decisions is the foundation for designing and operating vSphere storage infrastructure.
+
+## Storage Protocols
+
+vSphere supports both block-level and file-level storage protocols, each with different transport mechanisms and hardware requirements:
+
+| Protocol | Transport | I/O Type | Notes |
+|---|---|---|---|
+| **Fibre Channel (FC)** | Dedicated FC fabric via HBA | Block | Highest throughput; requires FC switches and host bus adapters |
+| **FCoE** | Ethernet via Converged Network Adapter | Block | FC frames over Ethernet; requires DCB/lossless Ethernet |
+| **iSCSI** | IP/Ethernet | Block | Software initiator uses standard NIC; hardware initiator uses dedicated HBA |
+| **NFS v3 / v4.1** | IP/Ethernet | File | NAS-based; v4.1 adds Kerberos authentication and session trunking |
+| **NVMe/TCP** | IP/Ethernet | Block | NVMe protocol over TCP/IP; lower latency than iSCSI |
+| **NVMe/FC** | Dedicated FC fabric | Block | NVMe protocol over FC fabric; lowest latency block option |
+
+FC and FCoE require dedicated hardware and a specialised network fabric. iSCSI and NFS run over standard IP networks and are the most common choices for environments that cannot justify dedicated storage networking. NVMe-based protocols deliver lower latency by eliminating the SCSI command translation overhead, at the cost of needing compatible hardware and target devices.
+
+## Datastore Types
+
+A datastore is the logical container that vSphere presents to administrators for storing VM files. The underlying protocol determines which datastore types are available:
+
+| Datastore Type | Supported Protocols | Key Characteristics |
+|---|---|---|
+| **VMFS** | FC, FCoE, iSCSI, local SCSI | Block-level cluster filesystem; multiple ESXi hosts can mount and write simultaneously |
+| **NFS** | NFS v3, NFS v4.1 | File-based; mounted from NAS; no VMFS formatting required |
+| **vSAN** | vSAN (object storage) | Built from local host disks; fault tolerance via storage policies |
+| **vVols** | FC, FCoE, iSCSI, NFS, NVMe-oF | VM-centric; vendor storage array presents vVol objects directly |
+
+VMFS is the most widely used datastore type. It is a cluster-aware filesystem that allows concurrent read/write access from multiple ESXi hosts — a requirement for vMotion and vSphere HA, both of which assume shared access to VM disk files.
+
+## VMFS Versions
+
+ESXi 6.5 and later supports VMFS 5 and VMFS 6. VMFS 3 support was removed entirely in ESXi 6.5.
+
+| Feature | VMFS 5 | VMFS 6 |
+|---|---|---|
+| Maximum datastore size | 64 TB | 64 TB |
+| Maximum file size | 62 TB | 62 TB |
+| Partition format | GPT | GPT |
+| Block size | 1 MB | 1 MB |
+| Automatic space reclamation (UNMAP) | No — manual only | Yes — automatic thin reclamation |
+| 4Kn drive support | No | Yes |
+
+The critical practical difference is automatic UNMAP. When a thin-provisioned virtual disk deletes data, the underlying storage blocks are not automatically returned to the free pool on VMFS 5 — a manual `esxcli storage vmfs unmap` command is required. VMFS 6 performs this space reclamation automatically, which matters on modern arrays that support thin provisioning at the array level.
+
+## Virtual Disk Types
+
+Each virtual machine disk (VMDK) can be provisioned in three formats that trade off creation speed, immediate storage consumption, and write performance:
+
+| Type | Space Reserved | Zeroed at Creation | Write Performance | Notes |
+|---|---|---|---|---|
+| **Thick Provision Eager Zeroed** | All space, immediately | Yes | Best | Required for Fault Tolerance; recommended for databases and production VMs |
+| **Thick Provision Lazy Zeroed** | All space, immediately | No (zeroed on first write) | Good | Default thick format; slightly slower first-write performance |
+| **Thin Provision** | Only used space | No | Variable | Fastest to create; risk of datastore overcommitment if not monitored |
+
+Eager Zeroed Thick is mandatory for Fault Tolerance (FT) because FT requires synchronous disk writes between the primary and secondary VM. The zeroing operation at creation time ensures there are no first-write latency surprises during FT operation. Thin provisioning is common in development environments and on arrays with hardware-level thin provisioning support, but requires active monitoring to prevent datastores from filling unexpectedly.
+
+## Raw Device Mapping (RDM)
+
+An RDM gives a virtual machine direct access to a raw SAN LUN, bypassing the VMFS filesystem entirely. The RDM appears as a VMDK pointer file stored on a VMFS datastore, but I/O from the VM goes directly to the physical LUN.
+
+Two RDM compatibility modes exist with important capability differences:
+
+| Mode | Snapshots | vMotion | Use Case |
+|---|---|---|---|
+| **Virtual compatibility mode** | Supported | Supported | General use; ESXi intercepts and processes SCSI commands |
+| **Physical compatibility mode** | Not supported | Not supported | Windows Server Failover Clustering (MSCS); applications requiring raw SCSI-3 command pass-through |
+
+Physical compatibility mode is required when the guest OS must send raw SCSI commands directly to the LUN — typically for clustering scenarios that rely on SCSI persistent reservations (MSCS disk witness, for example). The trade-off is the loss of snapshots and vMotion. Virtual compatibility mode supports both and is the correct choice for most other RDM use cases.
+
+## Storage Policy-Based Management (SPBM)
+
+SPBM separates the storage requirement from the storage decision. Instead of an administrator manually placing a VM on a specific datastore because they know that datastore has the right performance tier and protection level, SPBM defines a **storage policy** with required capabilities, assigns that policy to a VM, and lets vSphere enforce placement on compliant storage automatically.
+
+Policies are built from capability rules. For vSAN datastores, these rules include FTT (Failures To Tolerate), the failure tolerance method (RAID-1 mirroring or RAID-5/6 erasure coding), the number of disk stripes per object, and IOPS limits. For tag-based placement on traditional datastores, a custom tag on the datastore (for example, `Tier=Gold`) can be used as the matching rule in a policy.
+
+When a VM is assigned a policy, vSphere continuously monitors compliance. If the storage configuration drifts out of compliance — for example, a vSAN host failure reduces the effective FTT — vCenter reports the VM as non-compliant, prompting remediation.
+
+## Storage DRS and SIOC
+
+**Storage DRS (SDRS)** groups multiple datastores into a datastore cluster and automatically balances VM placement across them. It monitors both space utilisation and I/O latency (using the 90th percentile over a 24-hour window) and generates initial placement recommendations and ongoing rebalancing migrations. SDRS checks every eight hours by default. NFS and VMFS datastores cannot be mixed in the same datastore cluster.
+
+**Storage I/O Control (SIOC)** manages I/O prioritisation within a single shared datastore when contention is detected. It assigns I/O shares per VM and enforces them when the datastore's I/O latency exceeds the configurable congestion threshold (30 ms by default). SIOC has no effect during periods of low contention. Both SDRS and SIOC require an Enterprise Plus licence.
+
+## Summary
+
+vSphere storage is layered: protocols (FC, iSCSI, NFS, NVMe) carry I/O from hosts to storage systems; datastores (VMFS, NFS, vSAN) organise that storage into containers for VM files; and SPBM policies abstract the storage requirements of VMs from the physical details of where data lives. VMFS 6 is the current standard block datastore, adding automatic UNMAP over VMFS 5. Virtual disk format (Thin, Lazy Zeroed, Eager Zeroed) determines provisioning behaviour and whether features like Fault Tolerance are supported. RDMs provide raw LUN access for clustering and legacy applications that need SCSI pass-through. SDRS and SIOC add automated placement and I/O fairness on top of the datastore layer.

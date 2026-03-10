@@ -1,0 +1,96 @@
+---
+title: "VMware vSAN — Hyper-Converged Storage Architecture"
+category: "vmware"
+topic: "vsan"
+summary: "How VMware vSAN pools local NVMe, SSD, and HDD storage across ESXi hosts into a shared distributed datastore — covering the Original Storage Architecture versus the Express Storage Architecture introduced in vSAN 8, fault domains, storage policies, and stretched cluster design."
+tags: ["vmware", "vsan", "hyper-converged", "storage", "vcpdcv"]
+order: 6
+draft: false
+---
+
+## Overview
+
+Traditional virtualised infrastructure separates compute and storage into distinct tiers. ESXi hosts provide CPU and memory; external SANs or NAS arrays provide the shared storage those hosts require. This model works but introduces cost, complexity, and a dedicated storage network as a potential bottleneck and single point of failure.
+
+vSAN dissolves that boundary. It is a software-defined storage layer built directly into the ESXi kernel that aggregates local disks across all hosts in a cluster into a single shared datastore. From the perspective of virtual machines and vCenter, that datastore looks like any other — VMs can be created on it, vMotion works to and from it, and storage policies govern how their data is protected. The difference is that the storage physically lives inside the same servers running the workloads, eliminating the external storage array entirely.
+
+vSAN is managed entirely through vCenter Server and requires either a standalone vSAN licence or the vSphere Enterprise Plus edition. A minimum of three hosts is required for a standard vSAN cluster, and each host must contribute at least one disk group's worth of storage to the pool.
+
+## Original Storage Architecture (OSA) vs Express Storage Architecture (ESA)
+
+vSAN 8 introduced a fundamentally different internal storage architecture alongside the existing one, making the choice of architecture a key design decision:
+
+| Characteristic | OSA (Original Storage Architecture) | ESA (Express Storage Architecture) |
+|---|---|---|
+| Introduced | vSAN 1.0 | vSAN 8.0 |
+| Disk organisation | Disk groups: one cache device + 1–7 capacity devices | No disk groups; all devices contribute to a single pool |
+| Cache tier | Dedicated SSD or NVMe device per disk group | No separate cache tier; intelligent caching across all devices |
+| Supported media | All-flash (NVMe/SSD) or hybrid (SSD cache + HDD capacity) | NVMe only |
+| Max disk groups per host | 5 | N/A |
+| RAID-5/6 efficiency | Supported but higher overhead | More efficient erasure coding |
+| Write path | Writes land in cache tier first, then destaged to capacity | Single-tier write path, lower write amplification |
+
+OSA is the proven architecture that supports a wider range of hardware, including hybrid configurations where spinning HDD disks serve as capacity tier with a flash cache. ESA is the forward-looking architecture for environments where all storage is NVMe flash — it removes the disk group abstraction and delivers higher throughput and lower latency because the entire storage tier operates at flash speeds with no cache destaging overhead.
+
+## vSAN Requirements
+
+Before enabling vSAN on a cluster, several prerequisites must be met:
+
+- **Minimum hosts**: Three hosts for a standard cluster. Two hosts plus an external witness appliance is supported for two-node edge deployments.
+- **Media**: All-flash or hybrid for OSA; all-NVMe for ESA.
+- **Network**: A dedicated VMkernel adapter tagged for vSAN traffic on each host. VMware recommends 10 GbE minimum; 25 GbE or higher for production workloads.
+- **Disk exclusivity**: Disks claimed by vSAN are no longer available as local datastores or for other purposes. This is irreversible without removing the disk from vSAN first.
+- **Clock synchronisation**: All hosts must synchronise time via NTP. vSAN relies on consistent timestamps for distributed operations.
+
+## Storage Policies — SPBM
+
+vSAN does not protect data by default through a fixed RAID level. Instead, each virtual machine's storage requirements are defined through a storage policy assigned at the VM or virtual disk level. This is the Storage Policy Based Management (SPBM) framework.
+
+The most important policy settings are:
+
+| Policy Setting | Description |
+|---|---|
+| **Failures To Tolerate (FTT)** | How many simultaneous host, disk, or network failures the object can survive (0, 1, 2, or 3) |
+| **Failure Tolerance Method** | RAID-1 (mirroring) or RAID-5/6 (erasure coding) |
+| **Number of disk stripes per object** | How many capacity devices an object is striped across (default 1) |
+| **Object space reservation** | Percentage of object size reserved as thick-provisioned (0% = thin) |
+| **IOPS limit for object** | Maximum IOPS per object; 0 means unlimited |
+| **Flash read cache reservation** | Percentage of logical size reserved in flash read cache (hybrid OSA only) |
+
+The interaction between FTT and Failure Tolerance Method determines both the protection level and the minimum cluster size required:
+
+| FTT | Method | Minimum hosts | Space overhead |
+|---|---|---|---|
+| 1 | RAID-1 | 3 | 2× (100% overhead) |
+| 1 | RAID-5 | 4 | 1.33× (33% overhead) |
+| 2 | RAID-1 | 5 | 3× (200% overhead) |
+| 2 | RAID-6 | 6 | 1.5× (50% overhead) |
+
+RAID-5 and RAID-6 erasure coding are more space-efficient than RAID-1 mirroring but require more hosts and are more CPU-intensive. For ESA clusters, erasure coding performs significantly better than on OSA due to the single-tier architecture.
+
+## Fault Domains
+
+A fault domain is a named group of hosts that share a common physical failure boundary — typically a rack or chassis. Without fault domains, vSAN distributes data components across hosts but has no awareness of which hosts share the same power circuit, top-of-rack switch, or physical rack. A rack-level failure could affect multiple hosts and violate the FTT guarantee.
+
+With fault domains configured, vSAN treats the entire fault domain as a single failure unit and ensures that no two components of the same data object land on hosts within the same fault domain. A minimum of three fault domains is required to provide FTT=1 protection with rack-awareness. Fault domains are created in vCenter under the vSAN cluster configuration and hosts are assigned to them — vSAN then enforces placement policy automatically.
+
+## Stretched Cluster
+
+A vSAN stretched cluster spans two geographically separated sites and adds a witness host at a third location. This design provides site-level resilience: if an entire site goes offline, the VMs on that site restart on the surviving site.
+
+Key design parameters:
+
+- **Two data sites**: Each holds a full copy of every protected data object. VMs can run on either site.
+- **Witness host**: A lightweight appliance (or VM) deployed at a third site that holds metadata components only — no actual VM data. It provides the quorum vote needed to resolve a split-brain scenario when the two data sites lose connectivity to each other.
+- **Latency requirements**: The maximum supported round-trip time between the two data sites is 5 ms (some configurations support up to 10 ms with specific licences). The witness site can be up to 200 ms RTT from either data site.
+- **Preferred and secondary sites**: One site is designated preferred. In the event of a partition where neither site can see the other, the preferred site continues running.
+
+A stretched cluster effectively implements FTT=1 across sites. Each data site constitutes one fault domain, and the witness provides the third domain for quorum purposes.
+
+## vSAN File Services
+
+vSAN File Services extends the vSAN datastore to provide NFS v3 and NFS v4.1 shares. Applications and VMs that require shared file-level access — rather than block storage — can consume these shares directly. File Services runs as a set of file service agent VMs deployed automatically on the cluster and requires a vSAN Enterprise licence.
+
+## Summary
+
+vSAN turns the local storage in every ESXi host into a participant in a cluster-wide shared pool, removing the need for external SAN or NAS infrastructure. OSA accommodates a broad hardware range including hybrid spinning-disk configurations; ESA raises the performance ceiling by requiring all-NVMe hardware and eliminating the disk group abstraction. Storage policies give per-VM control over protection level and space efficiency. Fault domains and stretched clusters extend that protection to rack-level and site-level failure scenarios respectively.

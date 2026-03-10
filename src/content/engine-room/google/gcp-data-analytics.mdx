@@ -1,0 +1,162 @@
+---
+title: "GCP — Data Analytics and Pipelines"
+category: "google"
+topic: "data-analytics"
+summary: "GCP's data analytics stack — Pub/Sub messaging, Dataflow stream and batch processing, Dataproc for Hadoop/Spark, and the Looker BI platform."
+tags: ["gcp", "google-cloud", "pubsub", "dataflow", "dataproc", "analytics", "streaming"]
+order: 15
+draft: false
+---
+
+## Overview
+
+Modern data engineering requires more than a database. Raw data must be ingested from dozens of sources, transported reliably, transformed at scale, and ultimately surfaced to analysts and dashboards in near real time. GCP provides a managed stack that covers every stage of this pipeline: **Cloud Pub/Sub** for durable message ingestion, **Cloud Dataflow** for unified stream and batch processing, **Cloud Dataproc** for managed Hadoop and Spark workloads, **Cloud Composer** for workflow orchestration, and **Looker** for business intelligence. Together these services form a coherent, serverless-first data platform that scales from megabytes to petabytes without cluster management.
+
+The canonical GCP streaming pipeline — Pub/Sub → Dataflow → BigQuery — underpins many real-time use cases: IoT telemetry, application event streams, clickstream analytics, and financial transaction monitoring. Understanding how each layer in this stack behaves, and where the failure modes lie, is essential for both building reliable pipelines and passing the Professional Cloud Architect exam.
+
+---
+
+## Cloud Pub/Sub
+
+Cloud Pub/Sub is GCP's globally distributed, asynchronous messaging service. It decouples data producers from data consumers, so that either side can scale, fail, or be replaced without the other needing to know. The service is fully managed: there are no brokers to provision, no partitions to configure, and no capacity planning required.
+
+### Core Concepts
+
+**Topics** are the named channels to which publishers send messages. A topic is a global resource — any GCP project with the appropriate IAM permissions can publish to or subscribe from it. Topics are created before any messages can be sent; they do not buffer messages themselves.
+
+**Subscriptions** are the named entities that receive messages from a topic. A single topic can have multiple subscriptions; each subscription receives every message published to the topic independently. This is the fan-out model: one publisher, many independent consumers.
+
+**Messages** consist of a base64-encoded data payload (up to 10 MB) plus optional key-value attributes. Messages are durably stored by Pub/Sub until they are acknowledged by all subscriptions or until the retention window expires — up to 7 days by default.
+
+### Push vs Pull Delivery
+
+Pub/Sub supports two delivery modes per subscription:
+
+| Mode | How It Works | Best For |
+|------|-------------|----------|
+| **Pull** | Subscriber calls the Pub/Sub API to fetch messages; controls its own consumption rate | High-throughput consumers, batch processing, services with variable load |
+| **Push** | Pub/Sub sends messages as HTTP POST requests to a configured HTTPS endpoint | Serverless consumers (Cloud Run, Cloud Functions), App Engine services |
+
+Pull is the default and is preferred for Dataflow jobs and applications that need fine-grained flow control. Push simplifies consumption for serverless receivers that cannot maintain a long-lived connection.
+
+### Delivery Guarantees and Idempotency
+
+Pub/Sub guarantees **at-least-once delivery** — a message may be delivered more than once if the subscriber does not acknowledge it quickly enough or if Pub/Sub retries after a timeout. Consumers must therefore be designed to be **idempotent**: processing the same message twice must produce the same result as processing it once. Common techniques include using message attributes as idempotency keys checked against a Cloud Bigtable or Cloud Spanner table before processing.
+
+### Message Ordering and Exactly-Once
+
+By default, Pub/Sub does not guarantee message ordering across different publisher instances. **Message ordering** can be enabled on a subscription by using an ordering key — messages with the same key are delivered in the order they were published, but this imposes a throughput limit per key. The **exactly-once delivery** feature, available on pull subscriptions, prevents redelivery of acknowledged messages within the acknowledgement deadline window by tracking acknowledged message IDs server-side.
+
+### Dead-Letter Topics
+
+If a subscriber repeatedly fails to acknowledge a message (up to a configurable maximum delivery attempt count), Pub/Sub can forward the message to a **dead-letter topic**. This prevents poison-pill messages from blocking a subscription indefinitely. The dead-letter topic is itself a regular Pub/Sub topic — messages in it can be inspected, reprocessed, or sent to a monitoring pipeline for alerting.
+
+---
+
+## Cloud Dataflow
+
+Cloud Dataflow is GCP's managed execution engine for **Apache Beam** pipelines. Apache Beam is a unified programming model that lets developers write a single pipeline that can run in both streaming and batch modes — the same code handles real-time event streams from Pub/Sub and historical batch files from Cloud Storage.
+
+### The Unified Model
+
+The key insight behind Apache Beam is that a stream is just an unbounded dataset and a batch is a bounded one. The Beam SDK abstracts over this distinction. A pipeline reads from one or more sources, applies a sequence of transformations (the `PTransform` graph), and writes to one or more sinks. When Dataflow executes the pipeline, it automatically decides how to parallelize work across workers.
+
+For streaming pipelines, Beam's **windowing** model is essential. Because events arrive out of order in real-world streams, windowing groups events by time rather than arrival order. Common window types include:
+
+- **Fixed windows** — non-overlapping time buckets (e.g., events grouped by minute)
+- **Sliding windows** — overlapping buckets (e.g., a 5-minute window that advances every 1 minute)
+- **Session windows** — gaps in data signal the end of a session; useful for user activity tracking
+
+**Watermarks** represent Dataflow's estimate of how far behind real time the pipeline is processing. When the watermark passes a window boundary, Dataflow emits results for that window, even if late-arriving data might still trickle in.
+
+### Autoscaling and Templates
+
+Dataflow automatically scales the number of worker VMs up and down based on pipeline backlog and throughput requirements. Workers are standard Compute Engine VMs; you choose the machine type, and Dataflow manages launching, distributing work, and terminating them. There is no cluster to manage — the job is the unit of deployment.
+
+**Dataflow Templates** package a pre-compiled pipeline so that non-engineers can launch jobs without writing code. Google provides dozens of pre-built templates (Pub/Sub to BigQuery, Pub/Sub to Cloud Storage, Avro to BigQuery, etc.). **Flex Templates** use Docker containers, allowing full customisation of runtime dependencies and pipeline parameters — they are the modern replacement for classic templates.
+
+---
+
+## Cloud Dataproc
+
+Cloud Dataproc is GCP's managed service for running **Apache Hadoop** and **Apache Spark** clusters. It is designed for teams with existing Hadoop/Spark workloads or expertise who want to move to managed infrastructure without rewriting their data processing logic.
+
+### Ephemeral Cluster Pattern
+
+The defining Dataproc design pattern is the **ephemeral cluster**: spin up a cluster for a specific job, run the job, then shut the cluster down. Because Dataproc clusters start in approximately 90 seconds, there is no reason to keep a cluster running around the clock for batch workloads. Data is stored persistently in Cloud Storage (not HDFS), so it survives cluster termination. This pattern dramatically reduces cost compared to always-on Hadoop clusters.
+
+### Preemptible Nodes and Spot Workers
+
+Dataproc supports mixing regular worker nodes with **preemptible (Spot) VMs** in the secondary worker pool. Preemptible workers cost up to 80–90% less than regular VMs but can be reclaimed by GCP with 30 seconds notice. For fault-tolerant Spark jobs this is acceptable — Spark will reschedule failed tasks on surviving nodes. The recommended pattern is to use at least 2 primary (non-preemptible) nodes for the YARN resource manager and NameNode, then fill out compute with preemptible secondaries.
+
+| Node Type | Cost | Preemptible | Role |
+|-----------|------|-------------|------|
+| Primary workers | Full price | No | YARN, HDFS NameNode, stable compute |
+| Secondary workers (Spot) | Up to 90% off | Yes | Additional compute for batch jobs |
+
+### Dataproc Metastore
+
+Dataproc Metastore is a fully managed Apache Hive Metastore service. It stores table metadata (schema, location, partition information) for Spark SQL, Hive, and Presto jobs, allowing multiple clusters and services to share a consistent catalog. Without a managed metastore, each ephemeral cluster would need to rebuild metadata from scratch. Dataproc Metastore integrates natively with BigQuery, Dataflow, and Dataplex.
+
+---
+
+## Cloud Composer
+
+Cloud Composer is the managed version of **Apache Airflow** on GCP. Airflow uses Python-defined **Directed Acyclic Graphs (DAGs)** to express workflows as sequences of tasks with explicit dependencies. Each task in a DAG is a discrete unit of work — running a Dataflow job, querying BigQuery, copying files in Cloud Storage, calling an external API, or triggering a Cloud Function.
+
+Composer runs Airflow on a managed GKE cluster. Operators in Airflow communicate with GCP services natively through the Google Cloud Airflow provider package. Because Composer is Kubernetes-based, it supports scaling the task execution pool independently of the Airflow scheduler.
+
+A common orchestration pattern combines Composer as the scheduler with Dataflow as the execution engine: the DAG triggers a Dataflow template job, waits for completion using a sensor operator, then triggers downstream tasks such as BigQuery transformations or Looker content refreshes.
+
+---
+
+## Looker and Looker Studio
+
+**Looker** is Google's enterprise BI platform, acquired in 2019. It sits above BigQuery (and other databases) and provides a governed semantic layer called **LookML** — a YAML-based modelling language that defines metrics, dimensions, joins, and derived tables. By centralising business logic in LookML, Looker ensures that every analyst querying the same metric gets the same answer, regardless of the BI tool they use.
+
+Key capabilities:
+
+- **Explores** — the interactive query interface where analysts drag and drop dimensions and measures
+- **Dashboards** — scheduled or embedded views combining multiple Explores
+- **Embedded analytics** — Looker content can be embedded in external applications via signed URLs and the Looker API
+- **Data Actions** — write back to operational systems (Salesforce, Slack, Jira) directly from Looker dashboards
+
+**Looker Studio** (formerly Data Studio) is the free, self-service BI tool in the Google ecosystem. It connects directly to BigQuery, Google Sheets, Cloud Storage, and hundreds of community connectors. It lacks the governed semantic layer of Looker but is suitable for ad-hoc reporting and sharing without enterprise licensing requirements.
+
+| Feature | Looker | Looker Studio |
+|---------|--------|--------------|
+| Semantic layer (LookML) | Yes | No |
+| Enterprise governance | Yes | No |
+| Cost | Paid (per user) | Free |
+| Embedded analytics | Yes (full API) | Limited |
+| Best for | Enterprise BI, governed metrics | Ad-hoc reporting, quick dashboards |
+
+---
+
+## The Canonical Streaming Pipeline: Pub/Sub → Dataflow → BigQuery
+
+The most common GCP streaming architecture chains these three services into a single real-time analytics pipeline:
+
+1. **Ingest** — Producers publish events (application logs, IoT sensor readings, transaction records) to a Pub/Sub topic. The topic acts as a durable buffer, absorbing traffic spikes without dropping data.
+
+2. **Process** — A Dataflow streaming job reads from the Pub/Sub subscription. The Beam pipeline validates records, enriches events by joining with reference data from Cloud Bigtable or Cloud Storage, applies windowing for aggregations, and handles late-arriving data with watermarks.
+
+3. **Store** — Processed records are written to BigQuery using the Storage Write API (high-throughput, exactly-once semantics) or the BigQuery streaming insert API (slightly higher latency, lower throughput). BigQuery tables are partitioned by event timestamp and clustered by the most common filter columns.
+
+4. **Visualise** — Looker or Looker Studio connects to BigQuery and provides real-time dashboards over the freshly landed data.
+
+This pipeline is horizontally scalable at every stage — Pub/Sub scales to millions of messages per second, Dataflow autoscales workers, and BigQuery is serverless. The entire pipeline can be defined in infrastructure-as-code (Terraform) and deployed through Cloud Build with no ongoing cluster management.
+
+---
+
+## Service Comparison Summary
+
+| Service | Type | Model | Managed | Use Case |
+|---------|------|-------|---------|----------|
+| Cloud Pub/Sub | Messaging | Topics / Subscriptions | Fully | Event ingestion, fan-out, decoupling |
+| Cloud Dataflow | Processing | Apache Beam (stream + batch) | Fully | ETL, stream processing, enrichment |
+| Cloud Dataproc | Processing | Hadoop / Spark | Partially (cluster) | Lift-and-shift Spark/Hadoop, ML training |
+| Cloud Composer | Orchestration | Apache Airflow DAGs | Fully | Multi-step workflow scheduling |
+| Cloud Data Fusion | ETL/ELT | CDAP, drag-and-drop | Fully | No-code/low-code data integration |
+| Looker | BI | LookML semantic layer | Fully (SaaS) | Enterprise governed analytics |
+| Looker Studio | BI | Self-service dashboards | Fully (SaaS) | Ad-hoc reporting |

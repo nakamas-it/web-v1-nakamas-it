@@ -1,0 +1,199 @@
+---
+title: "Proxmox VE — Templates and Snapshots"
+category: "proxmox"
+topic: "templates"
+summary: "Proxmox VM and container templates — converting VMs to templates, linked clones vs full clones, cloud-init for rapid provisioning, and snapshot workflows."
+tags: ["proxmox", "templates", "cloning", "snapshots", "cloud-init", "provisioning"]
+order: 15
+draft: false
+---
+
+## Why Templates Matter
+
+Every hour spent installing and configuring a base OS is an hour not spent on the actual work the VM is meant to do. In environments that spin up VMs regularly — development teams, lab environments, test infrastructure, production services that scale — the ability to clone a fully-configured system in seconds is a significant operational advantage. Proxmox provides two complementary mechanisms for this: VM templates (for KVM VMs) and container templates (for LXC).
+
+Templates also represent a form of configuration discipline. When a template is built carefully and thoroughly, every clone inherits that quality. When the template is updated, future clones pick up the improvement automatically. Without templates, every VM deployment starts from scratch, and any inconsistency in the installation process creates inconsistency in the fleet.
+
+## Converting a VM to a Template
+
+The VM template workflow follows a consistent pattern:
+
+**Step 1 — Build and configure the base VM.** Install the operating system, apply updates, install common packages, configure system settings (timezone, locale, NTP, etc.), and harden the configuration. This VM should represent the ideal starting state for any new deployment of this type.
+
+**Step 2 — Generalise the VM.** Remove anything that must be unique per instance:
+- Machine ID: `rm /etc/machine-id && systemd-machine-id-setup`
+- SSH host keys: `rm /etc/ssh/ssh_host_*`
+- Network interface configuration (remove any static IP or UUID assignments)
+- Hostname: set to a placeholder or leave for cloud-init to handle
+- User credentials: remove or reset as appropriate
+
+Skipping generalisation means every clone inherits the same machine ID, the same SSH host keys, and the same network configuration — all of which must be unique on a live network.
+
+**Step 3 — Power off the VM completely.** Templates can only be created from a stopped VM.
+
+**Step 4 — Convert to template.** Right-click the VM in the Proxmox GUI and select **Convert to Template**, or use the CLI:
+
+```bash
+qm template 9000
+```
+
+After conversion, the VM entry in the tree view shows a template icon. The VM can no longer be started directly — it exists only as a source for clones. The underlying disk image is marked read-only.
+
+## What the Conversion Does
+
+Converting a VM to a template in Proxmox is a lightweight operation. It sets a flag in the VM configuration file (`/etc/pve/nodes/<node>/qemu-server/<vmid>.conf`) that marks it as a template and makes the disk read-only. No data is copied or reformatted. The configuration file, disk image, and all VM settings remain exactly as they were.
+
+This also means that a template can be un-converted back to a regular VM if needed — the flag is just a metadata marker, not a structural change to the disk.
+
+## Full Clone vs. Linked Clone
+
+When cloning a template, Proxmox offers two cloning modes:
+
+**Full Clone** creates an independent copy of the template's disk image. The clone has its own complete disk file and does not reference the template at all after creation. Advantages:
+
+- Works with any storage type, including directory storage with raw images and LVM
+- The clone can be migrated anywhere, backed up independently, and the template can be deleted without affecting existing clones
+- I/O performance is identical to a fresh VM — no additional overhead from a snapshot chain
+
+**Linked Clone** creates a thin clone that shares the base disk image with the template through a snapshot chain. The template's disk becomes the base snapshot; the clone only stores the blocks that have changed since clone creation (using copy-on-write). Advantages:
+
+- Extremely fast to create — only the metadata is copied initially, no disk data
+- Space-efficient when clones have not diverged much from the template
+- Multiple clones from the same template share the same base blocks
+
+Linked clones require **snapshot-capable storage**: qcow2 format on directory or NFS, ZFS pools, or Ceph RBD. LVM and raw format do not support linked clones.
+
+The significant trade-off with linked clones: the template cannot be deleted as long as any linked clone exists. Deleting the template requires first converting all linked clones to full clones or deleting them entirely. For ephemeral workloads (short-lived test VMs, CI/CD runners), linked clones are ideal. For long-lived production VMs, full clones are cleaner.
+
+```bash
+# Create a full clone of template 9000 as VM 101
+qm clone 9000 101 --name web-01 --full --storage local-lvm
+
+# Create a linked clone of template 9000 as VM 102
+qm clone 9000 102 --name web-02
+
+# Clone to a specific node in the cluster
+qm clone 9000 103 --name web-03 --full --target pmx-02
+```
+
+## Cloud-Init Template Workflow
+
+The most effective provisioning approach in Proxmox combines VM templates with cloud-init. This eliminates the generalisation problem entirely because cloud-init handles all per-instance configuration at first boot, automatically.
+
+**Full cloud-init template workflow:**
+
+```bash
+# 1. Download a cloud image (Ubuntu 22.04 example)
+wget https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img \
+     -P /var/lib/vz/template/qemu/
+
+# 2. Create a base VM
+qm create 9000 --name ubuntu-22-template --memory 2048 --cores 2 \
+    --net0 virtio,bridge=vmbr0 --ostype l26
+
+# 3. Import the cloud image disk
+qm importdisk 9000 /var/lib/vz/template/qemu/jammy-server-cloudimg-amd64.img \
+    local-lvm
+
+# 4. Attach the imported disk and set boot order
+qm set 9000 --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-9000-disk-0
+qm set 9000 --boot c --bootdisk scsi0
+
+# 5. Add cloud-init drive
+qm set 9000 --ide2 local-lvm:cloudinit
+
+# 6. Add serial console (useful for cloud-init debug output)
+qm set 9000 --serial0 socket --vga serial0
+
+# 7. Configure cloud-init defaults in the GUI:
+#    VM | Cloud-Init | User, SSH keys, IP Config (DHCP)
+
+# 8. Convert to template
+qm template 9000
+```
+
+**Deploying from the template:**
+
+```bash
+# Clone the template
+qm clone 9000 201 --name prod-web-01 --full --storage local-lvm
+
+# Customise cloud-init for this specific instance
+qm set 201 --ciuser ubuntu --sshkeys ~/.ssh/id_rsa.pub
+qm set 201 --ipconfig0 ip=192.168.10.101/24,gw=192.168.10.1
+
+# Start the VM - cloud-init runs on first boot
+qm start 201
+```
+
+Cloud-init applies the configuration at first boot in under 30 seconds, then marks itself as complete so it does not re-run on subsequent boots. The result is a fully configured, network-accessible VM with the correct hostname, IP address, and SSH keys in under two minutes from clone to login.
+
+## Container Templates
+
+LXC container templates are a different mechanism from VM templates. Rather than converting an existing container to a template (though that is also possible), Proxmox provides a library of pre-built container root filesystems for common Linux distributions.
+
+Download templates from the GUI: `Node | local storage | Content | Templates | Download from Internet`. Available templates include Ubuntu, Debian, CentOS, Alpine, and many others. They download as compressed archives (`.tar.gz` or `.tar.xz`) and are stored in `/var/lib/vz/template/cache/`.
+
+Create a container from a downloaded template:
+
+```bash
+# Create container 200 from Ubuntu 22.04 template
+pct create 200 local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst \
+    --hostname test-container \
+    --rootfs local-lvm:8 \
+    --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+    --memory 512 \
+    --cores 1 \
+    --password changeme
+```
+
+Container templates are ready-to-use starting points. Unlike VM templates, they do not require generalisation — each container gets a fresh, isolated namespace and a separate root filesystem from the moment of creation.
+
+## Snapshot Best Practices
+
+Snapshots are a first-line safety net for change management, but they require discipline to use effectively.
+
+**Name snapshots descriptively.** A snapshot named `snap1` tells you nothing when you are staring at a broken system at 2 AM. Names like `pre-kernel-5.15-upgrade` or `before-nginx-config-change-2024-03-10` communicate exactly what the snapshot protects against.
+
+**Snapshot before every significant change.** Software updates, configuration changes, database migrations, security hardening steps — all of these warrant a snapshot immediately before the change is applied. The cost (seconds of time, modest storage) is far lower than the cost of a failed rollback.
+
+**Verify snapshot rollback works before you need it.** Take a test snapshot, make a deliberate change, roll back, and confirm the change is gone. Do this on a non-production VM to build confidence in the process before relying on it for a production incident.
+
+**Delete snapshots when they are no longer needed.** A snapshot taken before an update that shipped three months ago and has been stable is no longer serving a protective function — it is consuming storage and adding overhead to the COW chain for every subsequent write. Clean up stale snapshots as part of regular maintenance.
+
+**Do not use snapshots as backups.** This is the most important rule. Snapshots live on the same storage as the VM's disk. A storage failure, a corrupted ZFS pool, a Ceph cluster that loses too many OSDs — any of these destroys both the VM and all its snapshots simultaneously. `vzdump` backups to a separate storage target are the actual backup mechanism.
+
+## Storage Implications of Snapshots
+
+The storage efficiency of snapshots varies significantly by storage backend:
+
+**ZFS** handles snapshots natively and extremely efficiently. ZFS COW means that unmodified data blocks are shared between the VM's current state and the snapshot with no duplication. Storage used by a snapshot grows only as blocks are modified after the snapshot is taken. ZFS snapshot operations (create, rollback, delete) are nearly instantaneous.
+
+**LVM-Thin** provides thin-provisioned storage with snapshot support. Like ZFS, LVM-Thin snapshots track only changed blocks. Performance overhead is low and space consumption is proportional to the delta since the snapshot was taken.
+
+**Ceph RBD** supports snapshots natively at the block device level. Snapshots are cluster-wide consistent and can be used for VM replication with `pvesr`.
+
+**qcow2 (on directory or NFS storage)** implements snapshots using its internal COW mechanism. As changes accumulate relative to a snapshot, the qcow2 file grows. Many snapshots in a long chain add write overhead because each write must traverse the chain to find the correct COW location. This is the least efficient snapshot implementation and should be monitored for chain depth.
+
+**LVM (non-thin)** does not support Proxmox VM snapshots. If a VM's disk is on LVM storage, the Snapshot tab in the GUI will show an error.
+
+## Bulk Deployment Patterns
+
+For deploying many VMs rapidly from a template, combine cloning with cloud-init in a loop:
+
+```bash
+# Deploy 5 web server VMs from template 9000, IPs .101-.105
+for i in $(seq 1 5); do
+    VMID=$((200 + i))
+    IP="192.168.10.$((100 + i))"
+    qm clone 9000 $VMID --name "web-$(printf '%02d' $i)" --full --storage local-lvm
+    qm set $VMID --ipconfig0 ip=${IP}/24,gw=192.168.10.1
+    qm set $VMID --ciuser ubuntu --sshkeys ~/.ssh/id_rsa.pub
+    qm start $VMID
+    echo "Started VM $VMID at $IP"
+done
+```
+
+Each VM starts in sequence, cloud-init configures it at first boot, and within a few minutes all five are accessible. This pattern scales to dozens of VMs with no additional manual effort per deployment.
+
+For more sophisticated fleet management, tools like Terraform with the Proxmox provider (`bpg/proxmox`) can declaratively define and deploy VM fleets using templates as the source, with cloud-init configuration handled through Terraform variables.

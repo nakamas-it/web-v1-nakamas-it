@@ -1,0 +1,177 @@
+---
+title: "GCP — Migration to GCP"
+category: "google"
+topic: "migration"
+summary: "Migrating workloads to GCP — the migration framework, transfer tools, VM migration with Migrate for Compute Engine, and database migration strategies."
+tags: ["gcp", "google-cloud", "migration", "lift-and-shift", "database-migration", "transfer"]
+order: 16
+draft: false
+---
+
+## Overview
+
+Moving workloads from on-premises data centres or other clouds to GCP is rarely a single event — it is a structured programme spanning months or years. Google's migration framework breaks the journey into four repeatable phases: **Assess**, **Plan**, **Deploy**, and **Optimise**. Each phase has distinct outputs, and skipping one typically results in cost overruns, compatibility surprises, or architectural decisions that cannot be undone without expensive rework.
+
+This article covers how to evaluate workloads for cloud readiness, which data transfer tool fits which dataset size, how Migrate for Compute Engine handles VM migration with minimal downtime, and how Database Migration Service replaces live databases with near-zero cutover windows.
+
+---
+
+## The Four-Phase Migration Framework
+
+### Phase 1: Assess
+
+The Assess phase builds a complete inventory of current workloads and their dependencies. Without this inventory, organisations routinely discover hidden dependencies mid-migration — databases that three applications actually write to, or a legacy NFS mount that nobody documented.
+
+Key activities:
+
+- **Workload discovery** — use tools like Stratozone or Migration Center to auto-discover VMs, applications, and dependencies
+- **Dependency mapping** — identify which services call which; network flow logs and application performance monitoring data help here
+- **Compatibility evaluation** — check OS versions, database engine versions, and licensing models against GCP support matrices
+- **Total Cost of Ownership (TCO) analysis** — compare current colocation or on-premises costs (hardware amortisation, power, cooling, networking, staff) against projected GCP costs including compute, storage, egress, and support
+
+TCO analysis must include **migration effort** — the engineering hours required to execute the migration are a real cost that vendors often understate. A lift-and-shift of 200 VMs sounds simple, but network reconfiguration, security group replication, and DNS cutover each add days of work.
+
+### Phase 2: Plan
+
+The Plan phase translates the assessment inventory into a target architecture and a sequenced migration roadmap.
+
+- **Choose a migration strategy per workload** — not every application needs the same approach (see the 6 Rs below)
+- **Define target architecture** — choose VPC design, subnet ranges, Shared VPC or project-per-environment topology, IAM structure, and landing zone policies
+- **Sequence migrations** — start with low-risk, low-complexity workloads to build team confidence; migrate mission-critical workloads last
+- **Plan network connectivity** — determine whether Cloud VPN or Cloud Interconnect is needed during the migration period and post-cutover
+- **Define rollback criteria** — for each migration wave, define the condition that triggers a rollback and how long rollback is feasible
+
+### Phase 3: Deploy
+
+The Deploy phase is the actual migration execution. Key practices:
+
+- **Migrate in waves** — group applications into waves based on dependencies; migrate dependent applications together
+- **Test before cutover** — both Migrate for Compute Engine and Database Migration Service support test clones or parallel running of source and target so you can validate before cutting over
+- **Monitor during migration** — instrument the migrated workloads from day one; alerting on error rates and latency confirms the migration is functioning correctly
+- **DNS cutover last** — the DNS record change is typically the last step, making it the point of no return
+
+### Phase 4: Optimise
+
+Once workloads are running in GCP, the Optimise phase applies cloud economics and cloud-native patterns that were not possible on-premises:
+
+- Rightsize VMs using Recommender data after 2–4 weeks of production traffic
+- Apply committed use discounts once resource needs are understood
+- Replace self-managed middleware (message brokers, caching layers) with managed equivalents
+- Implement autoscaling for workloads with variable traffic patterns
+
+---
+
+## Migration Strategies — The 6 Rs
+
+The industry-standard "6 Rs" framework categorises every workload by how much it changes during migration:
+
+| Strategy | Also Called | Description | Speed | Cloud Value |
+|----------|-------------|-------------|-------|-------------|
+| **Rehost** | Lift-and-shift | Move VMs as-is; no code changes | Fastest | Lowest |
+| **Replatform** | Move-and-improve | Minor optimisations (e.g., swap MySQL server for Cloud SQL) | Fast | Medium |
+| **Repurchase** | Drop-and-shop | Replace with a SaaS equivalent (e.g., on-prem CRM → Salesforce) | Medium | High |
+| **Refactor** | Re-architect | Redesign for cloud-native (microservices, containers, serverless) | Slowest | Highest |
+| **Retire** | Decommission | Shut down workloads that are no longer needed | N/A | Cost saving |
+| **Retain** | Keep as-is | Leave on-premises due to technical or compliance constraints | N/A | None |
+
+**Rehost** (lift-and-shift) is the fastest migration path and the starting point for most large-scale migration programmes. It moves VMs to GCP with identical OS, application binaries, and configuration. The trade-off is that the application does not benefit from cloud elasticity or managed services until a subsequent replatform or refactor wave.
+
+**Refactor** has the highest upfront cost but delivers the best long-term total cost of ownership and the highest scalability ceiling. Organisations typically rehost first to escape expiring hardware refresh cycles, then refactor iteratively over 12–24 months.
+
+---
+
+## Data Transfer Tools
+
+Choosing the right data transfer tool depends on dataset size and available network bandwidth. Transferring 100 TB over a 1 Gbps link takes roughly 9 days of continuous transfer — often unacceptable for a production cutover window.
+
+| Tool | Best For | Practical Capacity |
+|------|----------|-------------------|
+| **gsutil** | Small datasets, scripted transfers | < 10 TB practical (network-dependent) |
+| **Storage Transfer Service** | From AWS S3, HTTP/HTTPS sources, other Cloud Storage buckets | Large scale, scheduled recurring transfers |
+| **Transfer Appliance** | Very large datasets with limited or slow WAN bandwidth | 40 TB (rack) or 300 TB (high-capacity) |
+| **BigQuery Data Transfer Service** | From SaaS applications (Google Ads, YouTube, Campaign Manager) | Scheduled, managed; source-specific |
+| **Database Migration Service** | Live relational database migration | MySQL, PostgreSQL, Oracle → Cloud SQL / Spanner |
+
+### Storage Transfer Service
+
+Storage Transfer Service runs as a fully managed GCP service — no agent to install, no VM to provision. Transfers can be scheduled (daily, weekly) or run on-demand. It supports incremental transfers: only objects that have changed since the last transfer are copied. This makes it ideal for a migration strategy where you sync source and destination for days before the final cutover, minimising the delta that needs to transfer on cutover day.
+
+### Transfer Appliance
+
+For datasets that are too large to transfer over the network within the migration window, Google ships a physical **Transfer Appliance** to the customer's data centre. The customer copies data to the appliance (up to 300 TB in the high-capacity rack unit), then ships it back to Google. Google ingests the data directly into Cloud Storage. The appliance is encrypted with a customer-managed key, and the data is wiped after ingestion.
+
+The decision rule is straightforward: calculate how long a network transfer would take given your available bandwidth. If that time exceeds your acceptable migration window, use Transfer Appliance.
+
+---
+
+## Migrate for Compute Engine
+
+Formerly known as **Velostrata**, Migrate for Compute Engine is Google's VM migration service. It moves virtual machines from VMware, Microsoft Hyper-V, AWS, or Azure into Compute Engine with minimal downtime.
+
+### How It Works
+
+Migrate for Compute Engine uses **continuous block-level replication** rather than a snapshot-based copy. The source VM continues running while its disk blocks are replicated asynchronously to GCP. Once the initial replication is complete, only changed blocks (the delta) need to transfer before cutover. This keeps the cutover window very short — typically minutes, not hours.
+
+**Test clones** are a key feature: before committing to cutover, you can boot a fully functional clone of the migrating VM in GCP without stopping the source VM. The clone uses the replicated data at a point in time. This lets you validate application functionality, run integration tests, and check database connectivity before the source VM is touched.
+
+### Migration Considerations
+
+- **OS compatibility** — GCP supports most major Linux distributions and Windows Server versions; check the compatibility matrix before migrating specialised OS builds
+- **Boot disk types** — migrated VMs use Persistent Disk; SSD PD for latency-sensitive workloads, balanced PD for general workloads
+- **Networking** — VPC firewall rules, subnet assignments, and internal IP addresses must be planned before cutover; DNS records and load balancer backends need updating post-cutover
+- **Agent vs agentless** — Migrate for Compute Engine on VMware is agentless (uses vSphere APIs); on-premises bare-metal migration may require a migration agent installed in the guest OS
+
+---
+
+## Database Migration Service
+
+Database Migration Service (DMS) enables live database migrations with minimal downtime using **Change Data Capture (CDC)**. CDC captures every INSERT, UPDATE, and DELETE from the source database's transaction log and replays them on the destination database in near real time. This means the destination database stays current with the source throughout the migration window, drastically reducing the cutover delta.
+
+### Supported Sources and Destinations
+
+| Source | Destination |
+|--------|------------|
+| MySQL (on-premises, AWS RDS, other clouds) | Cloud SQL for MySQL |
+| PostgreSQL (on-premises, AWS RDS, other clouds) | Cloud SQL for PostgreSQL, AlloyDB |
+| Oracle | Cloud SQL for PostgreSQL (with schema conversion) |
+| SQL Server | Cloud SQL for SQL Server |
+
+### Migration Process
+
+1. **Create a migration job** — specify source connection profile (host, port, credentials) and destination Cloud SQL instance
+2. **Initial load** — DMS dumps the full source database and loads it into the Cloud SQL destination; this can take hours for large databases
+3. **CDC replication** — once the initial load completes, DMS begins replaying changes from the source transaction log; replication lag is typically seconds
+4. **Promote** — when you are ready to cut over, promote the Cloud SQL instance to primary; this stops replication and makes the instance writable; connection strings in the application are updated to point to Cloud SQL
+5. **Verify and decommission** — run validation queries, check row counts and sample data, then decommission the source database
+
+The entire process is managed through the GCP console or `gcloud` CLI with no middleware to install on the destination side. For Oracle migrations, the **Database Migration Service Schema Conversion Tool** automatically converts Oracle-specific SQL syntax and data types to PostgreSQL equivalents, flagging constructs that require manual review.
+
+---
+
+## Anthos for Hybrid Migrations
+
+For organisations that cannot move entirely to GCP due to data residency, latency, or regulatory constraints, **Anthos** provides a hybrid migration path. Containerised applications can be deployed to Anthos clusters running on-premises while sharing configuration management, service mesh policies, and CI/CD pipelines with GCP-native workloads. This allows teams to modernise application architectures (lift-and-containerise) before the underlying infrastructure is fully migrated to GCP.
+
+**Migrate for Anthos** takes this further: it converts VM-based workloads directly into containers, extracting the application layer from the OS and producing a container image and Kubernetes deployment manifest. The resulting container runs on GKE or Anthos clusters and benefits from Kubernetes-native autoscaling, rolling updates, and service mesh integration.
+
+---
+
+## Network Planning for Migration
+
+Hybrid connectivity is required during the migration period — migrating VMs need to reach on-premises databases, and on-premises clients need to reach newly migrated services in GCP. GCP offers two connectivity options:
+
+| Option | Bandwidth | SLA | Use When |
+|--------|-----------|-----|----------|
+| **Cloud VPN (HA VPN)** | Up to 3 Gbps per tunnel | 99.99% | Moderate bandwidth needs; cost-sensitive |
+| **Cloud Interconnect** | 10 Gbps or 100 Gbps per circuit | 99.99% (4 connections) | High bandwidth; low latency; mission-critical |
+
+For most migration projects, HA VPN is sufficient during the migration window. Interconnect is worth considering for organisations with high-bandwidth dependencies or for post-migration hybrid architectures where on-premises and GCP workloads communicate continuously.
+
+**Hybrid network topology patterns** help model how traffic flows during and after migration:
+
+| Topology | Description |
+|----------|-------------|
+| **Mirrored** | On-premises and GCP environments are identical; used for DR and testing |
+| **Meshed** | All environments connected to each other; full connectivity for complex dependencies |
+| **Handover** | On-premises generates data; sends to GCP for processing; one-way data flow |
+| **Gated Egress** | On-premises services call GCP APIs; GCP cannot initiate connections back |

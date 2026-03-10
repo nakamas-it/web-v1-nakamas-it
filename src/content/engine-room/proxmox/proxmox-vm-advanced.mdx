@@ -1,0 +1,227 @@
+---
+title: "Proxmox VE — VM Advanced Features"
+category: "proxmox"
+topic: "vm-advanced"
+summary: "Advanced Proxmox VM features — cloud-init integration, PCIe passthrough, CPU pinning, NUMA, live migration, and VM snapshots."
+tags: ["proxmox", "cloud-init", "passthrough", "pcie", "live-migration", "snapshots", "numa"]
+order: 13
+draft: false
+---
+
+## Beyond the Basics
+
+Creating a VM by attaching an ISO and walking through an OS installer is the starting point, not the destination. Proxmox VE exposes a set of advanced VM capabilities that matter significantly in production environments: cloud-init for rapid automated provisioning, PCIe passthrough for workloads that need direct hardware access, CPU and memory topology tuning for NUMA-aware workloads, live migration for zero-downtime maintenance, and snapshots for safe change management. Each of these features has prerequisites and trade-offs worth understanding before enabling them.
+
+## VM Snapshots
+
+Snapshots capture the complete state of a VM at a point in time — disk contents and optionally RAM state — and allow rollback to that exact state in seconds. They are the right tool for low-risk changes: before installing a software update, before a configuration change, before testing a new application deployment.
+
+Snapshots are stored within the same storage pool as the VM disk, embedded in the VM's `.conf` file as snapshot chain entries. The storage format determines snapshot support:
+
+- **qcow2** — built-in snapshot support via copy-on-write chains. The most common format for VMs on directory-backed or NFS storage.
+- **ZFS** — native ZFS snapshots. Efficient, fast, and space-conscious thanks to ZFS's copy-on-write architecture.
+- **Ceph RBD** — native Ceph snapshots. Distributed and resilient.
+- **LVM** — does not support snapshots in Proxmox's implementation. Avoid LVM for VMs that need snapshot capability.
+
+Take a snapshot from the GUI: `VM | Snapshots | Take Snapshot`. The dialog offers an option to **include RAM state** — checking this saves the running memory of the VM into the snapshot, allowing rollback to a running state (equivalent to a suspend-and-resume). Without RAM state, rollback brings the VM back to the disk state at snapshot time with a fresh boot required.
+
+```bash
+# Take a snapshot via CLI
+qm snapshot 100 pre-upgrade-2024-01 --description "Before kernel upgrade"
+
+# Roll back to a snapshot
+qm rollback 100 pre-upgrade-2024-01
+
+# List snapshots for a VM
+qm listsnapshot 100
+
+# Delete a snapshot
+qm delsnapshot 100 pre-upgrade-2024-01
+```
+
+Important caveats: snapshots accumulate copy-on-write overhead. As a VM's active data diverges from the snapshot baseline, both the snapshot chain and I/O performance suffer. Do not let snapshots accumulate indefinitely — delete them once the change they protect against is confirmed stable. Snapshots are not backups. A storage failure destroys both the VM and all its snapshots simultaneously.
+
+## Cloud-Init Integration
+
+Cloud-init is the industry-standard mechanism for first-boot configuration of Linux virtual machines. A cloud image is a minimal OS installation that includes the cloud-init daemon. On first boot, cloud-init reads configuration data from a special drive and applies settings: sets the hostname, injects SSH public keys, creates user accounts, configures network interfaces, and runs custom scripts.
+
+In Proxmox, the workflow for cloud-init templates is:
+
+**Step 1 — Download a cloud image.** Ubuntu and Debian provide official cloud images:
+
+```bash
+# Download Ubuntu 22.04 cloud image to Proxmox local storage
+wget https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img \
+     -O /var/lib/vz/template/qemu/jammy-server-cloudimg-amd64.img
+```
+
+**Step 2 — Create a VM and import the cloud image as its disk.**
+
+```bash
+# Create a base VM (no CD/DVD, no OS install)
+qm create 9000 --name ubuntu-22-template --memory 2048 --net0 virtio,bridge=vmbr0
+
+# Import the cloud image as the VM's disk into local-lvm storage
+qm importdisk 9000 /var/lib/vz/template/qemu/jammy-server-cloudimg-amd64.img local-lvm
+
+# Attach the imported disk as scsi0
+qm set 9000 --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-9000-disk-0
+
+# Set the boot order to boot from scsi0
+qm set 9000 --boot c --bootdisk scsi0
+```
+
+**Step 3 — Attach a Cloud-Init drive.** This is the virtual CD-ROM that delivers the cloud-init configuration data:
+
+```bash
+qm set 9000 --ide2 local-lvm:cloudinit
+```
+
+**Step 4 — Configure Cloud-Init settings** from the GUI under `VM | Cloud-Init`:
+- **User** — default username and password (or leave password empty and require SSH keys)
+- **SSH public keys** — paste public key content; injected into `~/.ssh/authorized_keys` on first boot
+- **IP Config** — set static IP or DHCP per network interface
+- **DNS** — nameserver and search domain
+
+**Step 5 — Convert to template.**
+
+```bash
+qm template 9000
+```
+
+The VM is now a read-only template. To deploy a new VM from it:
+
+```bash
+# Full clone (independent copy, works on any storage)
+qm clone 9000 101 --name web-server-01 --full
+
+# Linked clone (thin clone, requires snapshot-capable storage)
+qm clone 9000 102 --name web-server-02
+```
+
+After cloning, adjust the Cloud-Init settings on the new VM (hostname, IP, keys) and start it. Cloud-init handles the rest automatically on first boot. This approach reduces VM provisioning time from 20+ minutes (OS install) to under 60 seconds (clone and boot).
+
+## Live Migration
+
+Live migration moves a running VM from one Proxmox node to another without powering it off. From the guest's perspective, the VM continues running throughout the migration with a brief, sub-second pause at the cutover point.
+
+**Requirements for live migration:**
+
+- **Shared storage** — the VM's disk must be on storage accessible from both source and destination nodes (Ceph, NFS, iSCSI). VMs on local storage require offline migration.
+- **CPU type compatibility** — both nodes must support the CPU type configured for the VM. The `host` CPU type (which passes through the physical CPU's exact flags) prevents live migration between nodes with different CPU generations. Named CPU types like `kvm64`, `haswell`, or `broadwell` work across compatible hardware.
+- **No PCIe passthrough** — VMs with `hostpci` device assignments cannot be live-migrated.
+- **No USB passthrough** — VMs with `usb` device assignments cannot be live-migrated.
+
+```bash
+# Live migrate VM 100 to node pmx-02
+qm migrate 100 pmx-02 --online
+
+# Offline migrate VM 100 to pmx-02 (VM must be stopped)
+qm migrate 100 pmx-02
+```
+
+Via GUI: right-click any running VM and select **Migrate**. The Migrate dialog shows whether online migration is possible and the estimated migration time based on RAM allocation and current memory write rate.
+
+**Migration tuning options** (set via `VM | Options | Migration`):
+
+- **Migration bandwidth** — the maximum rate at which RAM is transferred to the destination node, in MB/s. A value of 0 means unlimited. Setting a cap prevents a large migration from saturating the management network.
+- **Migration downtime** — the maximum acceptable pause duration in milliseconds at the cutover point. If the VM's memory is changing faster than can be synced within this window, migration will keep iterating pre-copy rounds until it converges or times out.
+
+Large VMs with high memory write rates (databases actively writing) take longer to converge. For those workloads, allow more migration downtime or schedule migrations during quiet periods.
+
+## PCIe Passthrough
+
+PCIe passthrough gives a VM direct, exclusive access to a physical PCIe device — typically a GPU, a high-performance NIC, or an NVMe controller. The VM driver communicates directly with the hardware, achieving near-native performance that the virtualisation layer cannot match.
+
+**Prerequisites:**
+
+1. Enable IOMMU in BIOS/UEFI. For Intel systems: `Intel Virtualization Technology for Directed I/O (VT-d)`. For AMD: `AMD IOMMU` or `AMD-Vi`.
+
+2. Enable IOMMU in the kernel by editing `/etc/default/grub`:
+
+```
+# Intel
+GRUB_CMDLINE_LINUX_DEFAULT="quiet intel_iommu=on"
+
+# AMD
+GRUB_CMDLINE_LINUX_DEFAULT="quiet amd_iommu=on"
+```
+
+Then apply the change:
+
+```bash
+update-grub
+reboot
+```
+
+3. For GPU passthrough, load vfio modules. Add to `/etc/modules`:
+
+```
+vfio
+vfio_iommu_type1
+vfio_pci
+vfio_virqfd
+```
+
+4. Find the device's PCI address and IOMMU group:
+
+```bash
+lspci -v | grep -i nvidia    # Find the GPU address, e.g., 01:00.0
+find /sys/kernel/iommu_groups -name "01:00.*"   # Check its IOMMU group
+```
+
+All devices in the same IOMMU group must be passed through together (or the group must contain only the device you want). Devices in shared IOMMU groups cannot be individually assigned.
+
+5. In the Proxmox GUI, go to `VM | Hardware | Add | PCI Device` and select the device. For GPU passthrough, also set the VM's display to `none`.
+
+**Limitations:** A VM with PCIe passthrough cannot be live-migrated. It cannot be snapshotted if the passthrough device maintains internal state that the hypervisor cannot capture. Passthrough is considered experimental for some device classes. It is the correct choice for GPU compute workloads, hardware-accelerated video transcoding, and high-performance networking, but not for general-purpose VMs.
+
+## NUMA Topology
+
+NUMA (Non-Uniform Memory Access) is a hardware architecture found in servers with multiple physical CPU sockets. In a two-socket server, each CPU has fast local access to memory banks attached to it, and slower access to memory banks attached to the other socket. If a VM's vCPUs are scheduled on one physical socket but its memory is allocated from the other socket's banks, every memory access pays the NUMA penalty.
+
+Enabling NUMA on a Proxmox VM makes the guest OS aware of the NUMA topology and allows it to schedule threads appropriately. Enable it at `VM | Hardware | Processors | Edit | NUMA checkbox`.
+
+NUMA is also a prerequisite for CPU and memory hotplug. Without NUMA enabled, vCPU and RAM hot-add operations on Linux guests will not succeed even if the guest supports them in principle.
+
+For VMs that span multiple virtual sockets (configured as multiple sockets with cores each), match the virtual NUMA topology to the physical NUMA topology of the host for best performance.
+
+## CPU Pinning
+
+CPU pinning (also called CPU affinity or `cpuset`) assigns specific vCPUs of a VM to specific physical CPU cores on the host. By default, the Linux scheduler moves vCPUs freely across physical cores as load changes. This is efficient for general workloads but introduces jitter for latency-sensitive applications.
+
+Real-time and near-real-time workloads — audio processing, software-defined radio, financial trading systems, industrial control — benefit from pinning vCPUs to dedicated physical cores that are not shared with other VMs or host processes.
+
+```bash
+# Pin VM 100's vCPUs to physical cores 4 and 5
+qm set 100 --cpuunits 1000
+# Set CPU affinity (must edit config directly or use taskset after VM starts)
+
+# After the VM is running, find its QEMU PID and use taskset
+qm status 100 --verbose | grep pid
+taskset -cp 4,5 <qemu_pid>
+```
+
+For persistent CPU pinning, edit the VM config at `/etc/pve/nodes/<node>/qemu-server/<vmid>.conf` and add the `cpuset` parameter, or use the `taskset` approach in a startup hook script.
+
+Isolate the pinned cores from the host scheduler by adding `isolcpus=4,5` to the kernel command line in `/etc/default/grub`. Isolated cores will not be used by the host kernel scheduler for any tasks except those explicitly assigned to them.
+
+## USB Passthrough
+
+USB passthrough assigns a USB device from the host to a specific VM. It is useful for hardware security keys (YubiKey), license dongles, and USB-attached instrumentation.
+
+Add from `VM | Hardware | Add | USB Device`. You can pass through by device ID (specific device, regardless of which port it is in) or by port (whatever device is connected to a specific physical USB port).
+
+USB passthrough prevents live migration. The VM must be powered off and the USB device must be physically moved if the VM needs to run on a different node.
+
+## VirtIO-FS — Shared Directories
+
+VirtIO-FS provides a shared directory between the Proxmox host and a running VM, exposed as a filesystem the guest can mount. It uses `virtiofsd` on the host to serve a directory tree to the guest via a VirtIO device.
+
+This is useful for sharing ISO images, configuration files, or build artifacts between host and VM without network file sharing protocols. The guest mounts the share with:
+
+```bash
+mount -t virtiofs <tag_name> /mnt/shared
+```
+
+VirtIO-FS requires the guest kernel to support it (Linux 5.4 or later). Configure through `VM | Hardware | Add | VirtIO FS` in recent Proxmox versions.

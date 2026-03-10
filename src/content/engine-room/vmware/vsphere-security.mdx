@@ -1,0 +1,97 @@
+---
+title: "vSphere Security — Roles, Permissions, Lockdown, and Certificates"
+category: "vmware"
+topic: "vsphere-security"
+summary: "How vSphere controls access to virtualisation infrastructure — through a role-based permission model that grants privileges on inventory objects, lockdown modes that restrict direct ESXi host access, and certificate management via the VMware Certificate Authority that secures internal component communication."
+tags: ["vmware", "vsphere", "security", "rbac", "certificates", "vcpdcv"]
+order: 11
+draft: false
+---
+
+## Overview
+
+vSphere security rests on three interlocking mechanisms: a role-based permission model that controls who can do what inside vCenter's inventory, lockdown modes that determine whether ESXi hosts can be managed directly or only through vCenter, and a built-in certificate authority that secures communication between all vSphere components. Understanding how these three systems work — and interact — is essential for hardening a VMware environment and for the VCP-DCV exam.
+
+## The Permissions Model
+
+vSphere access control is built from three concepts: privileges, roles, and permissions.
+
+A **privilege** is an atomic capability — a single allowed action such as `Virtual Machine.Power.PowerOn` or `Datastore.Allocate Space`. There are hundreds of individual privileges covering every manageable aspect of the inventory.
+
+A **role** is a named collection of privileges. Rather than assigning individual privileges to users one at a time, an administrator creates a role that bundles a meaningful set of privileges together. Roles can be the built-in system roles, or custom roles created by an administrator.
+
+A **permission** is the act of binding a role to a user or group on a specific inventory object. A permission has three components: the principal (a user or group from an identity source), the role (the collection of privileges), and the inventory object the permission applies to.
+
+When a permission is assigned at a container object — a datacenter, cluster, or folder — it propagates to all child objects by default. This means a single permission assignment at the cluster level flows down to every host and virtual machine within it. Propagation can be disabled for cases where the permission should apply only to the container itself.
+
+The most specific permission wins. If a user has a permission at the datacenter level and a different permission on a specific VM within it, the VM-level permission takes precedence for operations on that VM. A No Access role at a child object blocks inherited permissions from a parent — No Access always wins.
+
+## Built-In Roles
+
+vSphere ships with several system roles that cannot be deleted:
+
+| Role | Purpose |
+|---|---|
+| No Access | Prevents any interaction with the object; blocks inherited access |
+| Read-Only | View the object but make no changes |
+| Administrator | Full privileges on the object |
+| Virtual Machine User | Interact with VM console; cannot change hardware |
+| Virtual Machine Power User | Interact, modify hardware, take snapshots |
+| Resource Pool Administrator | Manage resource pools and their child VMs |
+| Datastore Consumer | Allocate space on datastores |
+| Network Consumer | Assign networks to VMs |
+
+Custom roles allow any combination of privileges, scoped precisely to whatever inventory objects need to be controlled. A common pattern is creating a role with just enough privileges for a specific team — a storage team role with datastore management privileges but no VM or network rights.
+
+## Identity Sources
+
+vCenter's Single Sign-On (SSO) service authenticates users. Multiple identity sources can be configured alongside the built-in `vsphere.local` domain:
+
+- **vsphere.local**: The default internal SSO domain, always present, used for the built-in `administrator@vsphere.local` account.
+- **Active Directory over LDAP**: Connects to AD using an LDAP bind account; the most common enterprise configuration.
+- **OpenLDAP**: For non-AD LDAP directories.
+- **Local OS**: Accounts on the VCSA Linux operating system itself.
+
+Users log in as `username@domain`. The default identity source controls which domain is used when a user logs in without a domain qualifier.
+
+## ESXi Lockdown Mode
+
+Lockdown mode restricts direct access to an ESXi host, funnelling all management through vCenter Server. This prevents administrators from making changes on a host directly — via SSH, the vSphere Host Client, or the DCUI — that would bypass vCenter's audit trail and configuration management.
+
+| Mode | Direct Access Available |
+|---|---|
+| Disabled | Full direct access — Host Client, SSH, DCUI all function |
+| Normal | DCUI accessible; exception users can log in directly; all other direct access blocked |
+| Strict | DCUI disabled; no direct access; only vCenter management |
+
+The **Exception Users** list allows specific local or AD accounts to bypass lockdown mode restrictions. This is the emergency escape hatch: if vCenter becomes unavailable when strict lockdown is enabled and no exception users are configured, the host is completely inaccessible until physical console access is used to disable lockdown through the DCUI. The practical recommendation is to always configure at least one exception user, and to use Normal rather than Strict lockdown unless there is a specific security requirement for the latter.
+
+## Certificate Management
+
+The **VMware Certificate Authority (VMCA)** is embedded in every vCenter Server Appliance. When vCenter is deployed, VMCA acts as the root CA for the entire vSphere environment. It automatically issues and signs:
+
+- The **Machine SSL certificate** — used by vCenter for HTTPS; what browsers connect to
+- **Solution user certificates** — used internally by vCenter services
+- **ESXi host certificates** — provisioned to each host when it is added to vCenter
+
+Three certificate management modes are available:
+
+| Mode | Description |
+|---|---|
+| VMCA as root CA | Default; VMCA self-signed root issues all certificates |
+| VMCA as intermediate CA | An enterprise CA signs the VMCA certificate; all VMCA-issued certs chain to the enterprise CA |
+| Custom CA (fully custom) | Enterprise CA signs all certificates directly; VMCA is not used for leaf certs |
+
+For most organisations, making VMCA an intermediate CA of the enterprise PKI strikes the right balance — it allows browsers and tools that trust the enterprise CA to automatically trust vSphere certificates, while keeping certificate operations internal to vCenter's automation.
+
+VMCA-signed certificates are renewed automatically before expiration. Custom CA-signed certificates require manual renewal; vCenter raises alarms when expiration approaches — yellow at less than eight months remaining, red at less than two months.
+
+## ESXi Host Firewall
+
+Each ESXi host runs a stateless packet filter that controls inbound and outbound traffic at the service level. Rules are defined per service — SSH, vMotion, NFS client, iSCSI client — and each service has predefined ports. The firewall is configured through the vSphere Client under Host > Configure > System > Security Profile, or via `esxcli network firewall` commands.
+
+Each firewall rule can be restricted to specific allowed IP addresses or subnets. This is useful for locking down services like SSH or the Host Client to management network ranges only, reducing the attack surface even when those services are enabled for operational use.
+
+## Summary
+
+vSphere security is layered: the permission model controls what authenticated users can do in the inventory; lockdown mode controls whether hosts can be reached outside of vCenter; and VMCA ensures all component communication is certificate-authenticated. Custom roles and object-level permission assignments allow precise delegation. Exception users prevent lockdown mode from becoming a self-inflicted outage. Certificate management options range from fully automatic VMCA-rooted trust to full integration with an enterprise PKI — the choice depends on the organisation's existing certificate infrastructure.

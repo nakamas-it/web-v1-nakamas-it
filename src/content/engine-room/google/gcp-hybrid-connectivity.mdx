@@ -1,0 +1,208 @@
+---
+title: "GCP — Hybrid Connectivity"
+category: "google"
+topic: "hybrid-connectivity"
+summary: "Connecting on-premises to GCP — Cloud VPN, Cloud Interconnect, Cloud Router, and the BGP dynamic routing that ties them together."
+tags: ["gcp", "google-cloud", "vpn", "interconnect", "cloud-router", "hybrid", "bgp"]
+order: 12
+draft: false
+---
+
+## Overview
+
+Most organisations do not move entirely to the cloud in a single step. Workloads migrate gradually, compliance requirements mandate that certain data stay on-premises, or legacy applications simply cannot be refactored. In all of these cases, on-premises infrastructure must communicate securely and reliably with GCP resources. GCP provides a layered set of hybrid connectivity options — from encrypted tunnels over the public internet to dedicated fibre circuits directly into Google's network — each with different bandwidth, latency, reliability, and cost profiles.
+
+Understanding hybrid connectivity in GCP requires understanding three distinct layers: the **physical or logical link** (VPN tunnel or Interconnect circuit), the **routing protocol** (static routes or dynamic BGP via Cloud Router), and the **access model** (private RFC 1918 addressing or public Google API access). These layers combine differently across GCP's hybrid products.
+
+---
+
+## Cloud VPN
+
+Cloud VPN establishes encrypted IPsec tunnels between an on-premises VPN device and a GCP VPN gateway. All traffic passes through the public internet, encrypted end-to-end. Cloud VPN is the entry-level hybrid connectivity option — lower cost and simpler to set up than Interconnect, but with bandwidth and latency limitations.
+
+### HA VPN vs Classic VPN
+
+GCP offers two Cloud VPN variants, and for new deployments, HA VPN is strongly preferred.
+
+| Feature | HA VPN | Classic VPN |
+|---|---|---|
+| Availability SLA | **99.99%** | 99.9% |
+| Gateway redundancy | Two interfaces, each backed by different Google infrastructure | Single interface |
+| Required tunnels for full SLA | 2 tunnels (one per interface) to peer gateway | N/A |
+| Routing | BGP only (via Cloud Router) | Static routes, Cloud Router BGP, or policy-based |
+| Recommended for new deployments | Yes | No (deprecated for new use) |
+
+**HA VPN's 99.99% SLA** is achieved by deploying two VPN tunnels — one on each HA VPN gateway interface — to either two interfaces on a single peer gateway or to two separate peer gateways. If one tunnel fails, the other maintains connectivity. For maximum redundancy (protecting against a Google infrastructure zone failure and a peer-side failure simultaneously), four tunnels are deployed: two from each HA VPN interface to two separate peer gateway interfaces.
+
+Each tunnel supports up to **3 Gbps** of throughput. Multiple tunnels can be deployed in parallel to increase aggregate bandwidth, with ECMP (Equal-Cost Multi-Path) distributing traffic across them.
+
+### IKE Protocol
+
+Cloud VPN uses **IKEv2** by default, with IKEv1 supported for compatibility with older on-premises equipment. Both sides must agree on IKE Phase 1 (authentication, key exchange) and Phase 2 (encryption, integrity) parameters. Common combinations used in practice:
+
+- Phase 1: AES-256-GCM, SHA-256, DH Group 16 or 14
+- Phase 2: AES-256-GCM, SHA-256
+
+The pre-shared key (PSK) or X.509 certificates authenticate each side. PSK is the more common approach for site-to-site VPNs.
+
+### Routing
+
+HA VPN requires dynamic routing via BGP (Border Gateway Protocol). Static routing is not supported with HA VPN. This means a Cloud Router must be deployed alongside the HA VPN gateway to handle BGP peering with the on-premises router.
+
+Classic VPN supports three routing modes:
+- **Dynamic (BGP)** — using Cloud Router; routes learned automatically.
+- **Route-based (static)** — you configure remote IP ranges on the GCP side; the on-premises side configures corresponding routes.
+- **Policy-based** — routes are tied to the specific tunnel defined by source and destination IP policy selectors.
+
+---
+
+## Cloud Router
+
+Cloud Router is GCP's managed BGP routing service. It operates as the BGP speaker within GCP, exchanging routes with your on-premises BGP-capable router over a VPN tunnel or Interconnect VLAN attachment.
+
+### How Cloud Router Works
+
+Cloud Router is associated with a specific VPC and region. It advertises VPC subnet routes to the on-premises peer and learns on-premises routes from the peer, then programs those routes into the VPC routing table automatically.
+
+**Key configuration elements:**
+
+- **ASN (Autonomous System Number)** — every Cloud Router has an ASN, which identifies it in BGP peering. You assign a private ASN (typically from the 64512–65534 range for private use). The on-premises router has its own ASN.
+- **BGP peer** — configured per VPN tunnel or VLAN attachment. Each peer specifies the link-local IP addresses for the BGP session, the peer ASN, and optionally MD5 authentication.
+- **Route advertisements** — by default, Cloud Router advertises all subnets in the VPC associated with it. You can customise this to advertise only specific subnets or custom IP ranges.
+
+### Dynamic Routing Modes
+
+Cloud Router operates in one of two dynamic routing modes, configurable at the VPC level:
+
+| Mode | Routes Advertised | On-premises Routes Learned |
+|---|---|---|
+| **Regional** | Subnets in the same region as the Cloud Router | Only reach backends in that region |
+| **Global** | All subnets in the VPC, regardless of region | Reach any VPC resource globally |
+
+**Global dynamic routing** is typically preferred for multi-region VPCs — it ensures on-premises networks can reach GCP resources in all regions through a single VPN or Interconnect connection, without deploying Cloud Routers and VPN gateways in every region.
+
+---
+
+## Cloud Interconnect
+
+Where Cloud VPN tunnels traffic over the public internet, Cloud Interconnect provides **dedicated private connectivity** that does not traverse the internet at all. Traffic flows between your on-premises network and Google's network through physical cross-connects or service-provider circuits. This delivers lower and more consistent latency, higher throughput, and better SLAs than VPN — at significantly higher cost.
+
+Cloud Interconnect also enables **private RFC 1918 addressing** — on-premises systems communicate with GCP resources using internal IP addresses. This is important for workloads where data must not be exposed to the internet path, even encrypted.
+
+### Dedicated Interconnect
+
+Dedicated Interconnect establishes a direct physical connection between your on-premises equipment and Google's network at a **Google colocation facility (POP)**. Your router must be physically present (or connected via a cross-connect) at the same facility.
+
+- **Circuit capacities**: 10 Gbps or 100 Gbps per physical link.
+- **VLAN attachments**: Each physical circuit can carry multiple VLAN attachments, each mapped to a specific VPC and Cloud Router. You can use a single physical circuit to connect to multiple VPCs.
+- **BGP**: All routing over Dedicated Interconnect is dynamic BGP via Cloud Router.
+
+**Availability SLAs** depend on redundancy:
+
+| Configuration | SLA |
+|---|---|
+| Single connection, single metro | 99.9% |
+| 2 connections, single metro | 99.99% |
+| 4 connections, 2 metro areas | 99.99% (resilient to metro failure) |
+
+For the highest availability, deploy two connections in each of two separate metropolitan areas (four circuits total). This protects against a single circuit failure, a facility failure, and a metro-level outage.
+
+### Partner Interconnect
+
+Partner Interconnect provides the same private, non-internet connectivity as Dedicated Interconnect but through a **service provider's network**. You do not need to be present at a Google POP — the service provider has the connection to Google and extends it to your location.
+
+- **Bandwidth options**: 50 Mbps to 50 Gbps per VLAN attachment (flexible steps depending on the provider).
+- **Use case**: When you cannot co-locate at a Google POP, or when the required bandwidth is below 10 Gbps (Dedicated Interconnect minimum).
+- **Latency**: Slightly higher than Dedicated Interconnect due to the extra service-provider hop.
+
+### Dedicated vs Partner Interconnect
+
+| Factor | Dedicated Interconnect | Partner Interconnect |
+|---|---|---|
+| Physical presence at Google POP | Required | Not required |
+| Minimum bandwidth | 10 Gbps | 50 Mbps |
+| Maximum bandwidth | 200 Gbps (20 × 10G or 2 × 100G) | 50 Gbps |
+| Setup lead time | Longer (physical circuit provisioning) | Shorter (service provider provisions) |
+| Management | Direct with Google | Through service provider |
+| Best for | Large enterprise with colocation presence | Organisations without direct POP access |
+
+---
+
+## Cloud VPN vs Cloud Interconnect: Choosing the Right Option
+
+| Factor | Cloud VPN | Cloud Interconnect |
+|---|---|---|
+| Connectivity medium | Public internet (encrypted) | Private, dedicated circuit |
+| Bandwidth per connection | Up to 3 Gbps per tunnel | 10–100 Gbps (Dedicated); 50 Mbps–50 Gbps (Partner) |
+| Latency | Variable (internet dependent) | Low and consistent |
+| Private RFC 1918 addressing | Yes | Yes |
+| SLA | 99.99% (HA VPN) | 99.99% (with redundancy) |
+| Cost | Low | High |
+| Setup complexity | Low | High (physical provisioning) |
+| Best for | Dev/test, smaller workloads, DR links | Production, latency-sensitive, high throughput |
+
+Cloud VPN is the right starting point when bandwidth requirements are below ~1 Gbps, when Internet latency is acceptable, or when cost is the primary constraint. Cloud Interconnect is the right choice for production workloads where bandwidth, latency consistency, or compliance requirements (data must not traverse the internet) make VPN insufficient.
+
+---
+
+## Direct Peering and Carrier Peering
+
+**Direct Peering** and **Carrier Peering** are different from Cloud VPN and Interconnect in an important way: they provide access to **Google's public IP addresses** (Google Workspace, Google APIs, YouTube), not to your private VPC resources. They are generally not recommended for accessing GCP resources in a VPC.
+
+**Direct Peering** establishes a BGP peering session directly with Google's network at a Google edge POP. Traffic to Google public services takes the most direct network path. Available only to organisations with sufficient network presence and traffic volumes to justify direct interconnection with Google.
+
+**Carrier Peering** is the same concept but through a carrier/ISP that already peers with Google. Your traffic to Google services exits your network at the carrier's peering point.
+
+Both of these are access paths to Google's public services — they are not a replacement for Cloud VPN or Interconnect when you need to reach VPC-internal resources. Google explicitly recommends Cloud Interconnect over Direct/Carrier Peering for production hybrid use cases because Interconnect provides SLA guarantees, private addressing, and access to VPC resources.
+
+---
+
+## Network Connectivity Center
+
+**Network Connectivity Center (NCC)** is GCP's hub-and-spoke network management service. It enables you to connect multiple on-premises networks and VPCs through a centralised hub in GCP, with the hub managing routing between all connected spokes.
+
+### Hub-and-Spoke Model
+
+In a traditional multi-site hybrid architecture without NCC, you would need VPN tunnels or Interconnect connections between every pair of sites that need to communicate — a fully meshed topology that becomes unmanageable at scale. NCC replaces this with a hub-and-spoke topology:
+
+- **Hub**: A GCP resource (in the NCC service) that acts as the central routing point.
+- **Spokes**: VPN tunnels, Interconnect VLAN attachments, or VPC networks connected to the hub.
+
+Traffic between any two spokes routes through the hub. A spoke in Tokyo can reach a spoke in London via the GCP hub without a direct tunnel between them. This dramatically simplifies the management of multi-site connectivity.
+
+### SD-WAN Integration
+
+NCC supports **SD-WAN integration** — third-party SD-WAN appliances (deployed as VMs or via partner solutions) can serve as spokes. This allows organisations with existing SD-WAN infrastructure to connect their branch networks to GCP through the NCC hub without deploying separate VPN gateways at each branch.
+
+---
+
+## Private Service Connect
+
+**Private Service Connect (PSC)** solves a different problem: accessing **Google-managed services** (Cloud Storage, BigQuery, Cloud SQL, and Google APIs in general) from within a VPC using **private IP addresses**, without traffic leaving the VPC and traversing the internet — even through Google's internal backbone.
+
+Without PSC, accessing `storage.googleapis.com` from a VM requires either:
+- Internet egress (traffic exits the VPC to a public Google endpoint), or
+- Private Google Access (a VPC feature that allows internal VMs to reach Google APIs without a public IP, but traffic still routes over Google's backbone via public-facing endpoints).
+
+With PSC, you create a **private endpoint** inside your VPC — a forwarding rule with an internal IP address. Traffic to this endpoint routes directly to the Google service without leaving the VPC boundary. This satisfies strict compliance requirements where data must never reach a public IP space, even Google's own.
+
+PSC also enables **private service publishing** — you can expose your own services running in a VPC to other VPCs or on-premises networks through a PSC endpoint, without VPC peering. The consumer sees only an internal IP; the underlying producer VPC remains completely isolated.
+
+| Feature | Private Google Access | Private Service Connect |
+|---|---|---|
+| Traffic destination | Google's public service endpoints via backbone | Private IP endpoint inside the consumer VPC |
+| Requires internet egress | No | No |
+| Reaches Google APIs | Yes | Yes (with PSC endpoint) |
+| Reaches partner services | No | Yes (PSC service publishing) |
+| Granularity | All Google APIs | Per-service endpoints |
+
+---
+
+## References
+
+- [Google Cloud — Cloud VPN Overview](https://cloud.google.com/network-connectivity/docs/vpn/concepts/overview)
+- [Google Cloud — HA VPN](https://cloud.google.com/network-connectivity/docs/vpn/concepts/ha-vpn-architecture)
+- [Google Cloud — Cloud Router Overview](https://cloud.google.com/network-connectivity/docs/router/concepts/overview)
+- [Google Cloud — Cloud Interconnect Overview](https://cloud.google.com/network-connectivity/docs/interconnect/concepts/overview)
+- [Google Cloud — Network Connectivity Center](https://cloud.google.com/network-connectivity/docs/network-connectivity-center/concepts/overview)
+- [Google Cloud — Private Service Connect](https://cloud.google.com/vpc/docs/private-service-connect)

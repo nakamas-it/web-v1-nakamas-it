@@ -27,7 +27,9 @@ A protocol library covering how networking actually works — from the physics o
 ### The Engine Room (`/engine-room/`)
 Vendor-focused platform coverage — what each vendor's technology stack is, why it exists, and how it works conceptually. Organised by vendor rather than function.
 
-**Current coverage — 91 articles (Microsoft):**
+**Current coverage — 159 articles across 5 vendors:**
+
+#### Microsoft (91 articles)
 
 | Topic area | Articles |
 |------------|----------|
@@ -47,7 +49,46 @@ Vendor-focused platform coverage — what each vendor's technology stack is, why
 | Windows Client Security | EFS, Windows Networking, Wireless Networking, Remote Access & VPN, Windows Defender Firewall |
 | Windows Client Management | Group Policy (Client), Windows Recovery Environment, Windows Update (Client), Performance Monitoring, AppLocker |
 
-**Planned vendors (coming soon):** VMware, Linux, Google, Proxmox
+#### VMware (20 articles)
+
+| Topic area | Articles |
+|------------|----------|
+| vSphere Core | vSphere Overview, vCenter Server, ESXi Host |
+| Networking & Storage | vSphere Networking, vSphere Storage |
+| Availability | vSAN, vSphere HA, DRS, vMotion & Storage vMotion, Fault Tolerance |
+| Security | vSphere Security, VM Encryption |
+| VM Management | Virtual Machines, Resource Management, Content Library |
+| Operations | Lifecycle Manager, vCenter Backup & Restore, Monitoring & Alarms, Replication & SRM, VMware Cloud Foundation |
+
+#### Linux — RHEL 9 (15 articles)
+
+| Topic area | Articles |
+|------------|----------|
+| Foundations | RHEL Overview, Command Line, File System Hierarchy, Text Processing & Redirection, Users & Groups |
+| System Administration | File Permissions, Processes, systemd, SSH, Logging |
+| Networking & Storage | Networking Configuration, Archiving & Transfer, Package Management (DNF), Storage & Filesystems |
+| Support | Cockpit & System Support |
+
+#### Google Cloud Platform (18 articles)
+
+| Topic area | Articles |
+|------------|----------|
+| Foundations | Resource Hierarchy, IAM |
+| Compute | Compute Engine, GKE, Serverless |
+| Storage & Data | Cloud Storage, Managed SQL, NoSQL & Big Data, BigQuery |
+| Networking | VPC Networking, Load Balancing & CDN, Hybrid Connectivity |
+| Security & Operations | Security & Compliance, Cloud Monitoring & Operations |
+| Advanced | Data Analytics & Pipelines, Migration to GCP, Reliability & Cost Optimisation, Anthos & Hybrid Cloud |
+
+#### Proxmox VE (15 articles)
+
+| Topic area | Articles |
+|------------|----------|
+| Foundations | Overview, Installation, Clustering |
+| Networking & Security | Networking, Firewall |
+| Storage | Storage Backends, ZFS, Ceph |
+| Virtualisation | KVM Virtual Machines, LXC Containers |
+| Operations | High Availability, Backup & Restore, VM Advanced Features, Monitoring & Maintenance, Templates & Snapshots |
 
 ---
 

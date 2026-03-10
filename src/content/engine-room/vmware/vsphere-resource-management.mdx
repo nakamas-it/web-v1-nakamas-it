@@ -1,0 +1,91 @@
+---
+title: "vSphere Resource Management — Pools, Shares, Reservations, and Limits"
+category: "vmware"
+topic: "vsphere-resource-management"
+summary: "How vSphere controls how CPU and memory are allocated among virtual machines — using resource pools to group VMs with shared entitlements, shares to set relative priority during contention, reservations to guarantee minimum resources, and limits to cap maximum consumption."
+tags: ["vmware", "resource-pools", "shares", "reservations", "vapps", "vcpdcv"]
+order: 14
+draft: false
+---
+
+## Overview
+
+Virtual machines on an ESXi host or cluster share a finite pool of physical CPU and memory. Most of the time, with properly planned host sizing, there is enough to go around and the allocation question is invisible. But when demand spikes — during business hours, end-of-month batch runs, or following a host failure that concentrates VMs onto fewer hosts — vSphere needs a principled way to decide who gets resources first. That decision is governed by three settings that can be applied to individual VMs and to resource pools: shares, reservations, and limits.
+
+## Shares
+
+Shares express **relative priority** during contention. When multiple VMs or resource pools are competing for the same physical resource, shares determine the ratio of access each entity receives. A VM with 2,000 CPU shares receives twice the CPU time of a VM with 1,000 shares when both are actively demanding CPU and the host is under pressure.
+
+The critical point about shares: they have **no effect when resources are plentiful**. A VM with Low shares gets exactly as much CPU as a VM with High shares if the host is idle and both VMs can have everything they ask for. Shares only come into play when there is actual contention for a resource.
+
+vSphere provides four share tiers for convenience — Low, Normal, High, and Custom — with predefined values for CPU and memory:
+
+| Tier | CPU Shares (per vCPU) | Memory Shares (per MB) |
+|---|---|---|
+| Low | 500 | 5 |
+| Normal | 1000 | 10 |
+| High | 2000 | 20 |
+| Custom | Any value | Any value |
+
+Shares are always evaluated **within the same parent container**. A VM with High shares in one resource pool competes with other VMs in that pool, not with VMs in sibling pools. This containment is what makes resource pool hierarchies useful for multi-tenant environments.
+
+## Reservations
+
+A reservation is a **guaranteed minimum**. When a VM has a CPU reservation of 2 GHz, the ESXi host sets aside 2 GHz of physical CPU capacity for that VM. That reserved capacity is unavailable to any other VM even if the VM it is reserved for is idle.
+
+Reservations are enforced at power-on through **admission control**. When a VM is powered on, vCenter checks whether the host or cluster has enough unreserved capacity to satisfy the VM's reservation. If the reservation cannot be satisfied — because other running VMs have already claimed the available capacity — vCenter will refuse to power on the VM. This prevents overcommitment of guaranteed resources.
+
+The operational implication of reservations is that they are most useful for workloads that have a known minimum resource floor — a database that will perform unacceptably below a certain CPU speed, or an application that requires a guaranteed amount of memory to function at all. They should be used sparingly and deliberately, because every reservation reduces the pool of capacity available for overcommitment and flexible scheduling. An environment where every VM has a reservation equal to its typical usage negates vSphere's ability to efficiently overcommit resources across workloads with different utilisation patterns.
+
+## Limits
+
+A limit is a **ceiling** on resource consumption. A VM with a CPU limit of 4 GHz cannot use more than 4 GHz of CPU even if the host is completely idle and has 20 GHz available. The default limit value is -1, meaning unlimited — the VM can use as much physical resource as the host can provide.
+
+Limits are useful in specific scenarios: chargeback models where a tenant should not be able to burst beyond a contracted allocation, or situations where a workload is known to misbehave if it gets too much CPU (certain real-time workloads, or legacy applications that spin-poll and saturate a core if given unrestricted access). For general use, limits should be avoided because they artificially constrain VMs even when resources are freely available, which wastes physical capacity.
+
+## Resource Pools
+
+Resource pools are containers in the vSphere inventory that group VMs and define aggregate resource entitlements for the group. The pool itself has shares, reservation, and limit settings, and those settings govern the pool's aggregate entitlement relative to its siblings.
+
+Within the pool, each VM has its own shares, reservation, and limit settings that govern how the pool's allocated resources are distributed among the VMs it contains.
+
+A key feature of resource pools is the **Expandable Reservation** setting. By default, if a pool's reservation is 10 GHz and the VMs in the pool collectively ask for more, they are constrained to the pool's reservation. With Expandable Reservation enabled, the pool can borrow unused reservation capacity from its parent pool if available. This provides flexibility in overprovisioned environments where the parent pool rarely uses its full reservation.
+
+## Resource Pool Hierarchy
+
+Resource pools can be nested. A cluster can have a pool for Production, and the Production pool can contain sub-pools for different application teams, each with their own shares, reservations, and limits. This hierarchy maps naturally to organisational structures:
+
+```
+Cluster
+  └── Production Pool (High shares, 20 GHz reservation)
+        ├── Database Pool (Normal shares, 10 GHz reservation)
+        │     ├── DB-01 VM
+        │     └── DB-02 VM
+        └── App Pool (Normal shares, 5 GHz reservation)
+              ├── App-01 VM
+              └── App-02 VM
+  └── Dev Pool (Low shares, no reservation)
+        ├── Dev-01 VM
+        └── Dev-02 VM
+```
+
+During contention between Production and Dev pools, the Production pool's High shares ensure its VMs receive priority. Within Production, the Database and App pools compete using their Normal shares relative to each other, and within each pool the individual VMs compete using their own share settings.
+
+## vApps
+
+A vApp is a specialised container for multi-VM applications. It extends the resource pool concept with application-level features:
+
+- **Startup and shutdown order**: vApps define which VMs start first, with configurable delays between them. For a multi-tier application where the database must be running before the application servers, the startup order encodes this dependency.
+- **OVF/OVA compatibility**: vApps can be exported as OVA files, making them a portable unit for multi-VM application deployment and distribution.
+- **IP pools**: vApps can define IP allocation ranges for the VMs they contain.
+- **Resource pool settings**: Like a resource pool, a vApp has shares, reservation, and limit settings governing its aggregate resource entitlement.
+
+vApps appear in the VM and Templates view of the vSphere inventory, not the Hosts and Clusters view, because they are primarily a VM grouping and deployment concept rather than a compute resource management concept.
+
+## DRS Integration
+
+Resource pool entitlements interact with DRS (Distributed Resource Scheduler). When DRS is enabled on a cluster, it considers resource pool reservations and shares when deciding which host to migrate VMs to. A resource pool with a high shares setting will have DRS preferentially migrate its VMs to hosts with more available capacity during rebalancing, ensuring the pool's priority is maintained across the cluster's physical resources.
+
+## Summary
+
+vSphere resource management gives administrators precise control over how CPU and memory are distributed among workloads. Shares set relative priority that only applies during contention. Reservations guarantee minimums and block power-on if the guarantee cannot be met. Limits cap consumption even when resources are available. Resource pools group VMs into aggregate entitlement containers, enabling departmental or application-tier based resource governance that maps to real organisational boundaries. vApps extend pools with startup ordering and OVF portability for multi-VM applications. Used together and deliberately, these tools allow a vSphere environment to be shared efficiently across many workloads without any single tenant monopolising infrastructure during peak demand.

@@ -1,0 +1,268 @@
+---
+title: "Proxmox VE — Built-in Firewall"
+category: "proxmox"
+topic: "firewall"
+summary: "Proxmox's iptables-based firewall — three-tier configuration (Datacenter, host, VM/CT), security groups, rule syntax, and enabling per-interface."
+tags: ["proxmox", "firewall", "iptables", "security", "network-security"]
+order: 5
+draft: false
+---
+
+## Overview
+
+Proxmox VE ships with a built-in firewall that is fully integrated into the management GUI. It is implemented using **iptables** (and **ebtables** for VM-level Ethernet filtering) and is managed by the `pve-firewall` service, which translates Proxmox firewall rules into actual iptables rules and applies them in real time.
+
+The firewall is **disabled by default** — no rules are active until you explicitly enable it. All rule changes take effect immediately after saving — no service restart is required.
+
+## The Three-Tier Architecture
+
+Proxmox's firewall has a three-layer hierarchy. Rules at higher levels cascade down to lower levels:
+
+```
+Datacenter (cluster-wide)
+  └── Node / Host (per-node)
+        └── VM / Container (per-workload)
+```
+
+**Datacenter level** — rules apply to the entire cluster. A rule created here affects all nodes and all VMs across every node. This is where you define cluster-wide policies such as "all VMs must allow inbound port 443" or "no node accepts SSH from outside the management subnet."
+
+**Node (Host) level** — rules apply to a specific Proxmox node and cascade to VMs running on that node. Useful for node-specific access policies that do not need to apply cluster-wide.
+
+**VM / Container level** — rules apply to a single VM or container. These rules follow the VM as it migrates between nodes. A firewall rule applied to VM 101 will be enforced on whichever node VM 101 is running on.
+
+### Critical Warning: Enable Rules Before Enabling the Firewall
+
+Do not enable the Datacenter firewall without first creating rules to allow:
+- **TCP port 8006** — Proxmox web GUI
+- **TCP port 22** — SSH access
+
+The default incoming policy when the firewall is enabled is `DROP`. Enabling the firewall before creating allow rules will lock you out of the GUI. Recovery requires console access to the physical node.
+
+## Enabling the Firewall
+
+The firewall must be enabled at each tier separately. Enabling it at the Datacenter level does not automatically enable it on nodes or VMs — each must be explicitly enabled.
+
+**Enabling at Datacenter level:**
+`Datacenter → Firewall → Options → Firewall: Yes`
+
+**Enabling at Node level:**
+`Node → Firewall → Options → Firewall: Yes`
+
+**Enabling at VM level:**
+`VM → Firewall → Options → Firewall: Yes`
+
+Additionally, firewall filtering on a VM only applies to the VM's network interfaces that have **Firewall** enabled in the VM's hardware configuration. Go to `VM → Hardware → Network Device → Edit` and ensure the **Firewall** checkbox is ticked for each interface you want to protect.
+
+## Rule Anatomy
+
+Each firewall rule has these properties:
+
+| Property | Options | Description |
+|----------|---------|-------------|
+| **Direction** | `in`, `out` | Inbound (to the zone) or outbound (from the zone) |
+| **Action** | `ACCEPT`, `REJECT`, `DROP` | What to do with matching traffic |
+| **Protocol** | `tcp`, `udp`, `icmp`, any | Layer 4 protocol |
+| **Source** | IP, CIDR, IPSet, Alias | Where traffic comes from |
+| **Destination** | IP, CIDR, IPSet, Alias | Where traffic is going |
+| **Port** | Single port or range | Destination port (e.g., `80`, `1024:65535`) |
+| **Macro** | Pre-built service definition | Auto-fills protocol and port for common services |
+| **Comment** | Free text | Rule documentation |
+
+**Action semantics:**
+- `ACCEPT` — allow the traffic through
+- `REJECT` — drop the traffic and send an ICMP "port unreachable" or TCP RST back to the sender; the sender knows it was rejected
+- `DROP` — silently discard the traffic; no response is sent; the sender times out waiting
+
+`DROP` is preferred over `REJECT` for public-facing interfaces because it reveals less information about the host. `REJECT` is more useful in internal networks where you want fast failure rather than timeout delays.
+
+### Disabling Individual Rules
+
+Prefix a rule with `|` (pipe character) in the configuration file to disable it without deleting it. In the GUI, toggle the **Enable** checkbox per rule. Disabled rules appear greyed out in the GUI and have a `|` prefix in the config file.
+
+## Built-in Macros
+
+Macros are pre-defined rule templates for common services. Selecting a macro in the GUI automatically fills in the correct protocol and port number. You only need to specify direction, action, and optionally source/destination.
+
+Common macros include:
+
+| Macro | Protocol | Port |
+|-------|---------|------|
+| `SSH` | TCP | 22 |
+| `HTTP` | TCP | 80 |
+| `HTTPS` | TCP | 443 |
+| `DNS` | UDP | 53 |
+| `Ping` | ICMP | — |
+| `FTP` | TCP | 21 |
+| `MySQL` | TCP | 3306 |
+| `VNC` | TCP | 5900–5999 |
+| `NTP` | UDP | 123 |
+
+The FTP macro only works with **passive mode FTP**. Active mode FTP requires additional rules for the data channel, which is dynamically assigned.
+
+## Default Policies
+
+Each firewall zone has independent default policies for inbound (`INPUT`) and outbound (`OUTPUT`/`FORWARD`) traffic. These apply when no specific rule matches.
+
+The recommended starting configuration:
+- `policy_in: DROP` — block all inbound traffic by default; explicitly allow what you need
+- `policy_out: ACCEPT` — allow all outbound traffic by default; restrict as needed
+
+This is the classic default-deny inbound / default-allow outbound posture. Outbound traffic restrictions are less common but useful in high-security environments where VMs should not be able to reach arbitrary external addresses.
+
+## Security Groups
+
+Security groups are **reusable sets of firewall rules** that can be applied to any firewall zone. Instead of recreating the same set of rules on every VM that runs a web server, you define the rules once in a security group and apply the group to each VM.
+
+**Creating a security group:**
+Security groups are created at the Datacenter level (`Datacenter → Firewall → Security Group → Create`). Enter a name — for example, `webserver`.
+
+Add rules to the group. A `webserver` group might contain:
+```
+IN ACCEPT -macro SSH
+IN ACCEPT -macro HTTP
+IN ACCEPT -macro HTTPS
+```
+
+**Applying a security group to a zone:**
+In any firewall rule dialog (Datacenter, node, or VM), you can select a security group as the action instead of ACCEPT/DROP. The group's rules are inserted at that position in the rule chain.
+
+Groups created at the Datacenter level are available in all zones. Groups created at the VM level are only available for that specific VM.
+
+## IP Sets
+
+IP sets are **named collections of IP addresses and subnets** that can be referenced in firewall rules. Instead of writing a separate rule for each management workstation's IP address, you define them in an IP set and reference the set name.
+
+IP sets are created at `Datacenter → Firewall → IPSet → Create`. Name the set (e.g., `management_hosts`), then add individual IPs and CIDR subnets.
+
+In rules, IP sets are referenced with a `+` prefix:
+
+```
+IN ACCEPT -p tcp -dest +management_hosts -dport 8006
+IN ACCEPT -macro SSH -dest +management_hosts
+```
+
+IP sets created at the Datacenter level are available cluster-wide. IP sets created at the VM level are only available for that VM's rules.
+
+**IP set naming:** Use alphanumeric characters, hyphens, and underscores only. IP sets appear in the GUI's source/destination dropdowns with a `+` prefix to distinguish them from single IPs.
+
+## Aliases
+
+Aliases map a human-readable name to a single IP address or CIDR network. They are simpler than IP sets (one alias = one address) and are especially useful for IPv6 addresses (where typing `2001:db8::1` repeatedly is error-prone).
+
+Create aliases at `Datacenter → Firewall → Aliases`. Examples:
+```
+ProxmoxNet 172.16.2.0/24
+CephNet 192.168.20.0/24
+BackupServer 192.168.10.200
+```
+
+Reference aliases directly by name in rule source/destination fields (without a `+` prefix — that prefix is specific to IP sets).
+
+Datacenter-level aliases are usable in rules at all zones.
+
+## Configuration Files
+
+All firewall configuration is stored in `/etc/pve/firewall/` (inside pmxcfs, replicated to all cluster nodes):
+
+| File | Zone |
+|------|------|
+| `/etc/pve/firewall/cluster.fw` | Datacenter-level rules |
+| `/etc/pve/nodes/<name>/host.fw` | Node-level rules |
+| `/etc/pve/firewall/<vmid>.fw` | VM/Container-level rules |
+
+### cluster.fw Structure
+
+```
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: ACCEPT
+
+[ALIASES]
+ProxmoxNet 172.16.2.0/24
+CephNet 192.168.20.0/24
+
+[IPSET proxmox_nodes]
+172.16.2.1
+172.16.2.2
+172.16.2.3
+
+[RULES]
+IN ACCEPT -i vmbr0 -p tcp -dport 8006    # Proxmox GUI
+IN ACCEPT -macro SSH -dest +proxmox_nodes # SSH to management IPs only
+|IN ACCEPT -p icmp                         # ICMP (disabled — note the | prefix)
+
+[group webserver]
+IN ACCEPT -macro HTTPS
+IN ACCEPT -macro HTTP
+IN ACCEPT -macro SSH
+```
+
+Sections in the file are delimited by square-bracket headers. Rules are listed one per line in the `[RULES]` section. Security group definitions appear as `[group <name>]` sections.
+
+### Emergency Recovery from Lockout
+
+If you lock yourself out of the GUI by enabling the firewall before creating allow rules, recover by:
+
+1. Access the node via physical console or IPMI/iDRAC
+2. Edit the cluster firewall config directly:
+   ```bash
+   nano /etc/pve/firewall/cluster.fw
+   ```
+3. Change `enable: 1` to `enable: 0`
+4. The pve-firewall service polls the config file and will disable the firewall within seconds — no service restart required
+
+## Stateful Connection Tracking
+
+The Proxmox firewall uses **stateful connection tracking** via the Linux netfilter `nf_conntrack` module. This means:
+
+- You only need to create inbound `ACCEPT` rules for the initial connection
+- Return traffic for established connections is automatically allowed without explicit rules
+- The connection tracking table remembers all active connections
+
+Two important tunables for high-traffic nodes (accessible at **Node → Firewall → Options**):
+
+**`nf_conntrack_max`** — maximum number of simultaneous tracked connections. Default is 65536. Web servers or DNS servers handling thousands of concurrent connections may need this increased:
+```bash
+sysctl -a | grep nf_conntrack_max      # Check current value
+sysctl -a | grep nf_conntrack_count    # Check current live connection count
+```
+
+**`nf_conntrack_tcp_timeout_established`** — how long an idle established TCP connection stays in the tracking table. Default is 432000 seconds (5 days). Reduce this for environments with many short-lived connections to prevent table exhaustion.
+
+## VM-Specific Options
+
+At the VM firewall level, several additional options are available:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| **DHCP** | Off | Allow DHCP traffic (UDP 67/68); enable if this VM is a DHCP server |
+| **MAC filter** | On | Prevent MAC address spoofing from the VM; drops frames with unexpected source MACs |
+| **Input policy** | DROP | Default action for inbound traffic not matching any rule |
+| **Output policy** | ACCEPT | Default action for outbound traffic not matching any rule |
+
+The **MAC filter** is enabled by default and should remain enabled. It uses ebtables to enforce that VMs can only send traffic from their assigned MAC address. This prevents a compromised VM from impersonating another VM's MAC address on the same bridge.
+
+## Firewall Service Management
+
+The `pve-firewall` service manages the lifecycle of all iptables rules:
+
+```bash
+pve-firewall start      # Enable and load rules
+pve-firewall stop       # Disable and flush all Proxmox firewall rules
+pve-firewall restart    # Reload all rules
+pve-firewall status     # Show running status: "Status: enabled/running"
+```
+
+A companion service, `pvefw-logger`, handles firewall traffic logging when logging is enabled on rules. It is based on the netfilter logging daemon (`ulogd`) and writes firewall log entries separately from system logs.
+
+## Limitations
+
+The Proxmox built-in firewall is a solid stateful packet filter, but it has limits to understand:
+
+- **No intrusion detection or prevention** — the firewall accepts or drops packets based on rules; it does not inspect payload content for attack signatures. For IDS/IPS, Suricata can be installed alongside the firewall and configured to inspect traffic that the firewall has already accepted.
+- **No application-layer filtering** — no URL filtering, no DNS-based blocking, no TLS inspection
+- **No central logging aggregation** — each node logs locally; there is no built-in way to centralise firewall logs across the cluster
+- **Node-level rules do not migrate** — unlike VM-level rules (which follow the VM), node-level rules stay on the node. A migrated VM loses the protection of the source node's rules but retains its own VM-level rules.
+
+For environments needing application-layer filtering, deploy a dedicated firewall VM (pfSense, OPNsense, or similar) and route VM traffic through it rather than relying solely on the Proxmox built-in firewall.

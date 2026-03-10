@@ -1,0 +1,176 @@
+---
+title: "GCP — Anthos and Hybrid Cloud"
+category: "google"
+topic: "anthos"
+summary: "Anthos — Google's hybrid and multi-cloud platform for running Kubernetes workloads on-premises, in GCP, and across other clouds."
+tags: ["gcp", "google-cloud", "anthos", "hybrid-cloud", "multi-cloud", "kubernetes", "service-mesh"]
+order: 18
+draft: false
+---
+
+## Overview
+
+Anthos is Google's answer to the reality that most enterprises cannot or will not move all workloads to a single cloud. Regulatory requirements mandate data residency on-premises. Latency-sensitive applications must run close to where data is generated. Acquisitions bring existing infrastructure that cannot be abandoned overnight. Legacy contracts lock some workloads to other cloud providers.
+
+Anthos addresses this by extending GCP's Kubernetes management plane to run anywhere — on-premises VMware, bare metal, AWS, and Azure. A team managing Anthos clusters in four different environments uses the same tooling, the same configuration management, and the same service mesh policies everywhere. Anthos does not hide the complexity of multi-environment operations, but it provides a single control plane to manage that complexity rather than requiring four separate sets of tools and practices.
+
+---
+
+## Core Architecture
+
+Anthos is built on three foundational components that work independently but integrate tightly:
+
+1. **Anthos clusters** — GKE-compatible Kubernetes clusters running anywhere
+2. **Anthos Config Management** — GitOps-based configuration synchronisation across all clusters
+3. **Anthos Service Mesh** — Istio-based service mesh for traffic management, observability, and mTLS
+
+Each component can be adopted independently. An organisation might use Anthos Config Management with existing GKE clusters before adding the service mesh. Or it might deploy Anthos on VMware first and extend to AWS later. This composability is intentional — it allows incremental adoption rather than requiring a big-bang platform migration.
+
+---
+
+## Anthos Clusters
+
+### GKE On-Prem (Anthos Clusters on VMware)
+
+GKE On-Prem deploys GKE-compatible Kubernetes clusters on VMware vSphere infrastructure. Google provides and manages the Kubernetes control plane components, which run as VMs in the customer's vSphere environment. The cluster appears in the GCP console alongside cloud-based GKE clusters and is managed using the same `gcloud` and `kubectl` commands.
+
+The control plane communicates with GCP over a Cloud VPN or Cloud Interconnect connection for:
+- Receiving configuration updates from Anthos Config Management
+- Reporting cluster metrics and logs to Cloud Monitoring and Cloud Logging
+- Checking in with the GCP management plane for fleet-level operations
+
+Worker nodes are standard VMs in the customer's vSphere cluster. Node pools can use different vSphere resource pools, datastores, and VM templates — providing hardware-level isolation between workload types.
+
+### Anthos Clusters on Bare Metal
+
+For environments without VMware, Anthos clusters can run directly on physical servers or non-VMware virtualisation platforms. Anthos on bare metal installs kubeadm-based clusters and connects them to the GCP fleet management plane. This is common in telco edge deployments, manufacturing floors, and retail environments where VMware licensing is not justified.
+
+### Anthos Attached Clusters
+
+Anthos attached clusters connect existing Kubernetes clusters — whether running on AWS EKS, Azure AKS, or any conformant Kubernetes distribution — to the Anthos fleet without requiring Google to manage the control plane. The cluster is registered with the GCP fleet and becomes visible in the Anthos console. Anthos Config Management and Anthos Service Mesh can then be deployed to the attached cluster, applying consistent policies regardless of where the cluster runs.
+
+---
+
+## Anthos Config Management
+
+Anthos Config Management (ACM) implements GitOps for Kubernetes configuration. A Git repository (Cloud Source Repositories, GitHub, GitLab, or any Git server) serves as the **source of truth** for cluster configuration. ACM's **Config Sync** component runs as a controller in each registered cluster and continuously reconciles the cluster's state with the contents of the repository. If someone manually modifies a resource in the cluster that is managed by Config Sync, the change is automatically reverted to match the repository — drift is corrected without human intervention.
+
+### Policy Controller
+
+Policy Controller is the ACM component for governance and compliance enforcement. It is built on **OPA Gatekeeper** (Open Policy Agent), which implements **admission control** in Kubernetes. Every API request that creates or modifies a resource is evaluated against a set of **Constraints** before it is allowed. Constraints are written in the **Rego** policy language and can enforce rules such as:
+
+- All pods must have resource limits defined (prevents unbounded resource consumption)
+- Container images must come from approved registries (prevents deployment of untrusted images)
+- Namespaces must have a `team` label for cost attribution
+- `hostNetwork: true` and `privileged: true` are disallowed unless explicitly exempted
+
+**ConstraintTemplates** define the structure of a policy type, and **Constraints** instantiate the policy with specific parameters. This separation allows platform teams to define reusable policy templates that application teams apply to their namespaces with their own parameters.
+
+### Hierarchical Namespace Controller
+
+ACM's Hierarchical Namespace Controller allows cluster administrators to create a namespace tree that mirrors the organisational structure. Policies applied to parent namespaces automatically propagate to child namespaces, simplifying governance in large multi-team clusters.
+
+---
+
+## Anthos Service Mesh
+
+Anthos Service Mesh (ASM) is Google's managed distribution of **Istio**, the open-source service mesh. A service mesh intercepts all network communication between microservices and provides traffic management, observability, and security capabilities without requiring any changes to application code. ASM deploys **Envoy proxy** sidecars alongside each application pod; all traffic in and out of a pod flows through its sidecar proxy.
+
+### Mutual TLS (mTLS)
+
+The most important security capability of ASM is **mutual TLS** between services. In a standard Kubernetes deployment, service-to-service communication is unencrypted inside the cluster. ASM automatically provisions TLS certificates for each service's sidecar proxy (using SPIFFE/SPIRE identity) and enforces mTLS on all service-to-service connections. Neither the client service nor the server service needs to handle certificate management — the sidecar proxies handle the entire TLS handshake transparently.
+
+ASM supports two mTLS modes:
+
+| Mode | Behaviour |
+|------|-----------|
+| **PERMISSIVE** | Accepts both plaintext and mTLS; used during migration when some services don't yet have sidecars |
+| **STRICT** | Rejects plaintext; all traffic must be mTLS; recommended for production |
+
+### Traffic Management
+
+ASM's traffic management capabilities extend Kubernetes Service routing with fine-grained control:
+
+- **Virtual Services** — define routing rules: route 90% of traffic to `v1` of a service and 10% to `v2` for canary deployments
+- **Destination Rules** — define load balancing policy (round robin, least connections, consistent hash), circuit breaker thresholds, and connection pool limits per service version
+- **Ingress Gateways** — manage inbound traffic to the mesh from outside the cluster, applying TLS termination, header manipulation, and routing at the entry point
+- **Egress Gateways** — control and audit outbound traffic from the mesh to external services
+
+### Observability
+
+Because all traffic flows through the Envoy sidecar, ASM can automatically generate three types of telemetry for every service-to-service call without code instrumentation:
+
+- **Metrics** — request count, error rate, latency percentiles (p50, p95, p99) per service and per route; exported to Cloud Monitoring
+- **Logs** — access logs for every request including source service identity, response code, and latency; exported to Cloud Logging
+- **Traces** — distributed request traces showing the full call chain across microservices; exported to Cloud Trace
+
+This automatic observability is one of the most compelling reasons to adopt a service mesh. Debugging latency issues that span five microservices becomes tractable when you can see the entire trace rather than correlating logs across five separate services.
+
+---
+
+## Anthos for Multi-Cloud
+
+### Anthos Clusters on AWS and Azure
+
+Anthos can manage Kubernetes clusters running on AWS EC2 or Azure virtual machines through the **Anthos Multi-Cloud API**. Google manages the Kubernetes control plane components running in the respective cloud (in the customer's AWS account or Azure subscription). Worker nodes are regular EC2 instances or Azure VMs in the customer's environment. The clusters are registered with the GCP fleet and can be managed through the GCP console alongside on-premises and GKE clusters.
+
+This model allows a single platform team to enforce consistent security policies (via ACM Policy Controller), configuration (via Config Sync), and observability (via ASM) across GKE, EKS-equivalent on AWS, and AKS-equivalent on Azure — without requiring separate policy tooling per cloud.
+
+### When to Choose Anthos vs Plain GKE
+
+Anthos adds operational overhead and cost. It is not the right choice for every Kubernetes deployment.
+
+| Scenario | Recommendation |
+|----------|---------------|
+| All workloads in GCP, no on-premises requirement | Use plain GKE — Anthos adds unnecessary complexity |
+| Mix of GCP and on-premises (VMware or bare metal) | Anthos clusters on VMware or bare metal |
+| Multiple cloud providers with Kubernetes workloads | Anthos attached clusters or Anthos multi-cloud |
+| Strict governance requirements across environments | Anthos Config Management with Policy Controller |
+| Service-to-service mTLS without code changes | Anthos Service Mesh |
+| Containerising existing VMs for modernisation | Migrate for Anthos |
+
+---
+
+## Cloud Run for Anthos
+
+Cloud Run for Anthos brings serverless container execution to on-premises and multi-cloud Anthos clusters. It extends the Cloud Run programming model — stateless containers that scale from zero based on incoming requests — to clusters running outside GCP. Application teams write and deploy containers the same way they would for GCP-hosted Cloud Run; the Anthos cluster handles the autoscaling and request routing.
+
+This is particularly useful for event-driven workloads that run on-premises for data residency reasons but benefit from a serverless execution model (no idle resource cost, automatic scaling).
+
+---
+
+## Migrate for Anthos
+
+Migrate for Anthos converts virtual machine workloads into containers, allowing VM-based applications to run on Kubernetes without a full application rewrite. The migration process:
+
+1. **Assess** — the Migrate for Anthos CLI analyses the source VM and identifies the application layer (processes, listening ports, data directories)
+2. **Extract** — the VM's application layer is extracted into a Docker image; OS-level components are replaced with a minimal container base image
+3. **Generate** — deployment manifests (Deployment, Service, PersistentVolumeClaim) are generated for the containerised application
+4. **Test** — the container is deployed to a test Anthos cluster and validated
+5. **Deploy** — the container moves to production GKE or Anthos clusters
+
+The resulting container is smaller and more portable than the original VM. It can be iterated on and eventually refactored toward cloud-native patterns — but it delivers immediate benefits (Kubernetes scheduling, rolling updates, resource limits) without requiring application code changes.
+
+---
+
+## Binary Authorization in Anthos
+
+**Binary Authorization** is a deploy-time security control that enforces policies on container images before they are allowed to run on GKE or Anthos clusters. Only images that have been signed by trusted authorities (such as a CI/CD system after passing security scans) are permitted to deploy. Unsigned images are rejected at admission time.
+
+In an Anthos multi-cluster environment, Binary Authorization policies are enforced consistently across all clusters through integration with Anthos Config Management. A platform team defines the attestation requirements in a policy file stored in the GitOps repository, and Config Sync distributes it to every registered cluster.
+
+---
+
+## Anthos Identity: Workload Identity Federation
+
+GKE workloads in GCP use **Workload Identity** to access GCP APIs without service account key files — Kubernetes service accounts are mapped to GCP service accounts, and the GKE metadata server provides short-lived credentials automatically.
+
+For Anthos clusters running outside GCP, **Workload Identity Federation** extends this model. Applications on on-premises Anthos clusters or clusters on AWS and Azure can authenticate to GCP APIs using their Kubernetes service account token, which is exchanged for a short-lived GCP access token through the Security Token Service. No long-lived key files are required even for workloads running outside GCP, which eliminates a major credential management risk in hybrid deployments.
+
+---
+
+## Pricing Model
+
+Anthos is licensed on a per-vCPU basis for all registered clusters, regardless of where they run. On-premises and attached clusters are charged at a flat per-vCPU-per-hour rate. GKE clusters registered with Anthos are covered under the standard GKE pricing (no additional Anthos charge for GKE clusters in the same fleet).
+
+The pricing model means that Anthos cost is proportional to total cluster size rather than the number of clusters. A few large clusters cost the same as many small clusters with the equivalent total vCPU count.

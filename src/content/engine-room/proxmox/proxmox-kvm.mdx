@@ -1,0 +1,332 @@
+---
+title: "Proxmox VE — KVM Virtual Machines"
+category: "proxmox"
+topic: "kvm"
+summary: "Creating and managing KVM VMs in Proxmox — VM hardware configuration, disk options, CPU and memory settings, VirtIO drivers, and QEMU guest agent."
+tags: ["proxmox", "kvm", "virtual-machines", "qemu", "virtio", "vm-configuration"]
+order: 9
+draft: false
+---
+
+## Overview
+
+KVM (Kernel-based Virtual Machine) is a hardware virtualization module built into the Linux kernel. It enables the Linux kernel to act as a Type 1 hypervisor, allowing multiple full virtual machines to run on a single physical host, each with its own emulated hardware environment. Proxmox VE uses KVM in combination with QEMU — KVM provides hardware-accelerated virtualization, and QEMU provides the emulated device layer (disk controllers, network cards, display adapters, etc.).
+
+KVM VMs in Proxmox can run any operating system: Linux, Windows, BSD, and theoretically macOS on compatible hardware. Each VM has its own kernel, its own memory space, and its own emulated hardware stack. This full isolation comes at a cost — each KVM VM consumes more RAM and CPU overhead than an LXC container running the same workload. The tradeoff is complete OS flexibility and the strongest isolation boundary available in Proxmox.
+
+KVM requires CPU hardware virtualization extensions: **Intel VT-x** or **AMD-V**. Verify support on the host:
+
+```bash
+# Check for hardware virtualization support
+egrep -c '(vmx|svm)' /proc/cpuinfo
+
+# Output > 0 means hardware virtualization is available
+```
+
+---
+
+## Creating a KVM VM
+
+### Creation Methods
+
+Proxmox offers three ways to create a VM:
+1. **From an ISO image** — the most common method; install the OS fresh from installation media
+2. **From a template** — clone a pre-configured VM template (full or linked clone)
+3. **Via PXE network boot** — boot from the network; useful for automated provisioning workflows
+
+### VM Creation Wizard
+
+The creation wizard is accessed via **Create VM** in the top-right of the Proxmox GUI. It is divided into tabs:
+
+#### General Tab
+
+| Setting | Description |
+|---|---|
+| **Node** | Which Proxmox node hosts this VM |
+| **VM ID** | Numeric identifier, cluster-unique; used in config file names and commands |
+| **Name** | Alphanumeric + dash; descriptive label for the VM |
+| **Resource Pool** | Optional grouping for RBAC delegation |
+
+The VM ID cannot be changed after creation. Choose IDs with a clear scheme — for example, 100-199 for production VMs, 200-299 for infrastructure, 900-999 for templates.
+
+#### OS Tab
+
+Select the guest OS type. This does not restrict what OS you install — it controls which architectural optimizations Proxmox applies. Selecting the correct OS type ensures Proxmox sets appropriate defaults for disk controllers, clock sources, and other hardware settings.
+
+#### System Tab
+
+| Setting | Options | Notes |
+|---|---|---|
+| **BIOS** | SeaBIOS, OVMF (UEFI) | SeaBIOS is the default; OVMF is required for Windows 11, Secure Boot, TPM |
+| **Machine type** | i440fx, q35 | q35 is the modern chipset; required for PCIe passthrough and NVMe emulation |
+| **TPM** | None, v2.0 | Required for Windows 11 |
+| **SCSI Controller** | lsi, megasas, virtio-scsi-pci | virtio-scsi-pci is recommended for Linux; lsi for Windows without drivers |
+
+The **q35 machine type** is the recommended default for new VMs. It emulates a more modern chipset with PCIe support, better AHCI/NVMe emulation, and broader driver support in modern guest OSes.
+
+#### Disks Tab
+
+Disk configuration is where most tuning decisions are made:
+
+| Setting | Options | Recommendation |
+|---|---|---|
+| **Bus/Device** | VirtIO SCSI, VirtIO Block, IDE, SATA | VirtIO SCSI for Linux; IDE or SATA for Windows without VirtIO drivers |
+| **Storage** | Any configured Proxmox storage | Choose based on performance and sharing requirements |
+| **Disk size** | In GiB | Thin provisioning applies on qcow2/LVM-Thin/ZFS/RBD |
+| **Format** | qcow2, raw | qcow2 for snapshots; raw for maximum performance |
+| **Cache** | None, writeback, writethrough, directsync | See cache modes below |
+| **Discard** | Yes/No | Enable for SSD TRIM support |
+| **IO thread** | Yes/No | Gives each disk its own I/O thread; reduces latency |
+
+#### CPU Tab
+
+| Setting | Description |
+|---|---|
+| **Sockets** | Number of CPU sockets (usually 1) |
+| **Cores** | Cores per socket |
+| **CPU type** | Emulated CPU model |
+| **NUMA** | Enable for multi-socket VMs; required for CPU/memory hotplug |
+
+Total vCPUs = Sockets × Cores. QEMU presents these as the guest OS's CPU topology.
+
+#### Memory Tab
+
+Set the base RAM allocation in MiB. Enable **ballooning** with a minimum RAM value to allow Proxmox to reclaim unused RAM from idle VMs dynamically.
+
+#### Network Tab
+
+| Setting | Options | Notes |
+|---|---|---|
+| **Model** | VirtIO, e1000, RTL8139 | VirtIO for Linux; e1000 for Windows without VirtIO |
+| **Bridge** | vmbr0, vmbr1, etc. | Which Proxmox virtual bridge to connect to |
+| **VLAN Tag** | 1–4094 | VLAN ID on VLAN-aware bridges |
+| **Rate limit** | MB/s | Per-VM bandwidth cap |
+
+---
+
+## BIOS Options: SeaBIOS vs. OVMF/UEFI
+
+**SeaBIOS** is the traditional BIOS emulation. It is simpler, widely compatible, and appropriate for most Linux VMs and older Windows versions.
+
+**OVMF (Open Virtual Machine Firmware)** emulates UEFI. Required for:
+- Windows 11 (Secure Boot + TPM 2.0 requirements)
+- Bootable NVMe drives
+- Systems that must boot from GPT disks larger than 2 TiB
+- GPU passthrough on some configurations
+
+Once a VM is created with a specific BIOS type, changing it requires careful disk conversion. Choose the correct BIOS at creation time.
+
+---
+
+## Disk Bus Types and VirtIO
+
+The **VirtIO** paravirtualized bus types are the highest-performing disk and network options in Proxmox KVM VMs. Paravirtualized drivers mean the guest OS knows it is inside a virtual machine and communicates directly with the hypervisor layer rather than emulating a physical device in software. This eliminates the emulation overhead and provides near-native I/O performance.
+
+### VirtIO SCSI (recommended for Linux)
+
+`virtio-scsi-pci` is the controller type; individual disks attach as SCSI devices. Supports:
+- Up to 14 SCSI devices per controller (and multiple controllers)
+- TRIM/Discard (SSD-style block reclamation)
+- I/O threads per disk
+- Optimal performance for Linux guests
+
+### VirtIO Block (older Linux)
+
+Direct block device without SCSI semantics. Supports fewer disks per controller and lacks TRIM. Use `virtio-scsi-pci` instead for new VMs.
+
+### IDE and SATA
+
+Standard emulated disk buses. Maximum compatibility — Windows and other OSes can use them without additional drivers. Slower than VirtIO due to emulation overhead. Use for Windows VMs before VirtIO drivers are installed.
+
+### Installing VirtIO Drivers in Windows
+
+Windows does not include VirtIO drivers natively. The procedure to migrate a Windows VM to VirtIO disks:
+
+1. Create the Windows VM with an IDE disk; install Windows normally
+2. Add a second small VirtIO disk to the VM; do not remove the IDE disk
+3. Boot Windows; download the VirtIO driver ISO from: `https://fedorapeople.org/groups/virt/virtio-win/`
+4. Mount the ISO in the VM; run the installer or install the VirtIO SCSI driver from Device Manager
+5. Power off the VM
+6. In Proxmox Hardware tab, select the IDE disk → **Move Disk** → change bus to VirtIO SCSI
+7. Boot and verify Windows boots from the VirtIO disk
+
+The **Discard** option (equivalent to TRIM) prevents disk images from consuming ever-increasing space as blocks are written and freed. It requires the `virtio-scsi-pci` controller and VirtIO SCSI guest driver. Enable it for all Linux VMs on thin-provisioned storage.
+
+---
+
+## Disk Cache Modes
+
+The cache mode controls how QEMU handles the host page cache between guest writes and disk:
+
+| Cache Mode | Description | Use Case |
+|---|---|---|
+| **No cache** | Writes bypass host page cache entirely; data goes directly to disk | Most VMs; safest; default recommendation |
+| **Writeback** | Host cache acknowledges writes before data reaches disk | Maximum performance; data loss risk on power failure |
+| **Writethrough** | Host cache used for reads; writes forced to disk before ACK | Balanced; safe; slightly slower than writeback |
+| **Directsync** | Like writethrough but reads also bypass cache | Maximum safety for database workloads |
+| **Writeback-unsafe** | Like writeback but also lies to the guest about write completion | Testing environments only; do not use in production |
+
+For most production VMs: **no cache**. It is safe across power failures and still benefits from the guest OS's own write buffer and kernel page cache.
+
+For maximum performance at the cost of write safety: **writeback**. Pair with a UPS or storage that has battery-backed write cache to mitigate power-failure risk.
+
+---
+
+## CPU Types
+
+The CPU type determines which instruction set features are exposed to the VM:
+
+| CPU Type | Description | Use Case |
+|---|---|---|
+| `kvm64` | Default; minimum features; maximum compatibility | Migrating between different host CPU generations |
+| `host` | Passes through host CPU flags; maximum performance | VMs that stay on the same node or identical hardware |
+| `Broadwell`, `Skylake-Client`, `Haswell`, etc. | Named Intel generations; balance of features and portability | Live migration between nodes with same or newer CPUs |
+
+**The `host` CPU type prevents live migration** between nodes with different CPU families. If a VM configured with `host` is migrated to a node with a different CPU generation, the guest may crash or exhibit undefined behavior because it was compiled for features that do not exist on the destination.
+
+For clusters where live migration is needed: use a named CPU type that matches the oldest CPU in the cluster. All nodes must support the features advertised by the chosen type.
+
+**Total vCPUs vs physical cores**: KVM allows overcommitting vCPUs — giving VMs more vCPUs than physical cores exist. Up to approximately 3:1 overcommit is typical for lightly loaded VMs. Overcommitting too heavily causes CPU scheduler contention and increases VM latency.
+
+---
+
+## Memory Ballooning
+
+Memory ballooning allows the Proxmox hypervisor to reclaim unused RAM from running VMs without stopping them. The **VirtIO balloon driver** inside the guest cooperates with the hypervisor by dynamically inflating or deflating a memory reservation:
+
+- When the host needs RAM, it inflates the balloon driver inside the VM, which claims RAM from the guest OS's free pool and returns it to the hypervisor
+- When the host has surplus RAM, it deflates the balloon, releasing memory back to the guest
+
+Ballooning requires the VirtIO balloon driver in the guest OS. It is included by default in modern Linux kernels. For Windows, it is part of the VirtIO driver package.
+
+Configuration in the Memory tab:
+- **RAM**: maximum allocation
+- **Minimum RAM**: floor — balloon will not compress below this
+- **Ballooning Device**: must be checked to enable
+
+The `shares` value in the VM config (0–50000, default 1000) controls relative memory priority when the host is under pressure. Higher shares = more RAM priority.
+
+---
+
+## QEMU Guest Agent
+
+The QEMU Guest Agent (qemu-guest-agent) is a small daemon that runs inside the VM and communicates with the hypervisor via a virtio-serial channel. It gives Proxmox the ability to:
+
+- **Gracefully shut down** or reboot the VM via the Proxmox API/GUI without relying on ACPI
+- **Freeze the guest filesystem** before taking a backup or snapshot, ensuring data consistency
+- **Report the VM's IP addresses** to the Proxmox GUI (visible in the VM Summary tab)
+- **Execute commands** inside the VM from the Proxmox API
+
+### Installing the Guest Agent
+
+**On Linux (Debian/Ubuntu):**
+```bash
+apt-get install qemu-guest-agent
+systemctl enable qemu-guest-agent
+systemctl start qemu-guest-agent
+```
+
+**On Linux (RHEL/CentOS/Fedora):**
+```bash
+dnf install qemu-guest-agent
+systemctl enable --now qemu-guest-agent
+```
+
+**On Windows:** Install the VirtIO driver package, which includes the guest agent service.
+
+### Enabling in Proxmox
+
+Once the agent is installed inside the VM, enable it in Proxmox: **VM → Options → QEMU Guest Agent → enable**
+
+The guest agent significantly improves backup quality. When Proxmox takes a snapshot or vzdump backup with the agent enabled, it signals the agent to quiesce filesystems (flush write buffers and pause writes) before the snapshot is taken. This produces a crash-consistent backup rather than a raw point-in-time capture.
+
+---
+
+## VM States and Console Access
+
+### Power States
+
+| State | Description |
+|---|---|
+| **Running** | VM is fully powered on and executing |
+| **Stopped** | VM is powered off; no RAM consumed |
+| **Suspended** | VM state saved to disk; can be resumed quickly |
+| **Paused** | VM execution frozen; RAM still allocated |
+
+**Start, Stop, Shutdown, Reset, Suspend** are all available from the VM toolbar in the GUI or via the `qm` command line tool.
+
+```bash
+# Start VM
+qm start 101
+
+# Graceful shutdown via guest agent
+qm shutdown 101
+
+# Force stop (immediate power-off)
+qm stop 101
+
+# Reset (equivalent to pressing reset button)
+qm reset 101
+
+# Suspend to disk
+qm suspend 101 --todisk 1
+```
+
+### Console Options
+
+| Console Type | Description |
+|---|---|
+| **noVNC** | HTML5 in-browser console; no client software required; default |
+| **SPICE** | Better performance and clipboard sharing; requires SPICE client |
+| **Serial terminal** | Text-only; useful for headless VMs with serial console configured |
+
+For headless server VMs, configure a serial console in the guest OS and add `serial0: socket` to the VM configuration. This gives a working terminal even if the display driver fails.
+
+---
+
+## VM Configuration File
+
+Every KVM VM configuration is stored in a plain-text file at `/etc/pve/nodes/<node>/qemu-server/<vmid>.conf`. This file is distributed across all cluster nodes by pmxcfs, making VM configurations always accessible even when a node is down.
+
+A typical VM config file:
+
+```
+# Small Linux VM example
+boot: order=scsi0;ide2;net0
+cores: 2
+cpu: host
+ide2: none,media=cdrom
+memory: 2048
+name: web-server-01
+net0: virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0,firewall=1
+onboot: 1
+ostype: l26
+scsi0: local-zfs:vm-101-disk-0,cache=none,discard=on,iothread=1,size=20G
+scsihw: virtio-scsi-pci
+smbios1: uuid=12345678-abcd-1234-efgh-123456789abc
+sockets: 1
+agent: enabled=1
+```
+
+Key options in the configuration file:
+
+| Option | Description |
+|---|---|
+| `onboot: 1` | Auto-start VM when node boots |
+| `startup: order=2,up=30` | Boot order and delay (for ordered startup sequences) |
+| `balloon: 1024` | Minimum RAM for ballooning |
+| `shares: 2000` | RAM priority for autoballooning |
+| `hotplug: cpu,memory` | Allow CPU and memory hotplug |
+| `migrate_downtime: 0.1` | Max acceptable downtime during live migration (seconds) |
+
+---
+
+## VM Templates and Cloning
+
+Any powered-off VM can be converted to a template: **Right-click VM → Convert to Template**. Templates cannot be started — they serve only as a source for cloning.
+
+Two clone types:
+- **Linked clone** — shares base disk with template using qcow2 delta images or ZFS clones; creates fast, space-efficient copies; requires the template to remain intact
+- **Full clone** — independent copy of all disks; takes longer to create but is completely independent; works on any storage type
+
+Templates combined with cloud-init make it possible to provision configured VMs from a base image in seconds.

@@ -1,0 +1,326 @@
+---
+title: "Proxmox VE — Networking"
+category: "proxmox"
+topic: "networking"
+summary: "Proxmox network configuration — Linux bridges, bonding (LACP), VLANs, Open vSwitch, and the /etc/network/interfaces file."
+tags: ["proxmox", "networking", "linux-bridge", "bonding", "vlan", "open-vswitch", "interfaces"]
+order: 4
+draft: false
+---
+
+## The Foundation: /etc/network/interfaces
+
+Everything in Proxmox networking — bridges, bonds, VLANs, Open vSwitch — is configured in a single file: `/etc/network/interfaces`. This is the standard Debian networking configuration file. Proxmox reads it on boot and whenever you apply changes from the GUI.
+
+When you make network changes through the Proxmox web GUI (under **Node → Network**), the GUI writes those changes back to `/etc/network/interfaces` and stages them. The changes are not live until you click **Apply Configuration**, which runs:
+
+```bash
+ifreload -a
+```
+
+This command reloads all interface configurations without requiring a full reboot. It is safe to run on a live system — active connections on unmodified interfaces are not interrupted.
+
+The file supports `pre-up`, `post-up`, `pre-down`, and `post-down` hooks: shell commands that run at each stage of the interface lifecycle. These are commonly used for NAT masquerading rules and custom iptables entries.
+
+## Linux Bridges
+
+The primary virtualisation networking construct in Proxmox is the **Linux bridge** (`vmbr`). A Linux bridge is a virtual switch implemented in the kernel. VMs attach their virtual NICs to a bridge, and the bridge connects them to the physical network through a bridge port (a physical NIC).
+
+### Default Bridge (vmbr0)
+
+The Proxmox installer creates `vmbr0` automatically and attaches the primary management NIC to it as a bridge port. After installation, `/etc/network/interfaces` looks something like:
+
+```
+auto lo
+iface lo inet loopback
+
+iface ens18 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+        address 192.168.10.50/24
+        gateway 192.168.10.1
+        bridge-ports ens18
+        bridge-stp off
+        bridge-fd 0
+```
+
+In this configuration:
+- `ens18` is the physical NIC — set to `manual` (no IP; it passes its frames to the bridge)
+- `vmbr0` holds the management IP address of the Proxmox node
+- VMs connected to `vmbr0` will receive network access through `ens18` to the physical switch
+
+### Bridge Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `bridge-ports` | Physical NIC(s) attached to this bridge; use `none` for an isolated internal-only bridge |
+| `bridge-stp` | Spanning Tree Protocol; `off` in most cases; only enable if you have multiple bridges with physical looping risk |
+| `bridge-fd` | Forwarding delay (seconds); set to `0` for immediate forwarding; increase to 3–4 only in complex multi-bridge topologies |
+
+The `bridge-stp off` and `bridge-fd 0` settings are the safe defaults for VM networking. Enabling STP introduces forwarding delays and has no authentication — do not enable it on bridges carrying untrusted traffic.
+
+### Isolated Bridge (No Physical Port)
+
+You can create a bridge with `bridge-ports none` for internal VM-to-VM communication that never reaches the physical network. This is useful for lab environments, internal service networks, or NAT setups:
+
+```
+auto vmbr1
+iface vmbr1 inet static
+        address 10.10.10.1/24
+        bridge-ports none
+        bridge-stp off
+        bridge-fd 0
+        post-up echo 1 > /proc/sys/net/ipv4/ip_forward
+        post-up iptables -t nat -A POSTROUTING -s '10.10.10.0/24' -o ens18 -j MASQUERADE
+        post-down iptables -t nat -D POSTROUTING -s '10.10.10.0/24' -o ens18 -j MASQUERADE
+```
+
+VMs connected to `vmbr1` use the Proxmox node as a NAT gateway. The `post-up` hooks enable IP forwarding and add the masquerade rule when the interface comes up; `post-down` cleans up when it goes down.
+
+## Network Bonding
+
+Bonding combines multiple physical NICs into one logical interface, providing fault tolerance (if one NIC or cable fails, traffic continues on the remaining NIC) and in some modes, additional aggregate throughput.
+
+Proxmox supports all seven Linux bonding modes:
+
+| Mode | Name | What It Does |
+|------|------|-------------|
+| 0 | balance-rr | Round-robin across all slaves; load balancing + fault tolerance; no special switch needed |
+| 1 | active-backup | Only one NIC active at a time; the other is standby; pure fault tolerance |
+| 2 | balance-xor | XOR of source/destination MAC; same slave per destination; fault tolerance + limited balancing |
+| 3 | broadcast | Transmit on all slaves simultaneously; fault tolerance only |
+| 4 | 802.3ad (LACP) | Industry-standard link aggregation; requires switch LACP support |
+| 5 | balance-tlb | Adaptive transmit load balancing; no switch support needed |
+| 6 | balance-alb | Adaptive load balancing including inbound; no switch support needed |
+
+### LACP (802.3ad) — Recommended for Production
+
+LACP (Link Aggregation Control Protocol) is the standard choice when the physical switch supports it. It negotiates link aggregation between the NIC bond and the switch port-channel, providing fault tolerance and increased aggregate capacity. Note: LACP does not increase single-connection throughput — a single TCP flow will still use only one of the bonded links. It increases **parallel connection capacity**.
+
+LACP requires configuring the corresponding switch ports as a port-channel or LAG (Link Aggregation Group) with LACP enabled.
+
+LACP configuration in `/etc/network/interfaces`:
+
+```
+auto ens21
+iface ens21 inet manual
+
+auto ens22
+iface ens22 inet manual
+
+auto bond0
+iface bond0 inet manual
+        slaves ens21 ens22
+        bond_miimon 100
+        bond_mode 802.3ad
+
+auto vmbr0
+iface vmbr0 inet static
+        address 192.168.10.50/24
+        gateway 192.168.10.1
+        bridge-ports bond0
+        bridge-stp off
+        bridge-fd 0
+```
+
+- `bond_miimon 100` — checks NIC link state every 100ms; detects cable pull within 100ms
+- Physical NICs are set to `manual` (no IP); they contribute their capacity to `bond0`
+- `vmbr0` uses `bond0` as its bridge port instead of a single NIC
+
+Activate the bond after editing (if not rebooting):
+```bash
+ifup bond0 && ifdown vmbr0 && ifup vmbr0
+```
+
+**LACP hash policies** determine which slave carries traffic for a given flow:
+- `layer2` — based on MAC address only; poor distribution (all traffic to one MAC goes to one slave)
+- `layer2+3` — MAC + IP address; much better distribution; recommended
+- `layer3+4` — MAC + IP + TCP/UDP ports; best distribution; technically not fully 802.3ad compliant
+
+Set the hash policy in the bond configuration or via `ifenslave`.
+
+### active-backup for Management Links
+
+For the management/cluster NIC where simplicity and reliability matter more than throughput, `active-backup` (mode 1) is often preferred. No special switch configuration is needed — the switch just sees one MAC address at a time.
+
+```
+auto bond1
+iface bond1 inet manual
+        slaves ens19 ens20
+        bond_miimon 100
+        bond_mode active-backup
+```
+
+## VLANs
+
+VLANs segment network traffic at Layer 2, allowing multiple isolated networks to share the same physical infrastructure.
+
+### Traditional Method — One Bridge Per VLAN
+
+The simplest approach: create a VLAN subinterface from the physical NIC (or bond), then attach it to a dedicated bridge:
+
+```
+auto vlan9
+iface vlan9 inet manual
+        vlan-raw-device eth0
+
+auto vmbr9
+iface vmbr9 inet manual
+        bridge-ports vlan9
+        bridge-stp off
+        bridge-fd 0
+```
+
+VMs connect to `vmbr9` and are automatically in VLAN 9. This approach is explicit and easy to understand, but scales poorly — you need a new bridge per VLAN.
+
+On a bonded interface:
+```
+auto vlan9
+iface vlan9 inet manual
+        vlan-raw-device bond0
+```
+
+### VLAN-Aware Bridge — Single Bridge for All VLANs
+
+The VLAN-aware bridge mode allows one bridge to handle multiple VLANs simultaneously. VMs specify their VLAN tag in their network configuration:
+
+```
+auto vmbr0
+iface vmbr0 inet manual
+        bridge-vlan-aware yes
+        bridge-ports eth0
+        bridge-vids 1-10
+        bridge-pvid 1
+        bridge-stp off
+        bridge-fd 0
+```
+
+- `bridge-vlan-aware yes` — enables VLAN filtering on the bridge
+- `bridge-vids 1-10` — the VLAN IDs this bridge will handle
+- `bridge-pvid 1` — native/untagged VLAN for the bridge's own port
+
+When assigning a network adapter to a VM, set the **VLAN Tag** field in the VM's hardware configuration. The VM's traffic is tagged with that VLAN ID as it enters the bridge and untagged as it exits toward the VM — the VM itself sees untagged traffic.
+
+VLAN-aware bridges are more efficient and simpler to manage at scale. However, a misconfiguration affects all VMs on that bridge simultaneously. Traditional per-VLAN bridges provide more isolation between configuration domains.
+
+## Open vSwitch (OVS)
+
+Open vSwitch is an enterprise-grade virtual switch with capabilities well beyond the Linux bridge: per-flow QoS, NetFlow/sFlow monitoring, GRE/VXLAN/STT/IPsec tunnelling, and full OpenFlow programmability. It is Apache 2.0 licensed and is the virtual switch of choice in OpenStack and other large-scale virtualisation environments.
+
+Install OVS on the Proxmox node:
+```bash
+apt-get install openvswitch-switch
+```
+
+After installation, OVS component types become available in the Proxmox GUI network configuration.
+
+**Critical rule:** Never mix OVS and Linux bridge components. You cannot create an OVS bridge on top of a Linux bond, and you cannot attach an OVS port to a Linux bridge. Choose one switching model per node and stick with it.
+
+### OVS Bridge Configuration
+
+A simple OVS bridge replacing a Linux bridge:
+
+```
+allow-vmbr0 ens18
+iface ens18 inet manual
+        ovs_type OVSPort
+        ovs_bridge vmbr0
+
+auto vmbr0
+allow-ovs vmbr0
+iface vmbr0 inet static
+        address 192.168.10.50/24
+        netmask 255.255.255.0
+        ovs_type OVSBridge
+        ovs_ports ens18
+```
+
+### OVS LACP Bond with VLAN Trunking
+
+A more complete production configuration — LACP bond with VLAN trunking for VMs in VLANs 2, 3, and 4:
+
+```
+allow-vmbr0 bond0
+iface bond0 inet manual
+        ovs_type OVSBond
+        ovs_bridge vmbr0
+        ovs_bonds ens21 ens22
+        pre-up (ifconfig ens21 mtu 8996 && ifconfig ens22 mtu 8996)
+        ovs_options bond_mode=balance-tcp lacp=active trunks=2,3,4
+        mtu 8996
+
+auto vmbr0
+iface vmbr0 inet manual
+        ovs_type OVSBridge
+        ovs_ports bond0
+        mtu 8996
+```
+
+The MTU is set to 8996 rather than 9000. Jumbo frames carry a maximum payload of 9000 bytes, but headers add overhead. Setting MTU to 8996 provides a safe margin and prevents frame fragmentation at boundaries where the full 9000 byte MTU might not be supported.
+
+### OVS Internal Port (Host VLAN Access)
+
+To give the Proxmox host node itself access to a specific VLAN through OVS, add an `OVSIntPort`:
+
+```
+auto vlan5
+allow-vmbr0 vlan5
+iface vlan5 inet static
+        address 192.168.50.50/24
+        ovs_type OVSIntPort
+        ovs_bridge vmbr0
+        ovs_options tag=5
+```
+
+### OVS CLI Commands
+
+```bash
+ovs-vsctl show                         # Show all OVS configuration
+ovs-vsctl list br                      # List bridges
+ovs-vsctl list port                    # List ports
+ovs-vsctl list interface               # List interfaces
+ovs-vsctl set port bond0 trunks=2,3,4,5,6,7   # Update VLAN trunk list (include ALL IDs)
+ovs-ofctl snoop <bridge>               # Snoop traffic on a bridge
+ovs-appctl version                     # OVS version
+ovs-appctl bridge/dump-flows <bridge>  # Dump OpenFlow flow table
+```
+
+When modifying VLAN trunk lists with `ovs-vsctl set port`, you must specify **all** VLAN IDs you want to allow. The command replaces the entire list, not appends to it.
+
+## MTU and Jumbo Frames
+
+Jumbo frames (MTU > 1500) reduce CPU overhead for large data transfers by fitting more payload per packet. They are most beneficial on storage networks (Ceph sync, NFS, iSCSI) where large sequential transfers are common.
+
+Jumbo frames require matching MTU on:
+- Both Proxmox bridge or OVS bridge
+- All physical NICs
+- All physical switch ports carrying the traffic
+- The storage server or NFS server at the other end
+
+A partial jumbo frame configuration causes packet fragmentation or drops. MTU 8996 is a common choice for OVS environments; MTU 9000 works for Linux bridges with standard Ethernet.
+
+Set MTU on a standard Linux bridge in `/etc/network/interfaces`:
+```
+auto vmbr1
+iface vmbr1 inet manual
+        bridge-ports ens19
+        bridge-stp off
+        bridge-fd 0
+        mtu 9000
+```
+
+## Network Redundancy Recommendations
+
+For a production cluster, follow a dedicated-link model:
+
+| Network | Purpose | Speed | Notes |
+|---------|---------|-------|-------|
+| Management/Cluster | Proxmox GUI, Corosync heartbeats | 1 GbE | Dedicated NIC or VLAN; low latency priority |
+| VM traffic | Guest OS network access | 1–10 GbE | LACP bond for redundancy |
+| Ceph Public | VM I/O requests to Ceph | 10 GbE | Must be isolated from Ceph sync traffic |
+| Ceph Sync | OSD-to-OSD replication | 10 GbE | Must be isolated from Ceph public traffic |
+
+This separation ensures that a Ceph rebalancing event (which generates substantial traffic) does not interfere with Corosync heartbeats and cause false node-failure detections.
+
+When only two NICs are available, the minimum viable split is: one NIC for management/cluster/VM traffic, one NIC for storage. With four NICs, you can properly separate all four traffic types.

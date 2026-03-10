@@ -1,0 +1,192 @@
+---
+title: "Linux File System Hierarchy — Directories, Files, and Links"
+category: "linux"
+topic: "linux-filesystem"
+summary: "How Linux organises files into a single unified directory tree rooted at / — the purpose of each major directory in the Filesystem Hierarchy Standard, how to navigate and manipulate files from the command line, the difference between hard links and symbolic links, and how glob patterns match multiple files at once."
+tags: ["linux", "filesystem", "fhs", "files", "links", "rh124"]
+order: 3
+draft: false
+---
+
+## Overview
+
+Linux presents all storage — local disks, network shares, removable media, virtual filesystems, and device nodes — as a single directory tree rooted at `/`. There is no concept of drive letters. Everything is a path. The Filesystem Hierarchy Standard (FHS) defines where different categories of files belong so that administrators and software can find things predictably across distributions. Knowing the purpose of each major directory, how to navigate the tree efficiently, and how links and glob patterns work is the baseline for all file system work in RHEL.
+
+---
+
+## Filesystem Hierarchy Standard
+
+| Directory | Purpose |
+|---|---|
+| `/` | Root of the entire directory tree — the starting point for all absolute paths |
+| `/home` | Home directories for regular users (`/home/student`, `/home/alice`) |
+| `/root` | Home directory for the root user — separate from `/home` |
+| `/etc` | System-wide configuration files — plain text, edited by administrators |
+| `/var` | Variable data that changes during normal operation: logs, mail spools, package databases, cache |
+| `/var/log` | Log files written by the kernel, systemd, and services |
+| `/tmp` | Temporary files; contents may be cleared on reboot or after 10 days by systemd-tmpfiles |
+| `/var/tmp` | Temporary files that must survive reboots; default cleanup is after 30 days |
+| `/run` | Runtime data for the current boot: PID files, Unix domain sockets; cleared at each boot |
+| `/usr` | The bulk of installed software — read-only during normal operation |
+| `/usr/bin` | User-accessible commands (`ls`, `grep`, `dnf`) |
+| `/usr/sbin` | System administration commands (`useradd`, `fdisk`) |
+| `/usr/lib` | Shared libraries for `/usr/bin` and `/usr/sbin` |
+| `/usr/share` | Architecture-independent data: man pages, locale files, icons |
+| `/bin` | Symbolic link to `/usr/bin` in RHEL 9 |
+| `/sbin` | Symbolic link to `/usr/sbin` in RHEL 9 |
+| `/boot` | Kernel image, initramfs, and GRUB bootloader configuration |
+| `/dev` | Device files — block devices (disks), character devices (terminals, null, random) |
+| `/proc` | Virtual filesystem exposing kernel and process information as files; not on disk |
+| `/sys` | Virtual filesystem exposing hardware, driver, and kernel subsystem information |
+| `/mnt` | Conventional mount point for temporarily mounted filesystems |
+| `/media` | Mount points for removable media (USB drives, optical discs) |
+| `/opt` | Optional third-party software installed as self-contained directory trees |
+| `/srv` | Data served by system services (web roots, FTP trees) |
+
+The RHEL 9 merger of `/bin` → `/usr/bin` and `/sbin` → `/usr/sbin` (implemented as symlinks) simplifies the hierarchy: all system executables now live under `/usr`, making it easier to snapshot and restore a read-only `/usr` partition independently of `/`.
+
+---
+
+## Absolute and Relative Paths
+
+Every file on a Linux system can be described by an **absolute path** or a **relative path**.
+
+An **absolute path** starts with `/` and fully describes the file's location from the root of the tree. It is unambiguous regardless of where you are in the filesystem:
+
+```
+/etc/ssh/sshd_config
+/home/student/documents/report.txt
+```
+
+A **relative path** describes the file's location relative to the current working directory. It does not start with `/`. Two special directory entries appear in every directory:
+
+- `.` refers to the current directory itself
+- `..` refers to the parent directory
+
+```
+../config          # one level up, then into config/
+documents/report   # subdirectory of the current directory
+./script.sh        # script in the current directory
+```
+
+Relative paths are shorter to type for nearby files; absolute paths are required in configuration files and scripts where the current directory is unpredictable.
+
+---
+
+## Navigating the Filesystem
+
+| Command | Effect |
+|---|---|
+| `pwd` | Print the absolute path of the current working directory |
+| `cd /etc/ssh` | Change to an absolute path |
+| `cd ../logs` | Change to a relative path (one up, then into logs) |
+| `cd ~` | Change to your home directory |
+| `cd -` | Change to the previous working directory (toggling between two locations) |
+| `ls -l` | Long listing: permissions, link count, owner, group, size, timestamp, name |
+| `ls -a` | Include hidden entries (names beginning with `.`) |
+| `ls -lh` | Long listing with human-readable sizes (KB, MB, GB) |
+| `ls -lt` | Long listing sorted by modification time, newest first |
+| `ls -lS` | Long listing sorted by size, largest first |
+| `ls -R` | Recursive listing of directory tree |
+
+---
+
+## File and Directory Operations
+
+| Command | Effect |
+|---|---|
+| `touch filename` | Create an empty file, or update an existing file's access and modification timestamps |
+| `mkdir dirname` | Create a directory |
+| `mkdir -p a/b/c` | Create a directory and all missing parent directories in one step |
+| `cp source dest` | Copy a file |
+| `cp -r src/ dst/` | Copy a directory recursively |
+| `cp -p file dest` | Copy and preserve permissions, ownership, and timestamps |
+| `mv source dest` | Move a file or directory (rename if source and dest are on the same filesystem) |
+| `rm file` | Delete a file |
+| `rm -r dir/` | Delete a directory and its contents recursively |
+| `rm -f file` | Force deletion without prompting, even if the file is write-protected |
+| `rmdir dirname` | Remove an empty directory — fails if the directory contains any files |
+
+The `rm -rf` combination (recursive and force) is the most dangerous command a new administrator will use. It deletes directories and all their contents without confirmation and cannot be undone. Always verify the path before pressing Enter, especially when running as root.
+
+---
+
+## Hard Links and Symbolic Links
+
+Linux filesystems use **inodes** to store file metadata (permissions, ownership, timestamps, pointers to data blocks). A directory entry is simply a name-to-inode mapping. This architecture allows multiple names to point to the same inode.
+
+### Hard Links
+
+A hard link is a second directory entry that points to an existing inode. Both names are equal peers — neither is the "original." The inode tracks how many directory entries reference it (the link count). The file's data is not deleted until the link count reaches zero.
+
+```
+ln existing_file hardlink_name
+```
+
+Constraints on hard links:
+- Cannot cross filesystem boundaries (both names must be on the same mounted filesystem)
+- Cannot link to a directory (prevents circular references)
+- Deleting one name does not affect the other; `ls -l` shows the link count > 1 while hard links exist
+
+### Symbolic Links
+
+A symbolic link (soft link) is a special file that contains a path to another file or directory. The kernel follows the path stored in the symlink to reach the target.
+
+```
+ln -s /etc/nginx/nginx.conf nginx.conf
+```
+
+`ls -l` shows symbolic links with `l` in the permissions field and an arrow indicating the target:
+
+```
+lrwxrwxrwx. 1 root root 20 Jan 10 09:00 nginx.conf -> /etc/nginx/nginx.conf
+```
+
+| Property | Hard Link | Symbolic Link |
+|---|---|---|
+| Cross filesystem | No | Yes |
+| Link to directory | No | Yes |
+| If target deleted | Data persists (until last hard link removed) | Dangling link — target not found |
+| Inode | Same as target | Own inode containing path |
+| Identified by `ls -l` | Link count > 1 | `l` permission prefix and `->` arrow |
+
+Symbolic links are more common in practice because they can span filesystems and link directories, making them essential for configuration management (linking versioned config files), `/usr/bin` wrappers, and shared libraries.
+
+---
+
+## Glob Patterns
+
+The shell expands glob patterns to matching filenames before passing them to commands. This expansion happens in the shell, not inside the command — `ls *.log` passes the list of matching filenames to `ls`, not the literal string `*.log`.
+
+| Pattern | Matches |
+|---|---|
+| `*` | Zero or more characters (any characters) |
+| `?` | Any single character |
+| `[abc]` | Any one character listed in the brackets |
+| `[a-z]` | Any one character in the specified range |
+| `[^abc]` | Any one character NOT in the brackets |
+
+**Brace expansion** looks similar but is distinct — it expands to a list of strings without checking whether files exist:
+
+| Expansion | Result |
+|---|---|
+| `{txt,pdf,log}` | Three literal strings: `txt`, `pdf`, `log` |
+| `{1..5}` | Five numbers: `1 2 3 4 5` |
+| `file{a,b,c}.conf` | `filea.conf fileb.conf filec.conf` |
+
+Practical examples:
+
+```
+ls /var/log/*.log         # All .log files in /var/log/
+rm cache_?.tmp            # Files like cache_1.tmp, cache_a.tmp
+cp /etc/[abc]* /backup/   # Files starting with a, b, or c
+touch report_{jan,feb,mar}.txt   # Create three files with brace expansion
+```
+
+If no files match a glob pattern, Bash passes the literal unexpanded pattern to the command by default — which usually causes an error. The `nullglob` shell option changes this behaviour to pass an empty list instead.
+
+---
+
+## Summary
+
+The Linux filesystem tree is rooted at `/`, with each major directory serving a defined purpose: `/etc` for configuration, `/var` for variable runtime data, `/usr` for installed software, and virtual filesystems like `/proc` and `/sys` for kernel introspection. Absolute paths start at `/`; relative paths start from the current directory using `.` and `..`. Hard links give a file multiple names within the same filesystem; symbolic links point to paths and can cross filesystem boundaries. Glob patterns are expanded by the shell before the command runs, allowing wildcard selection of files without the command needing to implement its own matching logic.

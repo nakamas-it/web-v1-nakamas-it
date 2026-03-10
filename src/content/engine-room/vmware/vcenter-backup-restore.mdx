@@ -1,0 +1,88 @@
+---
+title: "vCenter Backup, Restore, and VCSA HA"
+category: "vmware"
+topic: "vcenter-backup"
+summary: "How to protect a vCenter Server Appliance from failure — using the built-in file-based backup to export configuration and inventory data to an external server on a schedule, restoring from backup when needed, and deploying vCenter HA for active/passive redundancy without relying on external backup."
+tags: ["vmware", "vcenter", "backup", "vcsa", "disaster-recovery", "vcpdcv"]
+order: 17
+draft: false
+---
+
+## Overview
+
+vCenter Server is the management control plane for an entire vSphere environment. It holds the inventory database, permissions model, alarms, historical performance data, distributed switch configurations, and the policies that govern DRS, HA, and storage. If vCenter is lost and there is no recovery plan, rebuilding the environment from scratch can take days — and some configuration is genuinely difficult to recreate, particularly the SSO identity sources, certificate state, and distributed switch configurations tied to live host ports.
+
+Protecting vCenter requires thinking about two distinct failure scenarios. The first is a catastrophic failure — the host running vCenter crashes, the datastore becomes corrupted, ransomware encrypts the environment. For this scenario, a regular file-based backup to an external location is the answer. The second scenario is a host or hardware failure that makes vCenter temporarily unreachable but leaves the underlying data intact. For this scenario, vCenter High Availability (VCSA HA) provides near-instant automatic failover without any data recovery step.
+
+Both mechanisms are complementary and are recommended for production environments.
+
+## VCSA File-Based Backup
+
+The vCenter Server Appliance includes a built-in backup capability accessed through the **VAMI** — the vCenter Appliance Management Interface, reachable at `https://<vcenter-fqdn>:5480`. No third-party agent or additional software is required.
+
+The backup captures three categories of data:
+
+- **Configuration**: The vCenter appliance's core settings — networking, SSO configuration, certificate store, and the vCenter database schema.
+- **Inventory**: All vSphere inventory objects — datacenters, clusters, hosts, VMs, folders, permissions, resource pools, tags, and distributed switch configurations.
+- **Historical data** (optional): Performance statistics, events, alarms, and task history. This data can be large and extends the backup duration significantly. Enabling it is recommended for compliance-heavy environments; in others, the configuration and inventory data alone is often sufficient to restore full management capability.
+
+### Supported Protocols
+
+The backup destination must be an external server — backing up to the same host or datastore as vCenter defeats the purpose. Supported transfer protocols are: **HTTPS, FTPS, SCP, NFS, and SMB**. Plain FTP is not supported due to its lack of transport encryption. TFTP is not supported. This list is commonly tested: if a question offers FTP as an option, it is wrong.
+
+### Scheduling and Retention
+
+Backups can be triggered manually from the VAMI or configured on a schedule — daily, weekly, or monthly. A retention count controls how many backup sets are kept before the oldest is deleted automatically. For most environments, a daily schedule with a retention of seven to fourteen copies provides a reasonable balance between protection and storage consumption.
+
+An optional password can be set to encrypt the backup archive. If encryption is configured, the password is required at restore time — losing the password means losing access to the backup. Store it in a password manager alongside the backup destination credentials.
+
+After the first full backup, subsequent backups for historical data are incremental. The configuration and inventory components are always backed up in full.
+
+## Restore Process
+
+Restoring vCenter from backup is performed using the VCSA installer ISO — the same ISO used for initial deployment. When launched, the installer presents a **Restore** option alongside the standard deploy and upgrade options.
+
+The restore process deploys a fresh VCSA appliance and then pulls data from the backup location. It requires:
+
+- The VCSA installer ISO (matching the version of the backup)
+- Network access to the backup destination server
+- The backup encryption password, if one was set
+- The same IP address and FQDN as the original vCenter — the restored appliance must be reachable at the same network identity so that ESXi hosts and other integrated systems can reconnect without reconfiguration
+
+The restoration typically takes one to two hours depending on the size of the inventory and whether historical data is being restored. After completion, the ESXi hosts that were managed by the original vCenter automatically reconnect — they were never un-managed; only the management server was temporarily absent.
+
+## vCenter HA
+
+vCenter HA is a three-node active/passive cluster built into the VCSA. It protects vCenter from the failure of the underlying host — if the ESXi host running the Active vCenter node goes down, the Passive node takes over automatically. This is fundamentally different from a backup: there is no restore step and no waiting for data to be copied from an external server. Failover typically completes in approximately five minutes.
+
+The three nodes serve distinct roles:
+
+- **Active node**: The production vCenter, handling all management traffic and serving the vSphere Client.
+- **Passive node**: A warm standby that continuously receives database replication from the Active node. It is not active during normal operations — it holds a near-real-time copy of the vCenter database and is ready to take over immediately.
+- **Witness node**: A lightweight arbitration node that monitors the health of both Active and Passive nodes. Its sole purpose is to prevent split-brain — the situation where both Active and Passive believe themselves to be the primary and begin accepting writes independently. The Witness breaks the tie by casting a deciding vote.
+
+A dedicated vCenter HA network connects the three nodes. This network carries heartbeat traffic and database replication and should be a private, non-routed network separate from the management and workload networks. The Active node retains its public IP address — the one used by ESXi hosts and administrators to reach vCenter — and that address moves to the Passive node upon failover.
+
+### Failover Behaviour
+
+When the Active node fails, the Witness detects the loss of heartbeat and signals the Passive node to promote itself. The Passive node assumes the Active role and inherits the public IP address. From the perspective of ESXi hosts and the vSphere Client, vCenter briefly becomes unreachable and then returns at the same address — the hosts reconnect automatically.
+
+After failover, the environment is running with only two nodes: a new Active and the Witness. The failed node (now missing) must be re-established to restore full three-node protection. This is done from the vCenter HA management interface, which guides the administrator through deploying a new Passive node.
+
+## VCSA HA Versus Backup — Which to Use
+
+These two mechanisms protect against different failure classes and both are appropriate in production environments:
+
+| Scenario | Recommended Tool |
+|---|---|
+| ESXi host running vCenter fails | vCenter HA — automatic failover, no data loss |
+| Datastore corrupted or storage failure | File-based backup — restore from external copy |
+| Ransomware encrypts vCenter data | File-based backup — restore from pre-infection snapshot |
+| Accidental deletion of inventory objects | File-based backup — restore to earlier state |
+| Datacenter-level disaster | File-based backup to off-site destination |
+
+A common misconception is that VM snapshots of the VCSA appliance serve as an adequate backup. VMware explicitly does not support this. VCSA maintains open database files and in-memory state that snapshot technology does not capture cleanly. Taking a snapshot of a running VCSA can leave the appliance in an inconsistent state when reverted, and the data may not be complete or correct. The supported method is always the VAMI file-based backup.
+
+## Summary
+
+Protecting vCenter requires planning for two failure categories. File-based backup via the VAMI provides resilience against data corruption, ransomware, accidental deletion, and full-site disasters — it is the only supported way to restore vCenter from a clean state. vCenter HA provides near-instant failover for host or hardware failures by maintaining a continuously replicated warm standby that assumes the Active role automatically. Neither mechanism substitutes for the other, and a production environment should implement both: scheduled, encrypted, off-site backups combined with a three-node VCSA HA cluster for the management plane.

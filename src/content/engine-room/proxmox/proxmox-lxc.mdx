@@ -1,0 +1,337 @@
+---
+title: "Proxmox VE — LXC Containers"
+category: "proxmox"
+topic: "lxc"
+summary: "Linux containers in Proxmox — container templates, creation, unprivileged vs privileged, resource limits, bind mounts, and containers vs KVM VMs."
+tags: ["proxmox", "lxc", "containers", "linux-containers", "unprivileged", "templates"]
+order: 10
+draft: false
+---
+
+## Overview
+
+LXC (Linux Containers) is an OS-level virtualization technology that runs isolated Linux environments on a shared kernel. Unlike KVM VMs, which each emulate complete physical hardware including their own kernel, LXC containers share the host's Linux kernel directly. A container running on a Proxmox node is not running its own kernel — it is running its own userland (processes, filesystem, network stack, users) isolated from other containers and the host by Linux kernel namespaces and cgroups.
+
+This shared-kernel architecture is both LXC's greatest strength and its primary constraint. The strength is density and performance: a Proxmox node can run dozens or hundreds of containers where it might run only 20–30 KVM VMs with equivalent workloads. Container processes are native Linux processes on the host — no emulation overhead, no hypervisor tax on I/O or CPU. The constraint is that containers can only run Linux. You cannot run Windows or BSD inside an LXC container. You also cannot run kernel modules inside a container unless those modules are loaded by the host kernel.
+
+Proxmox replaced OpenVZ with LXC starting with Proxmox VE 4.0. Unlike OpenVZ, which required a custom patched kernel, LXC works with the standard Debian kernel that ships with Proxmox. This means Proxmox nodes receive standard upstream kernel updates without waiting for a vendor patch.
+
+---
+
+## LXC vs. KVM — When to Use Each
+
+| Feature | KVM | LXC |
+|---|---|---|
+| Guest OS | Any (Linux, Windows, BSD, macOS) | Linux only |
+| Kernel | Independent per VM | Shared host kernel |
+| Performance overhead | Hypervisor layer; emulated devices | Near-native; no emulation |
+| Isolation | Full hardware isolation | Kernel namespace isolation |
+| Density | Lower | Much higher |
+| Live migration | Yes (with shared storage) | No (must stop container first) |
+| Snapshots | Yes (qcow2, ZFS, RBD) | Yes (on compatible storage) |
+| Windows support | Yes | No |
+| Docker inside | Works natively | Requires features: nesting=1 |
+
+**Use KVM for:**
+- Any Windows workload
+- Legacy applications requiring specific kernel versions
+- Workloads needing the strongest isolation boundary
+- VMs that need live migration during maintenance
+
+**Use LXC for:**
+- Linux services where density matters (web servers, DNS, monitoring agents, databases)
+- Development environments
+- Services that benefit from fast start times and low overhead
+
+---
+
+## Container Templates
+
+LXC containers are created from **templates** — pre-built container root filesystems packaged as compressed archives (`.tar.gz`, `.tar.xz`, `.tar.zst`). Templates contain a minimal Linux distribution installation without a kernel (since the host kernel is used). Proxmox maintains an official template repository with images for:
+
+- Debian (stable, testing)
+- Ubuntu (LTS and current releases)
+- Alpine Linux
+- CentOS / Rocky Linux / AlmaLinux
+- Fedora
+- openSUSE
+- Arch Linux
+- TurnKey Linux (pre-configured application templates)
+
+### Downloading Templates
+
+**Via GUI:** Navigate to a storage with `vztmpl` content type → **Content → Templates → Download from Internet**. Select the template from the list and click Download.
+
+**Via CLI:**
+
+```bash
+# Update the template list
+pveam update
+
+# List available templates
+pveam available
+
+# Download a specific template
+pveam download local debian-12-standard_12.2-1_amd64.tar.zst
+
+# List downloaded templates
+pveam list local
+```
+
+Templates are stored in the `template/cache/` subdirectory of the storage they are downloaded to — for local directory storage, that is `/var/lib/vz/template/cache/`.
+
+---
+
+## Creating a Container
+
+### Via the GUI
+
+Click **Create CT** in the Proxmox GUI. The wizard has the following tabs:
+
+| Tab | Key Settings |
+|---|---|
+| **General** | Node, CT ID, Hostname, Root password, SSH public key, Resource Pool |
+| **Template** | Select a downloaded template from available storage |
+| **Root Disk** | Storage backend, disk size |
+| **CPU** | vCPU core limit |
+| **Memory** | RAM limit (MB), Swap limit (MB) |
+| **Network** | Interface name (eth0), bridge, IPv4/IPv6 config (DHCP or static), VLAN |
+| **DNS** | DNS domain and nameserver addresses |
+| **Confirm** | Summary; option to start after creation |
+
+### Via CLI
+
+```bash
+# Create a container using a local template
+pct create 200 local:vztmpl/debian-12-standard_12.2-1_amd64.tar.zst \
+  --hostname my-container \
+  --memory 512 \
+  --swap 512 \
+  --storage local-lvm \
+  --rootfs 8 \
+  --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+  --password mysecretpassword \
+  --unprivileged 1
+
+# Start the container
+pct start 200
+
+# Enter the container
+pct enter 200
+```
+
+---
+
+## Unprivileged vs. Privileged Containers
+
+This is the most important security decision when creating an LXC container.
+
+### Privileged Containers
+
+In a privileged container, the UID and GID space inside the container maps directly to the host's UID/GID space. **Root inside the container (UID 0) is root on the host (UID 0).** If a process inside the container escapes its namespace, it has root access on the host.
+
+Privileged containers are simpler to configure — no UID/GID remapping issues with bind mounts or nested operations. They are appropriate for development environments and cases where the container needs capabilities that the UID mapping prevents.
+
+### Unprivileged Containers (Recommended)
+
+Unprivileged containers use **UID and GID remapping**. The kernel `user_namespaces` feature maps a range of UIDs inside the container to a different (non-root) range on the host. Root inside the container (UID 0) maps to an unprivileged host UID (e.g., UID 100000).
+
+If a process escapes the container namespace, it runs as an unprivileged user on the host rather than as root. This dramatically limits the damage of a container escape.
+
+Proxmox creates unprivileged containers by default (the `--unprivileged 1` flag). The UID mapping is stored in `/etc/subuid` and `/etc/subgid` on the host.
+
+```bash
+# Check UID mapping configuration
+cat /etc/subuid
+# root:100000:65536    ← root on host maps container UIDs 0-65535 to host UIDs 100000-165535
+```
+
+**Limitation of unprivileged containers**: Some operations require specific UID/GID values. Bind mounting a host directory with root-owned files into an unprivileged container can cause permission errors because the container's UID 0 maps to host UID 100000, which does not own those files. This is solvable with explicit chown or ACLs, but requires awareness.
+
+---
+
+## Resource Limits
+
+LXC uses Linux **cgroups** (control groups) to enforce resource limits. Proxmox exposes these through the container configuration:
+
+### CPU Limits
+
+```bash
+# Set CPU core limit
+pct set 200 --cpus 2
+
+# Set CPU weight (relative priority in the CFS scheduler)
+pct set 200 --cpuunits 1024
+```
+
+`cpus` sets a maximum number of CPU cores the container can use. `cpuunits` sets its relative scheduling weight — a container with 2048 cpuunits gets twice as much CPU time as one with 1024 when the host is under load.
+
+### Memory Limits
+
+```bash
+# Set memory and swap limits
+pct set 200 --memory 1024 --swap 512
+```
+
+Memory limits are hard limits enforced by cgroups. If a container exceeds its memory limit, the kernel's OOM killer terminates processes inside the container.
+
+### Disk Quota
+
+For directory-backed container storage, disk quotas can be set on the root disk:
+
+```bash
+# Set disk size limit (resize rootfs)
+pct resize 200 rootfs 20G
+```
+
+On ZFS and LVM-Thin, the size of the dataset or logical volume enforces the quota automatically.
+
+---
+
+## Container Networking
+
+LXC containers in Proxmox connect to the same Linux bridges (vmbr0, vmbr1, etc.) as KVM VMs. Each container can have multiple network interfaces. The virtual interface on the host side is named `veth<ctid>i<n>` (e.g., `veth200i0` for the first interface of container 200).
+
+```bash
+# Add a network interface to a running container
+pct set 200 --net1 name=eth1,bridge=vmbr1,ip=192.168.10.50/24,gw=192.168.10.1
+
+# Show container network config
+pct config 200 | grep net
+```
+
+Containers can be placed on the same VLANs as VMs by specifying the `tag` parameter on the network interface:
+
+```bash
+pct set 200 --net0 name=eth0,bridge=vmbr0,tag=20,ip=dhcp
+```
+
+---
+
+## Bind Mounts
+
+Bind mounts allow sharing a directory from the Proxmox host (or from shared NFS storage) directly into a container. This is useful for sharing data between containers, mounting NFS shares into containers, or giving a container access to a host directory.
+
+```bash
+# Add a bind mount: host path /mnt/data → container path /data
+pct set 200 --mp0 /mnt/data,mp=/data
+
+# Mount point can be specified in the config file as:
+# mp0: /mnt/data,mp=/data
+```
+
+**Bind mounts and unprivileged containers:** If the host directory is owned by root (UID 0), an unprivileged container's root (UID 100000) will not have write access. Solutions:
+1. Use a privileged container (security tradeoff)
+2. Change the host directory ownership to the mapped UID: `chown 100000:100000 /mnt/data`
+3. Use POSIX ACLs on the host directory
+
+---
+
+## Container Features
+
+Some container workloads require special capabilities that are disabled by default for security reasons. These are enabled through the **Features** option in the container:
+
+```bash
+# Enable Docker-in-LXC (nesting)
+pct set 200 --features nesting=1
+
+# Enable keyctl (required for some applications)
+pct set 200 --features keyctl=1
+
+# Enable FUSE (required for some filesystem tools)
+pct set 200 --features fuse=1
+```
+
+### Docker-in-LXC (Nesting)
+
+Running Docker inside an LXC container requires `nesting=1`. This enables the nested virtualization capability that allows the container to create its own namespaces for Docker containers.
+
+When `nesting=1` is enabled, the container must be **privileged** or the Proxmox host must have `allow-nesting` configured. The security implications are significant — nesting reduces the isolation boundary. Use it for development and trusted workloads, not for multi-tenant environments.
+
+---
+
+## `pct` — Container CLI Reference
+
+The `pct` command is the primary CLI tool for managing LXC containers in Proxmox:
+
+```bash
+# Container lifecycle
+pct start <ctid>              # Start container
+pct stop <ctid>               # Force stop container
+pct shutdown <ctid>           # Graceful shutdown
+pct reboot <ctid>             # Reboot container
+
+# Console access
+pct enter <ctid>              # Open a shell in the container
+pct console <ctid>            # Connect to container console
+
+# Execute a command inside the container without entering it
+pct exec <ctid> -- ls /etc
+
+# Configuration
+pct config <ctid>             # Show current configuration
+pct set <ctid> -memory 2048   # Set a configuration option
+pct list                      # List all containers with status
+
+# Disk operations
+pct resize <ctid> rootfs 20G  # Resize the root filesystem
+
+# Cloning
+pct clone <ctid> <newid>      # Clone a container
+
+# Snapshots
+pct snapshot <ctid> <snapname>          # Take a snapshot
+pct rollback <ctid> <snapname>          # Roll back to snapshot
+pct listsnapshot <ctid>                 # List snapshots
+pct delsnapshot <ctid> <snapname>       # Delete a snapshot
+
+# Backup and restore
+pct restore <ctid> /path/to/backup.tar.gz --storage local-lvm
+```
+
+---
+
+## Container Snapshots
+
+Snapshots for LXC containers work similarly to KVM VM snapshots, but depend on the underlying storage:
+
+- **ZFS**: Full snapshot support; instant, space-efficient
+- **LVM-Thin**: Snapshot support; LVM thin snapshot mechanisms
+- **Directory (qcow2)**: Snapshot support for the root disk
+- **Standard LVM**: No snapshot support
+
+Snapshots do not include RAM state (containers do not have a persistent RAM state concept in the same way VMs do). A container snapshot captures the filesystem state at a point in time.
+
+---
+
+## Container vs. OS Template vs. Cloud Image
+
+| Approach | Description | Use Case |
+|---|---|---|
+| LXC Template | Pre-built minimal rootfs; fast creation | Linux services, development |
+| TurnKey Template | Pre-configured application image (WordPress, GitLab, etc.) | Rapid application deployment |
+| KVM + cloud-init | Cloud image with auto-configuration on first boot | Infrastructure-as-code, Ansible managed VMs |
+
+TurnKey Linux templates are a special category available in the Proxmox template library. They are LXC (and KVM) images that come with a specific application already installed and configured — for example, a Nextcloud container, a WordPress container, or a pfSense VM image. These are suitable for quickly deploying self-contained services without manual installation.
+
+---
+
+## Live Migration and LXC
+
+**LXC containers cannot be live-migrated.** The container must be stopped before it can be moved to another node. This is a fundamental architectural limitation of the shared-kernel model — unlike KVM VMs, where the VM's complete state (CPU registers, RAM, device state) can be serialized and transferred while running, LXC containers have no isolated CPU/RAM state to transfer.
+
+For services where downtime is unacceptable, consider running them in KVM VMs instead, or design the service for short planned maintenance windows.
+
+High Availability (HA) for LXC containers works similarly to VMs: when a node fails, Proxmox HA moves the container config file to another node and starts the container there. The container experiences a restart cycle (not live migration), and recovery time depends on how quickly Proxmox detects the failure (typically 60 seconds) plus container start time.
+
+---
+
+## Key Operational Notes
+
+**Container ID selection**: Like VMs, container IDs must be unique across the cluster. The `pct list` command shows all running and stopped containers on the local node; check all nodes for cluster-wide uniqueness.
+
+**SSH keys at creation time**: Providing an SSH public key at creation sets it as an authorized key for root inside the container. This is the cleanest way to enable SSH access without needing to configure passwords manually.
+
+**Default DNS inheritance**: When DNS settings are left empty in the creation wizard, the container inherits the Proxmox node's DNS configuration. In cluster environments, set explicit DNS servers per container for clarity.
+
+**Resource overcommit**: LXC containers allow more aggressive RAM overcommit than KVM VMs because container RAM is managed by the host kernel's memory allocator rather than pre-allocated for a hypervisor. However, if total container memory demand exceeds host RAM, the OOM killer will terminate container processes — monitor actual memory usage and set conservative limits for production services.

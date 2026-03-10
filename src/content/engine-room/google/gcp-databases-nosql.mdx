@@ -1,0 +1,207 @@
+---
+title: "GCP — NoSQL and Big Data Databases"
+category: "google"
+topic: "nosql"
+summary: "Firestore, Bigtable, Memorystore, and BigQuery — GCP's NoSQL and analytical database services and their appropriate use cases."
+tags: ["gcp", "google-cloud", "firestore", "bigtable", "memorystore", "bigquery", "nosql"]
+order: 8
+draft: false
+---
+
+## Overview
+
+GCP offers multiple NoSQL and analytical database services, each optimised for a distinct data model and access pattern. The challenge is not learning any single service in isolation — it is understanding which service fits which problem, and why the others would be wrong choices. Picking the wrong data store is one of the costliest architectural mistakes to correct after the fact.
+
+The four primary options discussed here are:
+- **Firestore** — document NoSQL, mobile/web-first
+- **Cloud Bigtable** — wide-column NoSQL, petabyte-scale, low-latency operational workloads
+- **Memorystore** — managed in-memory caching (Redis and Memcached)
+- **BigQuery** — serverless columnar data warehouse for analytics
+
+---
+
+## Cloud Firestore
+
+### What It Is
+
+Firestore is GCP's document-model NoSQL database. Data is organized into **collections** of **documents**, where each document is a JSON-like map of fields and values. Documents can contain nested maps and arrays, and collections can contain sub-collections of documents — enabling a hierarchical data model.
+
+Firestore is the successor to **Cloud Datastore**, and the two share conceptual DNA but diverged significantly in capability.
+
+### Native Mode vs Datastore Mode
+
+When you create a Firestore database, you choose a mode at creation time. This choice is **permanent** — you cannot switch modes after creation, and the two modes cannot coexist in the same GCP project.
+
+| Feature | Native Mode | Datastore Mode |
+|---------|-------------|----------------|
+| **Data model** | Collections and documents | Entities and kinds |
+| **Real-time listeners** | Yes — push updates to clients on data change | No |
+| **Offline support** | Yes — SDKs cache data for offline use | No |
+| **ACID transactions** | Multi-document, multi-collection | Limited |
+| **Target use case** | Mobile apps, web apps, client-side SDKs | Server-side applications; legacy Datastore migration |
+| **Pricing** | Per-document read/write/delete | Per-entity read/write/delete |
+
+**Choose Native mode** for all new projects. Datastore mode exists primarily for organisations migrating existing Datastore workloads without rewriting application logic.
+
+### Real-Time Listeners
+
+Native mode Firestore supports **real-time listeners** — a client can subscribe to a document or query, and the SDK delivers updates to the client within milliseconds whenever the underlying data changes. This is fundamentally different from a polling model. Chat applications, collaborative editors, live dashboards, and gaming leaderboards are natural fits.
+
+Real-time listeners work via a persistent WebSocket-like connection from the client SDK to Firestore. The server pushes diffs (only changed fields) when documents are updated, keeping bandwidth usage low.
+
+### Offline Support
+
+The Firestore mobile SDKs (iOS, Android) and the web SDK maintain a local cache of recently accessed data. When the device is offline, reads are served from this cache. Writes are queued and replayed when connectivity is restored. Conflict resolution is handled by the SDK automatically.
+
+### Security Rules
+
+Firestore Native mode supports **Firebase Security Rules** — a declarative rules language evaluated server-side for all client SDK requests. Rules allow data-level access control without deploying backend code:
+
+```javascript
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
+```
+
+Rules are not applied to Admin SDK or Cloud Functions accessing Firestore server-side — only to client SDK requests. This makes Firestore viable for mobile apps that read and write directly, without a backend API layer.
+
+### Pricing
+
+Firestore pricing is per-operation: you pay per document read, per document write, and per document delete. Storage is priced per GB. There is no concept of instance size or reserved capacity — you pay for exactly what you use.
+
+---
+
+## Cloud Bigtable
+
+### What It Is
+
+Cloud Bigtable is a **wide-column NoSQL** database designed for massive-scale, low-latency workloads. It is the same technology that powers Google Search indexing, Google Maps, and Gmail. The managed service makes that technology available with a compatible HBase API, meaning applications written for Apache HBase can migrate to Bigtable with minimal changes.
+
+Scale: Bigtable can handle **petabytes of data** across millions of rows, with **sub-10ms read/write latency** even at that scale. This is a fundamentally different operating point than any relational database.
+
+### Data Model
+
+Bigtable organises data as a massive sorted map:
+
+- **Table**: A collection of rows
+- **Row**: Identified by a single **row key** (a byte string, up to 4 KB)
+- **Column family**: A group of related columns; defined at table creation time; each family has its own compaction settings
+- **Column qualifier**: The column name within a family; defined at write time (not at table creation)
+- **Cell**: The intersection of row + column family + column qualifier; each cell stores the value plus a **timestamp**; multiple timestamped versions of a cell can be stored
+
+The full address of a value is: `table → row key → column family → column qualifier → timestamp → value`.
+
+Unlike a relational database, Bigtable tables are very wide and very sparse — most cells in a row are empty. You do not define a fixed schema of columns; columns are created implicitly when you write to them.
+
+### Row Key Design is Everything
+
+Bigtable is sorted by row key. All lookups are either:
+1. An exact row key lookup (single row read)
+2. A row key prefix scan (range read across sorted row keys)
+
+There are no secondary indexes. If your application needs to look up data by any attribute other than the row key, you either design the row key to encode that attribute, or you maintain a separate lookup table.
+
+**Critical pitfall**: monotonically increasing row keys (like sequential integers or ISO timestamps in ascending order) cause **hotspotting** — all recent writes go to the same tablet (partition), overwhelming one node while others sit idle. Solutions:
+
+- **Reversed timestamps**: `Long.MAX_VALUE - timestamp` — most recent data sorts first; scans naturally hit recent data without hot spots
+- **Hashed prefix**: MD5 or SHA prefix of the natural key distributes writes randomly across tablets
+- **Composite keys**: Combine multiple attributes (`sensor_id#reversed_timestamp`) to distribute by entity while keeping time-ordered scans per entity
+
+Good row key design is the single most important decision when building a Bigtable schema.
+
+### Performance and Scaling
+
+Bigtable performance scales linearly with the number of **nodes** (instances). Adding a node increases throughput proportionally. A single node provides approximately 10,000 reads/second or 10,000 writes/second at sub-10ms latency (SSD storage).
+
+Storage types:
+- **SSD** (default): Low latency (~6ms p99), higher cost
+- **HDD**: Higher latency (~200ms p99), significantly lower cost; appropriate for batch read workloads where latency is not critical
+
+Bigtable also supports **replication** across up to 8 clusters in different regions. Replication is asynchronous with eventual consistency (no external consistency like Spanner). Multiple clusters enable geographic distribution of read traffic and provide availability during regional failures.
+
+### Use Cases
+
+Bigtable is the right choice when:
+- You need **petabyte-scale** storage with single-digit millisecond latency
+- Your access pattern is primarily **single row key lookups or key range scans**
+- Your data is naturally structured as **time-series** (IoT telemetry, stock prices, network flow data) or **event logs** (clickstream, application events)
+- You need the **HBase API** for application compatibility
+
+It is the wrong choice when:
+- You need secondary indexes or ad-hoc query flexibility
+- Your data is relational with complex joins
+- Your dataset is under 1 TB (Cloud SQL or Firestore is more cost-effective)
+
+---
+
+## Cloud Memorystore
+
+Memorystore is GCP's managed in-memory caching service. It eliminates the operational burden of running self-managed Redis or Memcached clusters — patching, failover, scaling, and backups are handled by Google.
+
+### Memorystore for Redis
+
+Redis is a data structure server — it stores data in memory and supports a rich set of data types: strings, hashes, lists, sets, sorted sets, streams, and more. Common use cases: session caching, rate limiting, leaderboards, pub/sub message queuing, and distributed locks.
+
+| Feature | Detail |
+|---------|--------|
+| **Max instance size** | 300 GB |
+| **Max throughput** | Up to 12 Gbps |
+| **HA** | Primary + replica with automatic failover |
+| **Persistence** | RDB snapshots to Cloud Storage (optional) |
+| **Read replicas** | Supported for Redis 7.0+ (distribute read load) |
+| **Protocol** | Standard Redis protocol — existing Redis clients work unchanged |
+
+HA Memorystore instances have a primary node and at least one replica. Failover is automatic and typically completes in under 1 minute. The connection endpoint does not change.
+
+### Memorystore for Memcached
+
+Memcached is a simpler distributed memory object cache — it supports only string values and has no persistence, no replication, and no pub/sub. Its strength is horizontal scalability: add nodes to increase the total cache capacity without any downtime.
+
+| Feature | Detail |
+|---------|--------|
+| **Max cluster size** | 5 TB across 1–20 nodes |
+| **Persistence** | None — data is lost on node restart |
+| **Protocol** | Standard Memcached protocol |
+| **HA** | None — nodes are independent; node loss means cache miss, not service outage |
+
+Memcached is appropriate for simple, stateless caching scenarios where cache misses are acceptable (the application falls back to the database). If you need persistence, pub/sub, sorted data structures, or HA, choose Redis.
+
+---
+
+## The Full Comparison: When to Use What
+
+This comparison covers the full spectrum of GCP data stores, including the SQL options from the previous article, to give a complete picture.
+
+| Service | Data Model | Scale | Latency | Strong Consistency | Best Use Case |
+|---------|------------|-------|---------|-------------------|---------------|
+| **Cloud SQL** | Relational (MySQL/PG/SQL Server) | Vertical, up to ~96 vCPU | Milliseconds | Yes (within instance) | Standard OLTP, web apps, regional services |
+| **Cloud Spanner** | Relational (NewSQL) | Horizontal (global) | Milliseconds | Yes (global) | Global OLTP, financial systems, global inventory |
+| **Firestore** | Document (JSON) | Serverless, auto-scale | Milliseconds | Yes (per-document) | Mobile apps, web apps, real-time sync |
+| **Cloud Bigtable** | Wide-column | Petabyte-scale | Sub-10ms | Eventual (across clusters) | Time-series, IoT, clickstream, HBase migration |
+| **Memorystore (Redis)** | In-memory key-value | Up to 300 GB | Sub-millisecond | Yes (single instance) | Session cache, rate limiting, leaderboards |
+| **Memorystore (Memcached)** | In-memory key-value | Up to 5 TB | Sub-millisecond | No | Simple distributed caching |
+| **BigQuery** | Columnar (analytics) | Serverless, petabyte-scale | Seconds | Yes (for reads) | Analytics, reporting, data warehouse |
+
+---
+
+## Firebase Realtime Database vs Firestore
+
+Both are Firebase products and both are NoSQL databases accessible from mobile clients without a backend. They are distinct services that still coexist in Firebase.
+
+| Dimension | Firebase Realtime Database | Cloud Firestore |
+|-----------|--------------------------|-----------------|
+| **Data model** | One large JSON tree | Collections and documents |
+| **Querying** | Limited — queries on one property at a time | Rich — multiple field filters, ordering |
+| **Offline support** | Yes | Yes |
+| **Real-time sync** | Yes | Yes |
+| **Transactions** | Yes (single-location) | Multi-document ACID |
+| **Scale** | ~100,000 concurrent connections per database | No practical connection limit (serverless) |
+| **Regions** | Limited to specific regions | Multi-region available |
+| **Pricing** | Per data downloaded + storage | Per document operation |
+
+For new projects, **Cloud Firestore is the recommended choice**. Firebase Realtime Database predates Firestore and remains in active use for its simpler JSON tree model, lower cost for certain streaming patterns, and 100,000 concurrent connection guarantee per database instance. Existing Realtime Database applications do not need to migrate unless they have hit its query or scale limitations.

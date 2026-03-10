@@ -1,0 +1,201 @@
+---
+title: "GCP — Cloud Storage"
+category: "google"
+topic: "cloud-storage"
+summary: "GCS object storage — storage classes, bucket configuration, lifecycle policies, access control, signed URLs, and transfer services."
+tags: ["gcp", "google-cloud", "cloud-storage", "gcs", "object-storage", "buckets"]
+order: 6
+draft: false
+---
+
+## Overview
+
+Google Cloud Storage (GCS) is GCP's object storage service — the place where unstructured data lives: backups, images, video files, static website assets, data lake files, ML training datasets, and anything else that does not fit neatly into a relational table. Object storage differs from block storage (persistent disks) and file storage (Filestore NFS): there is no file system hierarchy, no directories in the traditional sense, and no append-in-place writes. Every object is stored as a discrete unit alongside its metadata, accessed via HTTP(S) over a RESTful API.
+
+The fundamental model is simple: a **bucket** is a globally named container, and **objects** live inside that bucket. Objects are addressed by a bucket name plus an object name (which can include forward slashes to simulate a folder hierarchy — but underneath, the namespace is flat). A single object can be up to 5 TB. There is no practical limit on the number of objects in a bucket.
+
+GCS is engineered for **eleven nines of durability** (99.999999999%) — Google achieves this by redundantly storing each object across multiple physical locations. Availability figures depend on the storage class and location type, but Standard multi-region storage offers 99.99% availability.
+
+---
+
+## Bucket Locations
+
+Where you create a bucket determines where your data physically lives and affects latency, availability, and cost.
+
+| Location Type | Description | Best For |
+|---------------|-------------|----------|
+| **Regional** | Data stored redundantly across multiple zones in a single region (e.g., `us-central1`) | Latency-sensitive workloads co-located with Compute resources |
+| **Dual-region** | Data stored in exactly two specific regions (e.g., `nam4` = Iowa + South Carolina) | High availability with defined geo-location |
+| **Multi-region** | Data distributed across a broad geographic area: `US`, `EU`, or `ASIA` | Globally distributed content, highest availability |
+
+Dual-region buckets support **Turbo Replication** — an optional feature with a 15-minute RPO SLA, guaranteeing replication to both regions within 15 minutes. Without Turbo Replication, dual-region replication is still fast but has no SLA on timing.
+
+Multi-region and dual-region buckets provide higher availability than regional buckets because they survive the loss of an entire region. However, they cost more for storage and egress between regions.
+
+---
+
+## Storage Classes
+
+Storage class is a per-bucket setting (or overridable per object) that controls the trade-off between storage cost and retrieval cost. The key insight: cheaper storage per GB means a higher retrieval cost, plus a minimum storage duration you pay for regardless of when you actually delete the object.
+
+| Class | Monthly Storage Cost | Retrieval Cost | Min Storage Duration | Typical Use Case |
+|-------|---------------------|----------------|---------------------|------------------|
+| **Standard** | Highest | None | None | Frequently accessed data, website assets, active datasets |
+| **Nearline** | Lower | Per-GB retrieval fee | 30 days | Data accessed at most once a month — monthly reports, backups |
+| **Coldline** | Low | Higher per-GB retrieval fee | 90 days | Data accessed at most once a quarter — quarterly compliance archives |
+| **Archive** | Lowest | Highest per-GB retrieval fee | 365 days | Long-term archival accessed less than once a year — legal hold, DR snapshots |
+
+All four classes provide identical durability (eleven nines) and the same SLA for availability within a given location type. The difference is entirely in cost structure. If you store an object in Coldline and delete it after 30 days, you still pay for 90 days of storage. This makes Coldline and Archive unsuitable for data with unpredictable access patterns.
+
+Retrieval latency is also important: Standard and Nearline data is available with millisecond latency like any other GCS object. Coldline and Archive are the same — there is no delay waiting for data to "thaw." The term "retrieval cost" refers to the per-GB charge, not a delay.
+
+---
+
+## Access Control
+
+GCS supports two access control models at the bucket level, and you must choose one. They cannot both be active simultaneously.
+
+### Uniform Bucket-Level Access
+
+Uniform bucket-level access disables per-object ACLs and enforces IAM-only access control for all objects in the bucket. This is the **recommended** approach for new buckets. It simplifies auditing (one policy location to review), supports Conditions (time-based, IP-based access restrictions), and is required for certain features like VPC Service Controls.
+
+When uniform bucket-level access is enabled, legacy ACLs on existing objects are ignored. Access decisions are made entirely by IAM policies on the bucket.
+
+### Fine-Grained ACL (Legacy)
+
+Fine-grained access control allows both bucket-level IAM policies and per-object ACLs. This was the original model. An object ACL can grant access to a specific user for that specific object only, independently of the bucket-level IAM policy. While flexible, it creates complexity: you now have two places where access can be granted, making audits harder and supporting broad access grants that IAM alone would have prevented.
+
+### IAM Roles for Cloud Storage
+
+| Role | Access Level |
+|------|-------------|
+| `roles/storage.objectViewer` | Read objects and their metadata |
+| `roles/storage.objectCreator` | Upload objects (cannot read existing objects) |
+| `roles/storage.objectAdmin` | Full object control (read, write, delete) |
+| `roles/storage.admin` | Full bucket and object control, including bucket configuration |
+| `roles/storage.legacyBucketReader` | List bucket contents; read bucket metadata |
+
+Service accounts attached to Compute Engine instances or Cloud Run services are the standard way to grant application access to GCS buckets without any key material.
+
+---
+
+## Signed URLs
+
+A **Signed URL** is a time-limited URL that grants temporary access to a specific GCS object without requiring the requester to have a Google account or IAM permissions. The URL is cryptographically signed using a service account's private key. When a client requests the URL, GCS validates the signature and the expiration timestamp.
+
+Signed URLs are used for:
+- Letting end-users download a specific file directly from GCS without exposing your bucket
+- Letting partners upload files to a specific path in your bucket temporarily
+- Providing access to private objects via a CDN or presigned download link
+
+The maximum expiration time for a signed URL using a service account key is 7 days. Signed URLs created with IAM credentials (via the `signBlob` API) also support V4 signing, which is the current recommended version.
+
+---
+
+## Object Versioning
+
+When object versioning is enabled on a bucket, GCS retains previous versions of objects instead of replacing them. Each version is identified by a **generation number** — a unique integer that increases with each new write to the same object name.
+
+- The current (live) version is the most recent generation
+- Older versions become **noncurrent** — they are not returned in standard object listings
+- Deleting a versioned object creates a **delete marker** (a noncurrent version with no data); the object can be undeleted by removing the delete marker
+- Noncurrent versions incur storage charges at the same rate as live objects
+
+Versioning is commonly combined with lifecycle rules to automatically purge noncurrent versions after a set number of days, keeping the last N versions, or transitioning noncurrent versions to cheaper storage classes.
+
+---
+
+## Lifecycle Policies
+
+Lifecycle policies let you automate object management based on conditions. Rules are applied at the bucket level and evaluated continuously against every object.
+
+**Supported actions:**
+- `Delete` — permanently remove the object (or noncurrent version)
+- `SetStorageClass` — transition the object to a cheaper storage class
+
+**Supported conditions:**
+- `Age` — number of days since the object was created
+- `CreatedBefore` — objects created before a specific date
+- `IsLive` — target live vs noncurrent versions
+- `NumberOfNewerVersions` — noncurrent versions with N or more newer versions
+- `DaysSinceNoncurrentTime` — days since the object became noncurrent
+- `MatchesStorageClass` — only apply to objects currently in specified class
+
+A common pattern: transition objects from Standard to Nearline after 30 days, to Coldline after 90 days, and delete after 365 days. This is the "lifecycle waterfall" and keeps storage costs proportional to access frequency.
+
+One important constraint: lifecycle policies can only transition objects to **cheaper** storage classes. You cannot use a lifecycle rule to move an Archive object back to Standard. That would require re-uploading the object manually.
+
+---
+
+## Retention Policies and Bucket Lock
+
+A **retention policy** sets a minimum retention duration on a bucket. Objects cannot be deleted or overwritten until they have been stored for at least the retention period. This supports WORM (Write Once, Read Many) compliance requirements — regulations that require records to be immutable for a defined period.
+
+**Bucket Lock** makes a retention policy permanent. Once locked:
+- The retention period cannot be shortened (it can only be increased)
+- The retention policy cannot be removed
+- Even the bucket owner cannot unlock or modify it
+
+This provides compliance-grade immutability for regulatory frameworks such as SEC Rule 17a-4 (financial records) and HIPAA (medical records). Bucket Lock is irreversible — use it deliberately.
+
+**Object Lock** (a newer GCP feature) extends per-object immutability at the object level, similar to S3 Object Lock. This allows different retention durations on individual objects within the same bucket.
+
+---
+
+## Encryption
+
+All data in GCS is encrypted at rest by default using AES-256. GCP manages the encryption keys automatically. This costs nothing extra and requires no configuration.
+
+| Encryption Type | Key Management | Use Case |
+|-----------------|---------------|----------|
+| **Google-managed** (default) | GCP owns and rotates keys | Standard workloads, no special requirements |
+| **CMEK** (Customer-Managed Encryption Keys) | Keys in Cloud KMS, used by GCP | Regulated workloads needing audit trail of key use; ability to revoke access |
+| **CSEK** (Customer-Supplied Encryption Keys) | You provide the key with every API call; GCP never stores it | Maximum key control; key loss = permanent data loss |
+
+With CMEK, you control the key lifecycle in Cloud KMS — you can rotate, disable, or destroy the key. Destroying the CMEK key makes all objects encrypted with that key permanently inaccessible. With CSEK, if you lose the key material, Google cannot help you recover the data.
+
+---
+
+## Cloud Storage FUSE
+
+Cloud Storage FUSE is an open-source FUSE adapter that allows Linux and macOS systems to mount a GCS bucket as a local filesystem. Applications that expect POSIX file paths can read and write to GCS without modification.
+
+However, FUSE has significant caveats:
+- It is **not fully POSIX-compliant** — atomic renames, file locking, and in-place appends behave differently or are unsupported
+- Performance is much lower than a local filesystem — every read/write is an HTTPS API call
+- It is suitable for data science workflows (reading training files) and non-latency-sensitive use cases, not for databases or applications requiring fast random access
+
+---
+
+## Transfer Services
+
+| Method | Best For |
+|--------|----------|
+| **gsutil** | Command-line uploads/downloads; scripting; small to medium datasets from on-premises |
+| **Storage Transfer Service** | Large-scale scheduled transfers from AWS S3, Azure Blob, HTTP/HTTPS sources, or other GCS buckets |
+| **Transfer Appliance** | Massive datasets (up to 300 TB per appliance) when network bandwidth makes online transfer impractical; Google ships a physical device |
+| **gcloud storage** | Newer CLI tool replacing gsutil; faster parallel transfers |
+
+Storage Transfer Service supports scheduled recurring jobs, filtering by prefix or modification time, and deletion of source objects after transfer — making it suitable for ongoing sync jobs, not just one-time migrations.
+
+---
+
+## Requester Pays
+
+Normally the bucket owner pays for all egress from their bucket. When **Requester Pays** is enabled on a bucket, the requester (the accessing account) is billed for egress and operation costs instead. This is used when a dataset publisher wants to share data publicly without absorbing the egress bill — for example, public genomics or geospatial datasets.
+
+The requester must specify a billing project in the request header; requests without a valid billing project are rejected.
+
+---
+
+## Key Design Decisions
+
+**Bucket naming**: Bucket names are globally unique across all of GCP. Avoid putting sensitive information in bucket names — they appear in URLs and are queryable.
+
+**Uniform vs fine-grained access**: Choose uniform bucket-level access for all new buckets unless you have a specific per-object ACL requirement. It is simpler to audit and required for several advanced features.
+
+**Storage class selection**: Match the class to actual access frequency. A dataset accessed weekly does not belong in Coldline — the retrieval fees will exceed the storage savings rapidly.
+
+**Versioning + lifecycle**: Always pair object versioning with a lifecycle rule that prunes noncurrent versions, or storage costs compound indefinitely as old versions accumulate.
+
+**Encryption**: Default Google-managed encryption is sufficient for most workloads. Use CMEK if your compliance framework requires proof of key control and the ability to cryptographically revoke access.

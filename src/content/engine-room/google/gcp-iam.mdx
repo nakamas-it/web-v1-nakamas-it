@@ -1,0 +1,278 @@
+---
+title: "GCP — Identity and Access Management"
+category: "google"
+topic: "iam"
+summary: "GCP's IAM model — principals, roles, service accounts, org policies, and the principle of least privilege in practice."
+tags: ["gcp", "google-cloud", "iam", "service-accounts", "roles", "security"]
+order: 2
+draft: false
+---
+
+## Overview
+
+Google Cloud IAM (Identity and Access Management) controls who can do what on which resource. Every API call made to GCP — whether from a human using the Cloud Console or an application running on a Compute Engine VM — passes through IAM for authorisation. If the principal making the request does not have the required permission, the call is rejected with a `403 PERMISSION_DENIED` error.
+
+IAM is built around three concepts: **principals** (who is making the request), **roles** (collections of permissions granted to the principal), and **resources** (what the permissions apply to). The combination of a principal bound to a role on a resource is called an **IAM policy binding**.
+
+Understanding IAM deeply — including its inheritance model, service account design, and the distinction between IAM and Organisation Policy — is essential for building secure and auditable GCP environments.
+
+---
+
+## Principals
+
+A principal is any identity that can be granted access to GCP resources. GCP supports the following principal types:
+
+| Principal Type | Identifier Format | Description |
+|----------------|-------------------|-------------|
+| **Google Account** | `user:alice@example.com` | An individual user with a Google account or Workspace account |
+| **Service Account** | `serviceAccount:app@project-id.iam.gserviceaccount.com` | A non-human identity for applications, VMs, and workloads |
+| **Google Group** | `group:team@example.com` | A Google Groups email address; policy applies to all members |
+| **Google Workspace domain** | `domain:example.com` | All accounts in a Google Workspace domain |
+| **Cloud Identity domain** | `domain:example.com` | All accounts in a Cloud Identity domain |
+| **allAuthenticatedUsers** | Special identifier | Any authenticated Google account — use with extreme caution |
+| **allUsers** | Special identifier | Anyone, including unauthenticated requests — public access |
+
+`allAuthenticatedUsers` is a common source of accidental data exposure. It does not mean "any user in your organisation" — it means any person with any Google account in the world. Use `domain:your-domain.com` when you mean "anyone in our organisation."
+
+---
+
+## Roles
+
+Permissions in GCP are not granted individually — they are bundled into roles, and roles are granted to principals. A permission looks like `compute.instances.create`; a role is a named collection of permissions.
+
+### Role Types
+
+| Type | Description | When to Use |
+|------|-------------|-------------|
+| **Basic (Primitive)** | Coarse-grained legacy roles: Owner, Editor, Viewer | Almost never — these grant extremely broad permissions across all services |
+| **Predefined** | Curated by Google per service; regularly updated | Default choice — fine-grained and maintained by Google |
+| **Custom** | User-defined; you choose individual permissions | Only when predefined roles are too permissive or too restrictive |
+
+**Basic roles** should be avoided in production. `roles/editor` grants create, update, and delete permissions on almost every GCP resource in the project — far more access than any application or human user needs. It also does not grant IAM management permissions, which is its only saving grace.
+
+**Predefined roles** follow a consistent naming pattern: `roles/{service}.{resourceType}{Action}`. Examples:
+
+- `roles/compute.instanceAdmin.v1` — full control over Compute Engine instances
+- `roles/storage.objectViewer` — read-only access to Cloud Storage objects (not buckets)
+- `roles/bigquery.dataViewer` — read access to BigQuery datasets and tables
+- `roles/logging.viewer` — read-only access to Cloud Logging log entries
+
+**Custom roles** allow you to build a role from specific permissions. They are appropriate when the principle of least privilege requires a combination of permissions that no predefined role provides. The downside is maintenance: when GCP adds new permissions to a service, custom roles do not automatically include them — you must update the custom role explicitly.
+
+### Viewing a Role's Permissions
+
+```bash
+# List permissions included in a predefined role
+gcloud iam roles describe roles/compute.instanceAdmin.v1
+
+# List all predefined roles for a service
+gcloud iam roles list --filter="name:roles/storage"
+```
+
+---
+
+## IAM Policy Bindings
+
+An IAM policy is a list of bindings. Each binding associates one or more principals with a single role, optionally with conditions. The policy is attached to a resource (Organisation, folder, project, or individual resource).
+
+Example policy in JSON (as returned by the API):
+
+```json
+{
+  "bindings": [
+    {
+      "role": "roles/storage.objectViewer",
+      "members": [
+        "user:alice@example.com",
+        "group:readers@example.com"
+      ]
+    },
+    {
+      "role": "roles/storage.objectCreator",
+      "members": [
+        "serviceAccount:uploader@my-project.iam.gserviceaccount.com"
+      ]
+    }
+  ]
+}
+```
+
+To manage IAM bindings via `gcloud`:
+
+```bash
+# Grant a role to a user on a project
+gcloud projects add-iam-policy-binding my-project \
+  --member="user:alice@example.com" \
+  --role="roles/compute.viewer"
+
+# Remove a role binding
+gcloud projects remove-iam-policy-binding my-project \
+  --member="user:alice@example.com" \
+  --role="roles/compute.viewer"
+
+# Get the full IAM policy for a project
+gcloud projects get-iam-policy my-project
+```
+
+IAM policies are additive — a principal receives the union of all roles granted at every level of the resource hierarchy. There is no standard IAM deny.
+
+---
+
+## IAM Conditions
+
+IAM Conditions allow you to make role grants conditional on attributes. Conditions use the Common Expression Language (CEL) and can evaluate:
+
+- **Time and date** — e.g., grant access only during business hours or for a limited period
+- **Resource attributes** — e.g., grant access only to resources with a specific tag
+- **Request attributes** — e.g., grant access only from specific IP ranges (requires VPC Service Controls context)
+
+Example: grant a role only until a specific date (useful for contractors):
+
+```json
+{
+  "role": "roles/bigquery.dataViewer",
+  "members": ["user:contractor@partner.com"],
+  "condition": {
+    "title": "Temporary access until end of quarter",
+    "expression": "request.time < timestamp('2026-04-01T00:00:00Z')"
+  }
+}
+```
+
+Conditions are evaluated at the time of each API request. Once the condition is no longer true, access is automatically denied — no manual revocation required.
+
+---
+
+## Service Accounts
+
+Service accounts are non-human identities for applications, workloads, and automated processes. A service account has an email address in the form `service-account-name@project-id.iam.gserviceaccount.com` and can be granted IAM roles just like a user.
+
+### Types of Service Accounts
+
+| Type | Managed By | Description |
+|------|-----------|-------------|
+| **User-managed** | You | Created explicitly; you control the name, roles, and keys |
+| **Default** | GCP | Created automatically when certain APIs are enabled (e.g., Compute Engine default SA); has Editor role by default — reduce this immediately |
+| **Google-managed** | Google | Used internally by GCP services; usually not directly visible or modifiable |
+
+The Compute Engine default service account (`PROJECT_NUMBER-compute@developer.gserviceaccount.com`) is automatically created when the Compute Engine API is enabled. It is granted the Editor basic role by default, which is dangerously broad. Best practice is to create purpose-specific service accounts with narrow permissions and attach them to VMs instead.
+
+### Authentication Methods
+
+Service accounts authenticate to GCP APIs using one of two methods:
+
+1. **Attached service account (recommended)** — a VM, Cloud Run service, or Cloud Function runs with an attached service account. The metadata server at `169.254.169.254` provides short-lived access tokens automatically. No key file is needed, no credentials management required.
+
+2. **Service account key file** — a JSON file containing an RSA private key. Required when the workload runs outside GCP (on-premises, another cloud). Keys are long-lived and must be rotated. Avoid key files wherever possible.
+
+```bash
+# Create a service account
+gcloud iam service-accounts create my-app-sa \
+  --display-name="My Application Service Account"
+
+# Grant a role to the service account
+gcloud projects add-iam-policy-binding my-project \
+  --member="serviceAccount:my-app-sa@my-project.iam.gserviceaccount.com" \
+  --role="roles/storage.objectCreator"
+
+# Create a key file (use only when absolutely necessary)
+gcloud iam service-accounts keys create ~/key.json \
+  --iam-account=my-app-sa@my-project.iam.gserviceaccount.com
+```
+
+### Workload Identity Federation
+
+Workload Identity Federation allows external workloads (GitHub Actions, AWS workloads, on-premises systems using OIDC or SAML) to impersonate a GCP service account without creating a key file. The external identity presents a token from its own identity provider; GCP validates that token against a configured workload identity pool and exchanges it for a short-lived GCP access token.
+
+This is the recommended approach for CI/CD pipelines and cross-cloud access — it eliminates the operational burden and security risk of long-lived key files.
+
+### Workload Identity for GKE
+
+Within GKE, the equivalent mechanism is **Workload Identity**. It maps a Kubernetes Service Account (KSA) to a GCP Service Account (GSA). Pods annotated with the KSA receive tokens that GCP recognises as the GSA, allowing them to call GCP APIs without mounting key files. This is the recommended authentication method for all GKE workloads.
+
+```bash
+# Annotate a Kubernetes Service Account to bind it to a GCP Service Account
+kubectl annotate serviceaccount my-ksa \
+  iam.gke.io/gcp-service-account=my-app-sa@my-project.iam.gserviceaccount.com
+
+# Allow the KSA to impersonate the GSA
+gcloud iam service-accounts add-iam-policy-binding my-app-sa@my-project.iam.gserviceaccount.com \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="serviceAccount:my-project.svc.id.goog[my-namespace/my-ksa]"
+```
+
+---
+
+## Organisation Policy Service
+
+Organisation Policy is a separate but complementary system to IAM. Where IAM answers "who can do this action," Organisation Policy answers "is this action allowed at all, regardless of who is asking."
+
+Organisation Policy applies constraints across the resource hierarchy. A constraint set at the Organisation level overrides any IAM grant — even an Organisation Admin cannot perform an action that an Organisation Policy prohibits.
+
+### Common Constraints
+
+| Constraint | Effect |
+|------------|--------|
+| `constraints/compute.skipDefaultNetworkCreation` | Prevents GCP from creating the default VPC in new projects |
+| `constraints/gcp.resourceLocations` | Restricts which regions resources can be created in (data residency) |
+| `constraints/iam.disableServiceAccountKeyCreation` | Prevents creation of service account key files |
+| `constraints/iam.allowedPolicyMemberDomains` | Restricts IAM bindings to identities in specific domains |
+| `constraints/compute.requireOsLogin` | Requires OS Login for SSH access to Compute Engine VMs |
+
+```bash
+# Apply an organisation policy to deny service account key creation
+gcloud org-policies set-policy policy.yaml --organization=ORGANISATION_ID
+```
+
+Organisation Policy constraints can be applied at the Organisation, folder, or project level. A constraint set higher in the hierarchy can be made more restrictive but not less restrictive at a lower level (unlike IAM which is purely additive).
+
+---
+
+## IAM Deny Policies
+
+IAM Deny policies (now generally available) allow explicit deny bindings that override any IAM allow grants. This addresses the long-standing limitation that standard IAM is additive-only. A deny policy can prevent a principal from performing specific actions regardless of what allow policies exist.
+
+Deny policies are useful for:
+
+- Preventing a specific team from ever deleting production resources, even if they have the Editor role
+- Blocking access to sensitive APIs even for principals with broad project-level roles
+- Enforcing separation of duties at a policy level rather than relying on process controls
+
+---
+
+## Policy Analyzer
+
+Policy Analyzer is a tool in the Cloud Console and Cloud Asset Inventory API that answers questions like:
+
+- "Who has access to this Cloud Storage bucket?"
+- "What resources can this service account access?"
+- "Which principals have the storage.objects.delete permission in this project?"
+
+This is invaluable for security audits, compliance reviews, and troubleshooting access issues.
+
+```bash
+# Analyse who has access to a specific resource
+gcloud asset analyze-iam-policy \
+  --organization=ORGANISATION_ID \
+  --full-resource-name="//storage.googleapis.com/projects/_/buckets/my-sensitive-bucket"
+```
+
+---
+
+## Principle of Least Privilege in Practice
+
+Least privilege is easy to state and difficult to implement. In GCP, these patterns help:
+
+1. **Avoid basic roles in production** — replace Editor/Owner with specific predefined roles. Audit existing basic role grants regularly with Policy Analyzer.
+
+2. **Prefer groups over individuals** — grant roles to Google Groups. When someone joins or leaves a team, update the group membership rather than modifying IAM policies across multiple projects.
+
+3. **Use service accounts per workload** — create a dedicated service account for each application with only the permissions that application needs. Never share service accounts between unrelated workloads.
+
+4. **Disable default service account Editor grants** — when the Compute Engine API is enabled, immediately reduce the default service account's role from Editor to the minimum required.
+
+5. **Rotate or eliminate key files** — audit service account key files regularly. Use the `iam.disableServiceAccountKeyCreation` constraint and migrate to attached service accounts or Workload Identity Federation.
+
+6. **Use IAM Conditions for time-limited access** — contractors, incident responders, and temporary project contributors should receive time-bounded role grants.
+
+7. **Review access regularly** — use Cloud Audit Logs (Admin Activity logs are always on) to detect unexpected IAM changes and access patterns.

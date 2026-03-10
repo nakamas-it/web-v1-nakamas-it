@@ -1,0 +1,74 @@
+---
+title: "vCenter Server — Appliance Deployment, HA, and Enhanced Linked Mode"
+category: "vmware"
+topic: "vcenter-server"
+summary: "How vCenter Server Appliance works — the Linux-based appliance that replaced Windows vCenter, its deployment sizing options, how vCenter HA provides active/passive redundancy, and how Enhanced Linked Mode links multiple vCenter instances into a single management view."
+tags: ["vmware", "vcenter", "vsphere", "vca", "high-availability", "vcpdcv"]
+order: 2
+draft: false
+---
+
+## Overview
+
+vCenter Server is the management plane for a vSphere environment — without it, ESXi hosts operate as independent islands, each managed only through its own Host Client. With vCenter, those hosts join a unified inventory that enables clustering, live migration, automated load balancing, distributed networking, and centralised identity management. Since vSphere 7.0, vCenter ships exclusively as a Linux-based virtual appliance (VCSA) with all services embedded. Understanding how the appliance is sized, made highly available, and linked across sites is essential for designing and operating production vSphere environments.
+
+## The vCenter Server Appliance (VCSA)
+
+The VCSA is a pre-built virtual appliance deployed as an OVA onto an ESXi host. Since vSphere 7.0, two architectural changes are permanent and non-negotiable:
+
+- **No Windows vCenter Server** — the Windows installer was removed. VCSA is the only deployment model.
+- **No external Platform Services Controller (PSC)** — PSC services (SSO, certificate management, licensing) are embedded in every VCSA. The external PSC topology that existed in vSphere 6.x is gone.
+
+The embedded database is **PostgreSQL**. External SQL Server or Oracle databases are not supported since vSphere 7.0. All inventory data, performance history, events, and task logs are stored in the embedded PostgreSQL instance.
+
+## SSO Domain and Identity Sources
+
+Every VCSA belongs to an **SSO domain** — the default name is `vsphere.local`. The SSO domain uses VMware Directory Service (vmdir), an internal LDAP-compatible directory, to authenticate vCenter administrators and store permissions, roles, and licences. The default administrator account is `administrator@vsphere.local`.
+
+Identity sources allow vCenter to authenticate external users without creating local accounts. Supported identity source types include Active Directory over LDAP, OpenLDAP, and local OS users on the VCSA. Once an identity source is added, AD users and groups can be assigned roles in the vCenter inventory directly.
+
+## Deployment Sizing
+
+When deploying a VCSA, the installer prompts for a deployment size. The size determines how many vCPUs and how much RAM are allocated to the appliance, which in turn governs the maximum number of hosts and VMs it can manage:
+
+| Size | Max Hosts | Max VMs | vCPU | Memory |
+|---|---|---|---|---|
+| Tiny | 10 | 100 | 2 | 12 GB |
+| Small | 100 | 1,000 | 4 | 19 GB |
+| Medium | 400 | 4,000 | 8 | 28 GB |
+| Large | 1,000 | 10,000 | 16 | 37 GB |
+| X-Large | 2,000 | 35,000 | 24 | 56 GB |
+
+For most production environments that fall under 100 hosts, the Small appliance is the correct starting point. Undersizing the appliance leads to performance degradation in the vSphere Client and slow inventory updates.
+
+## vCenter HA
+
+vCenter HA protects vCenter Server itself against host-level failures. It is a three-node cluster: **Active**, **Passive**, and **Witness**.
+
+The Active node serves all vSphere Client connections and runs all vCenter services. The Passive node is a clone of the Active node that receives continuous replication of data changes over a **dedicated private vCenter HA network** — this network is separate from the management network and carries only replication traffic. The Witness node is a lightweight VM with no vCenter services; its sole function is to provide a quorum vote and prevent split-brain scenarios if the Active and Passive nodes lose contact with each other.
+
+When the Active node fails, the Passive node automatically promotes itself to Active. The typical recovery time objective is approximately five minutes. The Passive node does not receive a management IP address during normal operation — only the Active node has one. If all three nodes are required for HA to function correctly, the Witness is still mandatory even though it carries no production traffic.
+
+vCenter HA is distinct from vSphere HA. vSphere HA restarts virtual machines when an ESXi host fails. vCenter HA restarts the vCenter Server appliance when the host running it fails. The two operate at different layers of the stack.
+
+## vCenter Server Editions and Enhanced Linked Mode
+
+vCenter Standard is the edition required for production environments with more than four hosts and for any use of Enhanced Linked Mode (ELM).
+
+ELM links up to **15 vCenter Server instances** into a single federated management pane. All linked vCenters must share the **same SSO domain**. Once linked, an administrator can log in to any one of the linked vCenters and browse the full inventory of all 15 instances from a single vSphere Client session. Roles, permissions, licences, and tags are replicated across all linked instances — a permission granted on one vCenter is visible from any linked vCenter in the same SSO domain.
+
+| Edition | Max Hosts | Enhanced Linked Mode |
+|---|---|---|
+| Foundation | 4 | No |
+| Essentials / Essentials Plus | SMB bundle | No |
+| Standard | Unlimited | Yes (up to 15 vCenters) |
+
+## File-Based Backup
+
+VCSA supports native file-based backup without requiring third-party backup software. The VCSA management interface (VAMI, accessible on port 5480) includes a backup scheduler that supports the following transfer protocols: **NFS, FTP, FTPS, HTTP, HTTPS, SCP, and SMB**. TFTP is not supported.
+
+Backups are image-consistent snapshots of vCenter configuration and inventory data. Schedules can run daily, weekly, or monthly, and a configurable retention count limits how many backups are kept. Restoration is performed by re-running the VCSA installer in restore mode and pointing it at the backup destination. A restored VCSA recovers inventory, permissions, and configuration — ESXi hosts re-associate automatically after restoration.
+
+## Summary
+
+The VCSA is the only supported vCenter deployment since vSphere 7.0 — Linux-only, embedded PSC, embedded PostgreSQL. Size the appliance to match the inventory it will manage. vCenter HA provides active/passive redundancy with an Active, Passive, and Witness node communicating over a private HA network. Enhanced Linked Mode federates up to 15 vCenter instances in the same SSO domain under a single login. File-based backup via VAMI is the supported native backup mechanism, with support for NFS, SCP, SMB, and HTTP-family protocols.

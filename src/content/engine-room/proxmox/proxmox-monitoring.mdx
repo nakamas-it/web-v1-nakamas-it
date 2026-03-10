@@ -1,0 +1,257 @@
+---
+title: "Proxmox VE — Monitoring and Maintenance"
+category: "proxmox"
+topic: "monitoring"
+summary: "Monitoring Proxmox — built-in node/VM metrics, RRD graphs, external monitoring with InfluxDB and Grafana, log management, and routine maintenance tasks."
+tags: ["proxmox", "monitoring", "grafana", "influxdb", "maintenance", "logs", "metrics"]
+order: 14
+draft: false
+---
+
+## What Proxmox Exposes Out of the Box
+
+Proxmox VE includes built-in monitoring at every level of the management hierarchy — datacenter, node, and individual VM. No external tools are required to get a working picture of resource utilisation, but the built-in tooling has limitations in depth and retention that make external monitoring systems worth adding to any production environment.
+
+## Datacenter-Level Dashboard
+
+The `Datacenter | Summary` view provides an aggregate health overview of the entire cluster:
+
+- **Quorum status** — whether the cluster has achieved quorum and how many nodes are voting
+- **Online/Offline node count** — a quick indicator of cluster membership state
+- **Aggregate CPU** — total vCPUs in use across all VMs and containers as a percentage of total physical cores
+- **Aggregate memory** — total allocated RAM vs. total physical RAM across all nodes
+- **Aggregate storage** — combined storage usage across all storage pools
+
+The `Datacenter | Search` view lists all nodes, VMs, and containers with real-time sortable columns: CPU usage, memory usage, disk usage, and uptime. This gives a quick ranking of the highest-utilisation workloads in the cluster at any given moment.
+
+## Node-Level Metrics
+
+Selecting any node and clicking its **Summary** tab shows per-node resource graphs:
+
+- **CPU usage** — percentage of physical cores in use, aggregated across all VMs on the node
+- **Memory** — physical RAM consumed, broken down by VMs, containers, and the Proxmox host processes
+- **Network** — inbound and outbound traffic across all virtual bridges on the node
+- **Disk I/O** — read and write throughput to the node's local storage
+
+All graphs are **RRD-based** (Round Robin Database), the same technology used by tools like Cacti and MRTG. RRD graphs are stored locally on each node and retained at progressively coarser granularity over time:
+
+| Time Range | Granularity |
+|-----------|-------------|
+| Last hour | Full resolution (~1 sample per 60 seconds) |
+| Last day | Averaged to ~30-minute intervals |
+| Last week | Averaged to ~2-hour intervals |
+| Last month | Averaged to ~8-hour intervals |
+| Last year | Daily averages |
+
+This means Proxmox's built-in graphs answer "what is happening right now and in the past few hours" effectively, but lose detail for longer-term capacity planning. An external metrics system is needed for fine-grained historical analysis.
+
+## VM and Container Metrics
+
+Individual VM and container Summary tabs show the same CPU, memory, network, and disk graphs for that specific workload. For KVM VMs with the **QEMU guest agent** installed, additional metrics become available:
+
+- **Memory balloon stats** — actual memory in use inside the guest vs. allocated RAM, which is more accurate than the hypervisor's external view
+- **Filesystem utilisation** — disk usage inside the guest
+- **CPU ready time** — how often a vCPU is ready to run but waiting for a physical core
+
+Install the QEMU guest agent inside the VM:
+
+```bash
+# On Debian/Ubuntu guests
+apt-get install qemu-guest-agent
+systemctl enable qemu-guest-agent
+systemctl start qemu-guest-agent
+```
+
+Enable it in the Proxmox VM settings at `VM | Options | QEMU Guest Agent | Enabled`.
+
+## External Metrics — InfluxDB and Grafana
+
+Proxmox VE has a built-in mechanism to ship metrics to external time-series databases. Navigate to `Datacenter | Metric Server | Add` and select either **InfluxDB** or **Graphite** as the target.
+
+For InfluxDB v2 (the current version), configure:
+- **Server** — IP address of the InfluxDB instance
+- **Port** — default 8086
+- **Bucket** — the InfluxDB bucket (database) to write into
+- **Token** — InfluxDB API authentication token
+- **Organization** — InfluxDB organisation name
+
+Once saved, Proxmox begins shipping node and VM metrics at regular intervals to InfluxDB. No agent installation is required on the Proxmox nodes — the metrics are pushed directly from the Proxmox API.
+
+**Grafana** is typically paired with InfluxDB as the visualisation layer. The Proxmox community maintains pre-built Grafana dashboards available for import by dashboard ID:
+
+- Search `grafana.com/grafana/dashboards` for "Proxmox" to find current community dashboards
+- Common dashboard IDs in circulation cover node overview, VM inventory, cluster summary, and Ceph status
+
+The combination of InfluxDB + Grafana fills the gaps in Proxmox's built-in monitoring: long-term retention, custom alerting, threshold-based notifications, and correlation of Proxmox metrics with application-level metrics from other systems.
+
+## SMART Disk Health Monitoring
+
+Disk failures are a leading cause of unplanned downtime in physical server environments. Proxmox supports S.M.A.R.T. monitoring via the `smartmontools` package:
+
+```bash
+apt-get install smartmontools
+```
+
+Once installed, `smartd` runs as a background daemon and polls physical disks for S.M.A.R.T. attributes. When a disk reports errors (reallocated sectors, pending sectors, uncorrectable errors, or temperature exceedance), `smartd` sends an email to the root user's configured email address.
+
+Email notifications include: node name, device ID, serial number, and the nature of the error. If the error persists, notification repeats every 24 hours.
+
+Configure the root email address at `Datacenter | Permissions | Users | root | Edit | Email`.
+
+Manual SMART checks:
+
+```bash
+# Check SMART status of a specific disk
+smartctl -a /dev/sda
+
+# Run a short self-test
+smartctl -t short /dev/sda
+
+# Run a long self-test
+smartctl -t long /dev/sda
+
+# View test results
+smartctl -l selftest /dev/sda
+```
+
+## Log Management
+
+Proxmox generates logs at multiple levels:
+
+**Cluster-level logs** live in `/var/log/pve/`:
+
+| Log File | Contents |
+|----------|---------|
+| `/var/log/pve/pvedaemon.log` | Proxmox API daemon activity; useful when the GUI is inaccessible |
+| `/var/log/pve/pvestatd.log` | Statistics daemon log |
+| `/var/log/pve/pveproxy.log` | Web proxy log for GUI access |
+
+**Systemd service logs** are accessed via `journalctl`:
+
+```bash
+# Corosync cluster engine log
+journalctl -u corosync -f
+
+# Proxmox cluster daemon
+journalctl -u pve-cluster -f
+
+# HA manager logs
+journalctl -u pve-ha-crm -f
+journalctl -u pve-ha-lrm -f
+
+# Proxmox API daemon
+journalctl -u pvedaemon -f
+```
+
+**Node syslog** is accessible from the GUI: `Node | Syslog` shows a live scrolling view of the system log. This is useful for quick inspection without needing shell access.
+
+**Task History** under each node (`Node | Task History`) shows a log of all GUI-initiated operations — VM starts, stops, migrations, backup jobs — with success/failure status and duration.
+
+## pveperf — Hardware Benchmark
+
+`pveperf` is a built-in benchmark utility that quickly measures the hardware capabilities of a Proxmox node:
+
+```bash
+pveperf
+```
+
+Output includes:
+- **CPU MHz** — the measured CPU clock speed
+- **BOGOMIPS** — a rough CPU performance indicator
+- **HD Size** — local storage size at the benchmark path
+- **Buffered Reads** — sequential read throughput of the local storage (MB/s)
+- **Average Seek Time** — latency of random I/O on local storage
+- **forks/sec** — process creation rate (relevant to container workloads)
+- **Memory Alloc/sec** — memory allocation throughput
+
+Run `pveperf` on a fresh node before deploying workloads to establish a baseline, then run it periodically to detect performance degradation. A significant drop in buffered reads or seek time often indicates storage hardware beginning to fail.
+
+## Node Maintenance Procedure
+
+Before taking a node offline for hardware maintenance, firmware updates, or kernel upgrades, migrate all running VMs and containers off the node first:
+
+```bash
+# List all running VMs on the current node
+qm list | grep running
+
+# Migrate a specific running VM to another node
+qm migrate 100 pmx-02 --online
+
+# For containers (LXC cannot live-migrate; must stop first)
+pct stop 101
+pct migrate 101 pmx-02
+```
+
+Via GUI, right-click each running VM and select **Migrate**. Select the target node and click **Migrate**. For containers, stop them first, then use offline migration.
+
+Once all VMs are off the node, apply the maintenance changes safely. When complete, verify the node rejoins the cluster and check quorum:
+
+```bash
+pvecm status    # Verify all nodes online and quorum is healthy
+```
+
+## Updating Proxmox
+
+**Via GUI:** `Node | Updates | Refresh` to fetch the current package list, then `Upgrade` to apply available updates. The GUI shows a list of packages pending upgrade before applying changes.
+
+**Via CLI:**
+
+```bash
+apt-get update && apt-get dist-upgrade
+```
+
+Use `dist-upgrade` rather than `upgrade` to ensure that packages that require other packages to be removed or installed (common in Proxmox kernel updates) are handled correctly.
+
+After a kernel update, the node requires a reboot. Always migrate VMs off the node before rebooting to avoid the HA system triggering an automatic failover (which takes 60+ seconds). A planned, manual migration is faster and cleaner than an HA-driven recovery.
+
+## Kernel Cleanup
+
+Each Proxmox kernel update installs a new kernel while leaving the previous versions in place. Over time, old kernel packages accumulate and consume disk space in the `/boot` partition. Clean them up:
+
+```bash
+# Check which kernels are installed and which is active
+proxmox-boot-tool status
+
+# List installed Proxmox kernel packages
+dpkg --list | grep pve-kernel
+
+# Remove a specific old kernel
+apt-get remove pve-kernel-5.15.30-1-pve
+
+# Remove all unused kernels automatically
+apt-get autoremove
+```
+
+After removing old kernels, refresh the boot configuration:
+
+```bash
+proxmox-boot-tool refresh
+```
+
+Keep at least one previous kernel installed as a fallback in case the new kernel has issues.
+
+## Zabbix Agent for Deep Monitoring
+
+For environments that use Zabbix as their central monitoring platform, install the Zabbix agent on each Proxmox node:
+
+```bash
+apt-get install zabbix-agent
+```
+
+Configure `/etc/zabbix/zabbix_agentd.conf`:
+
+```
+Server=<zabbix_server_ip>
+ServerActive=<zabbix_server_ip>:10051
+Hostname=pmx-01
+```
+
+Restart the agent:
+
+```bash
+service zabbix-agent restart
+```
+
+In Zabbix, add the node as a host with the `Template OS Linux` template. This auto-discovers disk, network, memory, and CPU items with pre-built triggers and graphs. For Proxmox-specific metrics, community Zabbix templates are available that query the Proxmox API directly.
+
+Zabbix's trigger system enables threshold-based alerting: alert when CPU I/O wait exceeds 20% for five minutes, when a node drops out of cluster membership, when available storage falls below 10%, or when a disk SMART attribute deteriorates. This proactive alerting is not available in Proxmox's built-in monitoring.

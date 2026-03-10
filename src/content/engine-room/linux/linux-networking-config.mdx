@@ -1,0 +1,127 @@
+---
+title: "Linux Network Configuration — ip, nmcli, and Name Resolution"
+category: "linux"
+topic: "linux-networking"
+summary: "How to configure and troubleshoot network interfaces on RHEL — inspecting current network state with ip commands, managing connections persistently with NetworkManager and nmcli, setting hostnames, and controlling how the system resolves DNS names."
+tags: ["linux", "networking", "nmcli", "ip-command", "dns", "rh124"]
+order: 11
+draft: false
+---
+
+## Overview
+
+Network configuration on Red Hat Enterprise Linux 9 is managed by **NetworkManager** (NM) — the daemon responsible for detecting, connecting, and maintaining network interfaces. All persistent configuration changes should go through NetworkManager rather than editing network configuration files directly. NetworkManager stores connection profiles in `/etc/NetworkManager/system-connections/` as INI-format files, and these profiles survive reboots and interface re-plugs.
+
+Three tools interact with NetworkManager from the command line and desktop: **nmcli** is the primary CLI used in scripts and automation; **nmtui** is a text-based user interface suitable for interactive terminal sessions where a full terminal emulator is unavailable; and GNOME network settings provide a graphical interface for desktop installations. All three write to the same backend — changes made in one are visible in the others.
+
+Understanding the distinction between temporary and persistent configuration is critical on RHEL. The `ip` command can modify addresses, routes, and link state immediately, but those changes exist only in the kernel's network state and disappear on the next reboot or network restart. NetworkManager, accessed through nmcli, writes changes to profile files that persist.
+
+---
+
+## Inspecting Network State with the ip Command
+
+The `ip` command from the `iproute2` package replaces the older `ifconfig` and `route` commands. It communicates directly with the kernel via netlink sockets and provides a complete view of the network stack.
+
+| Command | Purpose |
+|---|---|
+| `ip addr show` | Show all interfaces with their assigned addresses |
+| `ip addr show dev eth0` | Show address information for a specific interface |
+| `ip link show` | Show link-layer state (UP/DOWN, MTU, MAC address) |
+| `ip link set eth0 up` | Bring an interface up |
+| `ip link set eth0 down` | Bring an interface down |
+| `ip route show` | Display the kernel routing table |
+| `ip route add default via 192.168.1.1` | Add a default gateway route |
+| `ip -s link` | Show interface statistics (TX/RX bytes, errors, drops) |
+| `ip route get 8.8.8.8` | Show which route and source address would be used to reach a destination |
+
+The `ip addr show` output displays each interface with its index, flags (including `UP`, `LOWER_UP`, `BROADCAST`, `MULTICAST`), MTU, MAC address, and all assigned IPv4 and IPv6 addresses. The `state UP` line confirms the interface is administratively up and has carrier. A `state DOWN` or missing `LOWER_UP` flag indicates a physical or link-layer problem.
+
+All changes made with `ip` are temporary. After NetworkManager restarts or the system reboots, the kernel network state is rebuilt from the NM connection profiles. Use nmcli for any change that must survive a restart.
+
+---
+
+## Managing Connections with nmcli
+
+**nmcli** (NetworkManager command-line interface) is the standard tool for managing NetworkManager from scripts and the terminal. It can show device and connection status, create new connections, modify existing connection parameters, and activate or deactivate connections.
+
+| Command | Purpose |
+|---|---|
+| `nmcli device status` | Show all network devices and their connection status |
+| `nmcli connection show` | List all saved connection profiles |
+| `nmcli connection show "Wired connection 1"` | Show detailed parameters for a specific connection |
+| `nmcli device connect eth0` | Activate the default connection on an interface |
+| `nmcli connection up "name"` | Activate a named connection |
+| `nmcli connection down "name"` | Deactivate a named connection |
+| `nmcli connection modify "name" ipv4.addresses 10.0.0.5/24` | Set a static IPv4 address |
+| `nmcli connection modify "name" ipv4.gateway 10.0.0.1` | Set the default gateway |
+| `nmcli connection modify "name" ipv4.dns 8.8.8.8` | Set a DNS server |
+| `nmcli connection modify "name" ipv4.method manual` | Switch to static addressing |
+| `nmcli connection modify "name" ipv4.method auto` | Switch to DHCP |
+| `nmcli connection add type ethernet ifname eth0 con-name myconn` | Create a new Ethernet connection profile |
+| `nmcli connection reload` | Re-read connection profile files from disk |
+| `nmcli device reapply eth0` | Apply modified connection settings to an active interface without full reconnection |
+
+After modifying a connection with `nmcli connection modify`, the changes are written to the profile file but are not applied to the live interface until the connection is deactivated and reactivated, or until `nmcli device reapply` is used. The `connection reload` command is needed when profile files are edited manually outside of nmcli.
+
+To configure a static IP fully — address, gateway, DNS, and method — run the three `modify` commands for `ipv4.addresses`, `ipv4.gateway`, `ipv4.dns`, set `ipv4.method manual`, and then bring the connection back up with `nmcli connection up "name"`.
+
+---
+
+## Hostname Management
+
+The system hostname appears in the shell prompt, in log entries, and is returned when other systems query the machine by name. RHEL 9 uses `hostnamectl` to manage all hostname types.
+
+```bash
+hostnamectl set-hostname server1.example.com
+```
+
+RHEL tracks three hostname types simultaneously:
+
+- **Static hostname**: the persistent name stored in `/etc/hostname`, applied at boot. This is what `hostnamectl set-hostname` writes.
+- **Transient hostname**: set dynamically by DHCP or mDNS at runtime. Overrides the static hostname while active, returns to static when DHCP lease expires.
+- **Pretty hostname**: a free-form human-readable label, can include spaces and Unicode. Used only for display purposes (for example, GNOME desktop).
+
+Running `hostnamectl` without arguments shows all three values plus machine information. The FQDN (fully qualified domain name) combines the hostname with the domain name from DNS or `/etc/hosts`. Setting the static hostname to an FQDN (`server1.example.com`) is the recommended practice for servers.
+
+---
+
+## Name Resolution
+
+When a RHEL system resolves a hostname to an IP address, it follows the order defined in `/etc/nsswitch.conf`. The relevant line is:
+
+```
+hosts: files dns
+```
+
+This means the system checks `/etc/hosts` first, then queries DNS. The order can be changed by editing this line — for example, adding `myhostname` to resolve the local hostname without a DNS entry.
+
+**/etc/hosts** provides static name-to-IP mappings that override DNS. The format is one entry per line: IP address, followed by the FQDN, followed by any short aliases. This file is evaluated before DNS for every lookup and is commonly used for local lab entries or to override external DNS for testing.
+
+**/etc/resolv.conf** contains the addresses of upstream DNS nameservers, one per `nameserver` line. On systems running NetworkManager, this file is managed automatically — NM writes it based on the DNS servers configured in active connection profiles. Editing `/etc/resolv.conf` directly is not recommended because NM will overwrite it.
+
+---
+
+## Troubleshooting Network Connectivity
+
+A systematic approach to network troubleshooting on RHEL works from the physical layer upward: confirm the interface is up, confirm addressing is correct, confirm routing is in place, then confirm DNS works.
+
+| Command | Purpose |
+|---|---|
+| `ping -c4 192.168.1.1` | Test basic IP reachability with four packets |
+| `ss -tuln` | Show listening TCP and UDP sockets without resolving names |
+| `ss -tp` | Show established TCP connections with process names |
+| `nmcli -p connection show "name"` | Show all parameters for a connection in detailed format |
+| `ip route get 8.8.8.8` | Show which route and interface would be used to reach a host |
+| `nslookup hostname` | Send a DNS query and show the server and result |
+| `dig hostname` | Detailed DNS query with full response and timing |
+| `getent hosts hostname` | Resolve a hostname using the full `/etc/nsswitch.conf` order, including `/etc/hosts` |
+
+The `getent hosts` command is particularly useful because it mirrors exactly what applications experience — it follows the same `nsswitch.conf` order that the system library uses, so a hostname that resolves with `getent` will resolve for any normal application. A hostname that resolves with `nslookup` but not `getent` often indicates an `/etc/hosts` entry that takes precedence.
+
+When an interface shows no address or an unexpected address, `nmcli device status` quickly confirms whether NetworkManager has successfully activated a connection on that device. A device shown as `unmanaged` means NM is not controlling it — this sometimes occurs when a network interface was manually configured outside of NM's knowledge.
+
+---
+
+## Summary
+
+RHEL 9 centralises network configuration in NetworkManager, accessed primarily through nmcli for persistent changes and the `ip` command for temporary state inspection. Connection profiles in `/etc/NetworkManager/system-connections/` survive reboots. Hostname management goes through `hostnamectl`, and name resolution order is controlled by `/etc/nsswitch.conf`, with `/etc/hosts` evaluated before DNS by default. Troubleshooting follows a layered approach: interface state, addressing, routing, and finally name resolution.

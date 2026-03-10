@@ -1,0 +1,204 @@
+---
+title: "GCP — Load Balancing and CDN"
+category: "google"
+topic: "load-balancing"
+summary: "GCP's load balancing portfolio — global vs regional, HTTP(S), TCP, UDP, and internal load balancers, plus Cloud CDN for caching."
+tags: ["gcp", "google-cloud", "load-balancing", "cloud-cdn", "networking", "https"]
+order: 11
+draft: false
+---
+
+## Overview
+
+Google Cloud's load balancing portfolio is broader than most cloud providers offer at first glance. Rather than a single "load balancer" service with configuration options, GCP provides seven distinct load balancer types, each purpose-built for a specific combination of scope (global vs regional), protocol (HTTP/HTTPS, TCP, UDP), and traffic direction (external vs internal). Understanding which product to reach for — and why — is as important as knowing how to configure any single one of them.
+
+All GCP load balancers are software-defined, fully managed, and require no pre-warming. They scale to meet demand automatically. The key architectural split is between **proxy-mode** load balancers (which terminate the client connection and open a new connection to the backend) and the **pass-through** Network Load Balancer (which forwards packets without terminating connections, preserving the original client IP).
+
+---
+
+## The Seven Load Balancer Types
+
+GCP categorises its load balancers across three dimensions: scope (global or regional), protocol, and traffic direction (external or internal).
+
+| Load Balancer | Scope | Protocol | Direction | Mode |
+|---|---|---|---|---|
+| **Global External HTTP(S)** | Global | HTTP, HTTPS, HTTP/2, gRPC | External | Proxy |
+| **Regional External HTTP(S)** | Regional | HTTP, HTTPS | External | Proxy |
+| **External SSL Proxy** | Global | SSL/TLS (non-HTTP) | External | Proxy |
+| **External TCP Proxy** | Global | TCP (non-HTTP, non-SSL) | External | Proxy |
+| **External Network TCP/UDP** | Regional | TCP, UDP, ESP, ICMP, SCTP | External | Pass-through |
+| **Internal HTTP(S)** | Regional | HTTP, HTTPS | Internal | Proxy |
+| **Internal TCP/UDP** | Regional | TCP, UDP | Internal | Pass-through |
+
+The **External Network TCP/UDP** and **Internal TCP/UDP** load balancers are pass-through — they do not terminate connections. The client IP is preserved at the backend, which matters for applications that log source IPs or make per-IP decisions. All other types terminate the connection at the load balancer and open a new one to the backend.
+
+Global load balancers require **Premium Network Tier**, which routes traffic across Google's private backbone from the nearest edge Point of Presence (POP) to the backend. Regional load balancers work with Standard Network Tier, where traffic uses the public internet for some legs of its journey.
+
+---
+
+## Global External HTTP(S) Load Balancer
+
+This is the flagship product and the most commonly deployed load balancer for internet-facing web applications. Its defining properties:
+
+- **Single anycast IP address** — users worldwide connect to the same IP, and Google's network routes each connection to the nearest edge POP.
+- **SSL/TLS termination at the edge** — connections are decrypted at Google's edge infrastructure, not at your backend instances. This reduces latency since the TLS handshake completes at a POP geographically close to the user.
+- **HTTP/2 and gRPC support** — the load balancer speaks HTTP/2 to clients and can translate to HTTP/1.1 toward backends if needed.
+- **URL map routing** — requests can be routed to different backend services based on the host header and URL path. A single load balancer IP can serve multiple domains and route `/api/` to one backend while routing `/static/` to Cloud Storage.
+- **Cloud CDN integration** — caching can be enabled per backend service with a single configuration flag.
+- **Cloud Armor integration** — WAF policies and DDoS mitigation attach at the load balancer level.
+
+### Component Architecture
+
+A Global External HTTP(S) Load Balancer is assembled from several distinct components:
+
+**Forwarding rule** — the entry point. Binds an IP address, port, and protocol to a target proxy. There is one forwarding rule for HTTP (port 80) and one for HTTPS (port 443) in a typical deployment.
+
+**Target HTTP(S) proxy** — accepts incoming connections and references a URL map. For HTTPS, it also references an SSL certificate (Google-managed or self-managed).
+
+**URL map** — the routing table. Defines host and path rules that map requests to backend services. A default service handles all traffic that does not match a specific rule.
+
+**Backend service** — references one or more backend groups (Managed Instance Groups or Network Endpoint Groups), plus a health check. The backend service also holds configuration for session affinity, connection draining timeout, and Cloud CDN settings.
+
+**Health check** — periodically probes backend instances to determine if they can serve traffic. Unhealthy instances are removed from the rotation. Health check probes originate from Google's health checking IP ranges — firewall rules must allow these.
+
+---
+
+## SSL Proxy and TCP Proxy Load Balancers
+
+These are global, proxy-mode load balancers for non-HTTP protocols that still benefit from global anycast routing.
+
+**External SSL Proxy** terminates SSL/TLS and then proxies the unencrypted (or re-encrypted) TCP connection to backends. Used for protocols like IMAPS, SMTPS, or any TLS-wrapped TCP service that is not HTTP. Supports certificate management and SSL policy enforcement (minimum TLS version, cipher suites).
+
+**External TCP Proxy** is the same idea without SSL — it proxies raw TCP connections globally. Useful for protocols that need global reach but are not HTTP and do not use TLS at the load balancer layer. Applications must handle their own encryption end-to-end if needed.
+
+Both products provide the same global anycast IP and Google backbone routing advantage as the HTTP(S) load balancer, but for non-HTTP workloads.
+
+---
+
+## External Network TCP/UDP Load Balancer
+
+This is GCP's **pass-through** regional load balancer. Packets are forwarded directly to backend instances without connection termination. Key characteristics:
+
+- **Regional scope** — backends must be in the same region.
+- **Client IP preservation** — because connections are not terminated, the backend sees the original client IP address directly.
+- **Protocol range** — handles TCP, UDP, ESP (for IPsec), ICMP, and SCTP. The only load balancer type that supports UDP at the external scope.
+- **No SSL offloading** — the load balancer cannot terminate TLS. The application must handle it.
+- **High throughput, low latency** — pass-through adds minimal overhead compared to proxy modes.
+
+Common use cases include gaming servers (UDP, low latency, client IP matters), VoIP, and applications where the backend needs the real client IP for logging or policy enforcement.
+
+---
+
+## Internal Load Balancers
+
+Internal load balancers handle traffic that stays within a VPC and never reaches the internet. They are used for microservice-to-microservice communication, splitting traffic across backend tiers, and building internal service meshes.
+
+### Internal TCP/UDP Load Balancer
+
+Regional, pass-through load balancer for internal VPC traffic. Assigns an internal RFC 1918 IP address (called a forwarding rule IP or an Internal Load Balanced IP) that other VMs in the VPC can reach. Backends are Managed Instance Groups in the same region. Because it is pass-through, the backend sees the actual client IP. Used for internal TCP or UDP services — database proxies, internal APIs over custom ports, UDP-based internal services.
+
+### Internal HTTP(S) Load Balancer
+
+Regional, proxy-mode load balancer for internal HTTP and HTTPS traffic. Provides the same URL map, backend service, and health check architecture as the external HTTP(S) load balancer, but with an internal IP address accessible only within the VPC (and connected networks via Shared VPC or VPC peering). The proxy layer adds features like path-based routing, header-based routing, and traffic splitting — useful for internal microservice architectures and service mesh deployments that need L7 routing without external exposure.
+
+---
+
+## Choosing the Right Load Balancer
+
+| Requirement | Recommended Load Balancer |
+|---|---|
+| Global web app, HTTPS, URL routing | Global External HTTP(S) |
+| Regional web app, HTTPS | Regional External HTTP(S) |
+| Global TCP, non-HTTP, with SSL offloading | External SSL Proxy |
+| Global TCP, non-HTTP, no SSL offloading | External TCP Proxy |
+| UDP traffic, external, client IP required | External Network TCP/UDP |
+| Internal microservices, L7 routing | Internal HTTP(S) |
+| Internal TCP/UDP, client IP required | Internal TCP/UDP |
+
+The most common mistake is using the External Network TCP/UDP load balancer for HTTP workloads — it works, but you lose URL routing, CDN integration, Cloud Armor, and SSL offloading. The Global External HTTP(S) load balancer is almost always the right choice for web workloads.
+
+---
+
+## Cloud CDN
+
+Cloud CDN caches content at Google's globally distributed edge POPs, reducing latency for end users and reducing load on origin backends. It integrates exclusively with the Global External HTTP(S) Load Balancer — it is not available with other load balancer types.
+
+### How Caching Works
+
+When a request arrives at a Google edge POP, Cloud CDN checks whether it has a cached response for that request. If it does (a **cache hit**), it returns the cached response immediately without contacting the origin backend. If it does not (a **cache miss**), it forwards the request to the backend, caches the response (if the response headers permit caching), and returns it to the client.
+
+Cache eligibility is determined by response headers:
+- `Cache-Control: public, max-age=3600` — cacheable for 1 hour.
+- `Cache-Control: private` or `Set-Cookie` — not cached by default.
+- `Vary` headers — Cloud CDN can cache multiple versions of a response based on specific request headers.
+
+### Cache Modes
+
+Cloud CDN offers three cache modes that control how aggressively content is cached:
+
+| Cache Mode | Behaviour |
+|---|---|
+| **USE_ORIGIN_HEADERS** (default) | Caches only if origin sends explicit `Cache-Control` headers permitting caching. |
+| **CACHE_ALL_STATIC** | Automatically caches static content types (CSS, JS, images, fonts) regardless of `Cache-Control` headers. Dynamic responses still require explicit cache headers. |
+| **FORCE_CACHE_ALL** | Caches all successful responses regardless of origin headers. Origin `Cache-Control: no-store` is ignored. Use with care for truly dynamic content. |
+
+### Cache Keys
+
+Cloud CDN builds a cache key for each request — the key determines whether a new request matches a cached entry. By default the cache key includes the full URL (protocol, host, path, query string). You can customise cache keys to:
+- **Exclude query parameters** — useful when query parameters do not affect the response content (tracking parameters, analytics tags).
+- **Include specific headers** — cache separate versions based on `Accept-Language` or `Accept-Encoding`.
+- **Include named cookies** — cache user-specific content if needed (though this is uncommon; private content should not be CDN-cached).
+
+### Cache Invalidation
+
+When content at the origin changes before it expires in the CDN, you can invalidate cached entries:
+- **URL-level invalidation** — purge a specific URL from the cache.
+- **Path prefix invalidation** — purge all URLs under a path prefix (e.g., `/static/css/*`).
+
+Invalidations propagate to edge POPs quickly but are not instantaneous. Setting appropriate `max-age` values in `Cache-Control` headers is a better long-term strategy than relying on invalidation.
+
+### Signed URLs and Signed Cookies
+
+For content that should only be accessible to authorised users (video streams, downloadable files, private assets), Cloud CDN supports:
+
+- **Signed URLs** — time-limited URLs with a cryptographic signature. The URL embeds an expiration timestamp and a signature computed using a key you provide. Cloud CDN validates the signature and rejects requests where the URL has expired or the signature is invalid. No Google account is required to access the content — the URL itself proves authorisation.
+- **Signed cookies** — similar to signed URLs but use HTTP cookies instead of URL parameters. Useful when you need to authorise access to multiple URLs without embedding a signature in each one (video playlists, multi-file downloads).
+
+---
+
+## Network Endpoint Groups (NEGs)
+
+A **Network Endpoint Group** is a configuration object that specifies a group of backend endpoints rather than a group of VMs. NEGs allow load balancers to send traffic to targets that are not Compute Engine VMs.
+
+| NEG Type | Backend Target | Use Case |
+|---|---|---|
+| **Zonal NEG** | VM instances or GKE pods (container-native load balancing) | Direct-to-pod routing in GKE, bypasses kube-proxy |
+| **Internet NEG** | External hostname or IP (on-premises or other cloud) | Hybrid backends, third-party APIs as backends |
+| **Serverless NEG** | Cloud Run services, Cloud Functions, App Engine | Route load balancer traffic to serverless workloads |
+| **Hybrid connectivity NEG** | On-premises endpoints via Cloud Interconnect or VPN | Extend GCP load balancing to on-premises servers |
+
+**Serverless NEGs** are especially useful — they allow you to place a Global External HTTP(S) Load Balancer in front of Cloud Run or Cloud Functions, gaining URL routing, Cloud Armor, and Cloud CDN without any Compute Engine infrastructure. The load balancer terminates SSL, evaluates security policies, and routes to the appropriate serverless backend.
+
+**Zonal NEGs with container-native load balancing** (also called direct-path or pod-native) route traffic directly to individual GKE pods rather than to node-level `NodePort` services. This eliminates a level of indirection and reduces latency, and allows health checks to probe individual pods rather than nodes.
+
+---
+
+## Network Tier Consideration
+
+GCP offers two network tiers that affect how traffic routes to your load balancer:
+
+**Premium Tier** — traffic enters Google's network at the nearest edge POP and traverses Google's private global backbone to the region hosting your backends. This provides the lowest latency and the best reliability. Required for global load balancers.
+
+**Standard Tier** — traffic uses the public internet from the user to a Google POP in the same region as your backends. Lower cost but higher and more variable latency. Only supports regional load balancers.
+
+For latency-sensitive global applications, Premium Tier with the Global External HTTP(S) Load Balancer is the standard choice. For cost-sensitive regional applications where users are geographically close to the backend region, Standard Tier with a Regional External HTTP(S) Load Balancer is a reasonable trade-off.
+
+---
+
+## References
+
+- [Google Cloud — Load Balancing Overview](https://cloud.google.com/load-balancing/docs/load-balancing-overview)
+- [Google Cloud — Cloud CDN Overview](https://cloud.google.com/cdn/docs/overview)
+- [Google Cloud — Network Endpoint Groups](https://cloud.google.com/load-balancing/docs/negs)
+- [Google Cloud — Choosing a Load Balancer](https://cloud.google.com/load-balancing/docs/choosing-load-balancer)
+- [Google Cloud — Signed URLs](https://cloud.google.com/cdn/docs/using-signed-urls)

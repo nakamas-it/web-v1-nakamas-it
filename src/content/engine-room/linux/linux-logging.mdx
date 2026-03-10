@@ -1,0 +1,258 @@
+---
+title: "Linux — Logging & Journal"
+category: "linux"
+topic: "logging"
+summary: "systemd-journald and rsyslog on RHEL 9 — journal persistence, journalctl filtering, log facilities, priorities, and /var/log structure."
+tags: ["linux", "rhel", "journald", "rsyslog", "logging", "systemd"]
+order: 10
+draft: false
+---
+
+## Overview
+
+A Linux system generates a continuous stream of events: the kernel reporting hardware conditions, services recording their startup and shutdown sequences, authentication systems noting every login attempt, scheduled jobs completing or failing. Capturing and retaining these events is not optional — without accurate logs, diagnosing a crash or detecting a security breach is guesswork.
+
+RHEL 9 uses a **dual logging architecture** where two systems operate simultaneously and complement each other:
+
+1. **systemd-journald** — collects all log events from the kernel, from every systemd-managed service's standard output and error streams, and from any application using the `syslog()` API. It stores this data in a structured binary format in `/run/log/journal/` (volatile, cleared at each boot) or `/var/log/journal/` (persistent across reboots if configured).
+
+2. **rsyslog** — reads events from journald and writes them to the traditional plain-text log files in `/var/log/` that administrators have relied on for decades. These files are compatible with standard text tools (`grep`, `awk`, `less`, `tail -f`).
+
+Both systems are active simultaneously. Journald provides fast, rich, indexed querying through `journalctl`. rsyslog provides compatibility and long-term file-based archival.
+
+---
+
+## The Logging Architecture in Practice
+
+When a service such as `sshd` logs a message, the path is:
+
+1. `sshd` calls `syslog()` or writes to its standard output or error stream
+2. `systemd-journald` captures the message — from service stdout/stderr via the service manager, or via the `/run/systemd/journal/socket` socket
+3. `journald` stores the message in its binary journal with rich metadata: timestamp (microsecond precision), PID, UID, GID, service unit name, SELinux context, and message priority
+4. `journald` forwards the message to rsyslog via `/run/systemd/journal/syslog`
+5. `rsyslog` applies its facility/priority rules and routes matching messages to the appropriate `/var/log/` files
+
+The same event is available in two forms: the structured journal entry (queryable with `journalctl`) and the rsyslog text file entry (readable with any text tool). Neither system replaces the other; they serve different purposes.
+
+---
+
+## syslog Facilities
+
+Every log message carries a **facility** code that identifies the source or category of the message. rsyslog uses this code to route messages to different files.
+
+| Number | Keyword | Source |
+|---|---|---|
+| 0 | `kern` | Kernel messages |
+| 1 | `user` | User-level messages |
+| 2 | `mail` | Mail system (postfix, sendmail) |
+| 3 | `daemon` | System daemons |
+| 4 | `auth` | Security and authentication messages |
+| 5 | `syslog` | Messages generated internally by syslogd |
+| 6 | `lpr` | Printer subsystem |
+| 9 | `cron` | Clock daemon (cron, at) |
+| 10 | `authpriv` | Private security/authentication messages |
+| 11 | `ftp` | FTP daemon |
+| 16–23 | `local0`–`local7` | Reserved for local administrative use |
+
+The `local0` through `local7` facilities are particularly useful for custom applications, scripts, and network devices that send syslog messages to a central RHEL log server.
+
+---
+
+## syslog Priorities (Severity Levels)
+
+Every log message also carries a **priority** (severity) code. In rsyslog rules, specifying a priority matches that level **and all more severe levels** — so `daemon.warning` captures warning, error, critical, alert, and emergency messages from system daemons.
+
+| Number | Keyword | Meaning |
+|---|---|---|
+| 0 | `emerg` | System is unusable |
+| 1 | `alert` | Action must be taken immediately |
+| 2 | `crit` | Critical conditions |
+| 3 | `err` | Error conditions |
+| 4 | `warning` | Warning conditions |
+| 5 | `notice` | Normal but significant event |
+| 6 | `info` | Informational messages |
+| 7 | `debug` | Debug-level messages (most verbose) |
+
+Higher numbers mean lower severity. `emerg` (0) is the most severe; `debug` (7) is the least. The wildcard `*` matches all facilities or all priorities.
+
+---
+
+## rsyslog Configuration and /var/log Structure
+
+The main rsyslog configuration file is `/etc/rsyslog.conf`. Drop-in files in `/etc/rsyslog.d/*.conf` are loaded automatically. Rule format:
+
+```
+facility.priority    /path/to/destination
+```
+
+The default RHEL 9 routing rules produce these standard log files:
+
+| File | Contents |
+|---|---|
+| `/var/log/messages` | General system messages — most daemon and kernel info/above messages |
+| `/var/log/secure` | All authentication events: SSH logins, sudo, su, PAM, useradd |
+| `/var/log/maillog` | Mail server activity |
+| `/var/log/cron` | Cron job execution records |
+| `/var/log/boot.log` | Service startup messages from the boot sequence |
+| `/var/log/dmesg` | Kernel ring buffer (hardware detection, driver messages) |
+| `/var/log/dnf.rpm.log` | DNF package installation and removal transactions |
+| `/var/log/audit/audit.log` | SELinux decisions and Linux Audit Framework events (written by `auditd`, not rsyslog) |
+
+Example rules from `/etc/rsyslog.conf`:
+
+```
+*.info;mail.none;authpriv.none;cron.none    /var/log/messages
+authpriv.*                                   /var/log/secure
+mail.*                                       -/var/log/maillog
+cron.*                                       /var/log/cron
+*.emerg                                      :omusrmsg:*
+```
+
+The semicolon separates the selector from the action. `mail.none` in the messages rule excludes all mail messages from `/var/log/messages` (they go to `/var/log/maillog` instead). The `-` prefix on `-/var/log/maillog` means asynchronous (buffered) writes — acceptable for mail logs where performance matters more than immediate durability.
+
+### Custom rsyslog Rules
+
+You can route any facility/priority combination to a custom file by creating a drop-in:
+
+```bash
+echo "*.debug /var/log/debug-all" > /etc/rsyslog.d/debug.conf
+systemctl restart rsyslog
+```
+
+Test with `logger`:
+
+```bash
+logger "Test message"                         # user.notice by default
+logger -p auth.warning "Suspicious login attempt"  # Specify facility.priority
+logger -t myapp -p daemon.info "Service started"   # Set tag and priority
+```
+
+---
+
+## journalctl — Querying the Journal
+
+`journalctl` is the interface to the systemd binary journal. Without arguments it shows all entries from the oldest available boot, piped through `less`.
+
+### Time Filtering
+
+```bash
+journalctl --since "2024-03-01"              # Entries since March 1
+journalctl --since "2024-03-01 08:00:00"     # Entries since a specific time
+journalctl --until "2024-03-01 12:00:00"     # Entries before a specific time
+journalctl --since "1 hour ago"              # Relative time
+journalctl --since today                     # Since midnight today
+journalctl --since yesterday                 # Since yesterday at midnight
+```
+
+### Priority and Unit Filtering
+
+```bash
+journalctl -p err                            # Error and above (err, crit, alert, emerg)
+journalctl -p warning..err                   # Priority range: warning to err
+journalctl -u sshd                           # Entries for the sshd unit
+journalctl -u sshd -u httpd                  # Multiple units (OR logic)
+journalctl -u sshd.service -p err            # Combined: sshd errors only
+```
+
+### Pagination and Output Control
+
+```bash
+journalctl -n 20                             # Last 20 entries
+journalctl -n 50 -u sshd                     # Last 50 entries from sshd
+journalctl -f                                # Follow live (equivalent to tail -f)
+journalctl -o verbose                        # Show all metadata fields per entry
+journalctl -o json-pretty                    # JSON output for programmatic processing
+journalctl --disk-usage                      # Show total journal disk usage
+```
+
+### Boot Filtering
+
+```bash
+journalctl -b                                # Current boot only
+journalctl -b -1                             # Previous boot (useful after a crash)
+journalctl -b -2                             # Two boots ago
+journalctl --list-boots                      # List all recorded boots with timestamps
+```
+
+### Field-Level Filtering
+
+The journal stores structured metadata fields alongside each message. You can filter by any field:
+
+```bash
+journalctl _PID=1234                         # Messages from process ID 1234
+journalctl _UID=1000                         # Messages from user with UID 1000
+journalctl _SYSTEMD_UNIT=sshd.service        # Alternative to -u
+journalctl SYSLOG_IDENTIFIER=sudo            # Messages tagged as sudo
+```
+
+Multiple filters on the same invocation are ANDed together: `journalctl -u sshd -p err --since yesterday` narrows to error-level sshd messages from the past 24 hours.
+
+---
+
+## Persistent Journal Storage
+
+By default, RHEL 9 makes the journal persistent if `/var/log/journal/` exists, and volatile (stored in RAM at `/run/log/journal/`) if it does not. The behaviour is controlled by `Storage=` in `/etc/systemd/journald.conf`:
+
+```ini
+[Journal]
+Storage=auto        # Persistent if /var/log/journal/ exists; volatile otherwise (default)
+Storage=persistent  # Always persist to disk; creates /var/log/journal/ if needed
+Storage=volatile    # Always store in RAM; never persist
+```
+
+To enable persistent storage:
+
+```bash
+mkdir -p /var/log/journal
+systemd-tmpfiles --create --prefix /var/log/journal
+systemctl restart systemd-journald
+```
+
+After this, `journalctl -b -1` shows the complete previous boot, making crash analysis much more practical.
+
+### Controlling Journal Size
+
+```ini
+[Journal]
+SystemMaxUse=1G          # Maximum total journal size on disk
+SystemKeepFree=512M      # Minimum free space to leave on the filesystem
+MaxRetentionSec=1month   # Automatically discard entries older than this
+```
+
+Vacuum operations can be run manually:
+
+```bash
+journalctl --vacuum-size=500M      # Shrink journal to at most 500 MB
+journalctl --vacuum-time=2weeks    # Remove entries older than 2 weeks
+```
+
+---
+
+## logrotate — Log File Rotation
+
+rsyslog writes to `/var/log/` files indefinitely. `logrotate` is the daemon that rotates, compresses, and eventually deletes old log files to prevent disks from filling up.
+
+Configuration is in `/etc/logrotate.conf` (global defaults) and `/etc/logrotate.d/` (per-service overrides). A typical rotation configuration:
+
+```
+/var/log/messages {
+    weekly          # Rotate weekly
+    rotate 4        # Keep 4 weeks of archived logs
+    compress        # Compress rotated files with gzip
+    delaycompress   # Compress the previous week's log, not the just-rotated one
+    missingok       # Don't error if the log file is absent
+    notifempty      # Don't rotate if the file is empty
+    sharedscripts   # Run postrotate script once, not per log
+    postrotate
+        /usr/bin/systemctl kill -s HUP rsyslog.service
+    endscript
+}
+```
+
+After rotation, the `postrotate` script sends SIGHUP to rsyslog so it closes and reopens its log file handles — otherwise rsyslog would keep writing to the renamed archive file.
+
+---
+
+## Summary
+
+RHEL 9 logging is built on two complementary systems. `systemd-journald` collects all events from the kernel, services, and syslog API into a structured binary journal queryable with `journalctl`. Use `-u` to filter by unit, `-p` to filter by severity, `--since`/`--until` for time ranges, and `-b` with negative offsets to query previous boots. Enable persistent storage by creating `/var/log/journal/` and restarting `systemd-journald`. `rsyslog` reads from the journal and routes messages by facility and priority to text files: `/var/log/messages` for general events, `/var/log/secure` for all authentication activity, `/var/log/cron` for scheduler records, and `/var/log/maillog` for mail. `logrotate` manages file rotation and compression to control disk usage over time.

@@ -1,0 +1,274 @@
+---
+title: "GCP — Compute Engine"
+category: "google"
+topic: "compute-engine"
+summary: "GCP's IaaS VM service — machine types, images, persistent disks, instance groups, preemptible/spot VMs, and metadata-driven startup scripts."
+tags: ["gcp", "google-cloud", "compute-engine", "virtual-machines", "instance-groups"]
+order: 3
+draft: false
+---
+
+## Overview
+
+Compute Engine is GCP's Infrastructure-as-a-Service (IaaS) offering — the service that gives you virtual machines (VMs) running on Google's global infrastructure. If you need full control over the operating system, custom software stacks, or workloads that cannot be containerised or run on a managed platform, Compute Engine is the right tool.
+
+Unlike higher-level services such as GKE or Cloud Run, Compute Engine puts you in charge of the VM lifecycle: you choose the machine type, operating system image, disk configuration, network interface, and startup behaviour. In return, you get flexibility that managed services cannot offer — custom kernel modules, software requiring direct hardware access, OS-licensed workloads, and applications with very specific resource ratios.
+
+---
+
+## Machine Types
+
+Machine types define the vCPU count and memory available to a VM. GCP organises machine types into families, each optimised for a different workload class.
+
+### Machine Type Families
+
+| Family | Prefix | Optimised For | Common Use Cases |
+|--------|--------|---------------|-----------------|
+| **General Purpose** | E2, N1, N2, N2D, T2D, T2A | Balanced CPU and memory | Web servers, application servers, dev environments |
+| **Compute Optimised** | C2, C2D | High CPU clock speed | CPU-intensive HPC, gaming, media transcoding |
+| **Memory Optimised** | M1, M2, M3 | High memory-to-CPU ratio | SAP HANA, in-memory databases, large analytics |
+| **Accelerator Optimised** | A2 (NVIDIA A100), G2 (NVIDIA L4) | GPU compute | ML training and inference, HPC with GPUs |
+
+The **N2** family is the most commonly recommended for general workloads in production — it offers better single-thread performance than N1 and supports a wide range of predefined types. **E2** VMs are lower cost and suitable for workloads with modest CPU requirements. **N1** is the original family and remains valid for workloads that need to use certain legacy features.
+
+### Machine Type Naming Convention
+
+Machine type names follow the pattern `{family}-{type}-{vCPUs}`:
+
+- `n2-standard-4` — N2 family, standard memory ratio (4 GB/vCPU), 4 vCPUs
+- `n2-highmem-8` — N2 family, high memory ratio (8 GB/vCPU), 8 vCPUs
+- `n2-highcpu-16` — N2 family, high CPU ratio (1 GB/vCPU), 16 vCPUs
+- `c2-standard-8` — Compute Optimised, 8 vCPUs
+- `m2-ultramem-208` — Memory Optimised, 208 vCPUs, ~6 TB RAM
+
+### Custom Machine Types
+
+When no predefined machine type fits your workload's resource ratio, custom machine types allow you to specify exact vCPU and memory values. This is particularly useful when a standard machine type is over-provisioned in one dimension (e.g., you need 6 vCPUs but the predefined N2 jumps from 4 to 8).
+
+Custom types are available for N1, N2, N2D, and E2 families. Pricing is calculated per vCPU and per GB of memory independently.
+
+```bash
+# Create a custom machine type VM: 6 vCPUs, 15 GB RAM
+gcloud compute instances create my-vm \
+  --machine-type=n2-custom-6-15360 \
+  --zone=us-central1-a
+```
+
+---
+
+## Images and Boot Disks
+
+Every Compute Engine VM boots from a boot disk, which is a persistent disk containing an operating system. The disk's initial content comes from an **image**.
+
+### Image Types
+
+| Type | Description |
+|------|-------------|
+| **Public images** | Provided and maintained by Google or third-party vendors; include major Linux distributions (Debian, Ubuntu, RHEL, SLES, CentOS Stream, Rocky Linux), Windows Server, and specialised images (Deep Learning VM, SQL Server) |
+| **Custom images** | Images you create from existing VMs, disks, or on-premises images. Used for golden image pipelines — pre-baked with required software and configuration |
+| **Machine images** | A complete snapshot of a VM instance including its boot disk, additional disks, and metadata. Used for VM backup and cloning |
+| **Shared images** | Custom images shared from an image project to other projects via IAM |
+
+**Image families** are logical groupings of images with the same base configuration. Referencing an image family always resolves to the latest non-deprecated image in that family:
+
+```bash
+# Create a VM using the latest Debian 12 image
+gcloud compute instances create my-vm \
+  --image-family=debian-12 \
+  --image-project=debian-cloud \
+  --zone=us-central1-a
+```
+
+---
+
+## Storage Options
+
+Compute Engine VMs can use several types of storage, each with different performance and cost characteristics.
+
+### Persistent Disks
+
+Persistent disks are the standard block storage for Compute Engine. They are network-attached, meaning they exist independently of the VM — you can detach a disk from one VM and attach it to another. This is the foundation of stateful VM workloads.
+
+| Disk Type | IOPS (per GB) | Use Case |
+|-----------|---------------|----------|
+| **Standard (pd-standard)** | 0.75 read / 1.5 write | Large, sequential I/O; cold data; backups |
+| **Balanced (pd-balanced)** | 6 read / 6 write | General purpose; best balance of cost and performance |
+| **SSD (pd-ssd)** | 30 read / 30 write | High-IOPS workloads; databases |
+| **Extreme (pd-extreme)** | Up to 120,000 IOPS (provisioned) | Ultra-high performance databases |
+
+Key characteristics of persistent disks:
+
+- Data is **replicated automatically** within the zone for durability
+- Disks can be **resized** online (in most cases) without VM downtime
+- Up to **127 additional disks** can be attached to a single VM
+- Can be attached in **read-only mode** to multiple VMs simultaneously (useful for shared data)
+
+### Local SSDs
+
+Local SSDs are physically attached to the host server. They offer significantly higher IOPS and lower latency than persistent disks but are **ephemeral** — data is lost when the VM is stopped or preempted. They are suitable for scratch space, temporary processing data, and workloads that manage their own replication (like distributed databases).
+
+Local SSD capacity is fixed at 375 GB per disk; a VM can attach up to 24 local SSDs (9 TB total).
+
+### Cloud Storage (via FUSE)
+
+Cloud Storage buckets can be mounted as a filesystem using the Cloud Storage FUSE adapter (`gcsfuse`). This allows VMs to read and write object storage as if it were a local directory. However, FUSE is not POSIX-compliant and has higher latency than block storage — it is suitable for data loading/unloading, not for transactional workloads.
+
+---
+
+## Managed Instance Groups (MIGs)
+
+A Managed Instance Group (MIG) is a set of identical VMs managed as a unit. All VMs in a MIG are created from the same **instance template**, which defines the machine type, boot image, network configuration, service account, and metadata. Instance templates are immutable — to change them, you create a new template and update the MIG.
+
+MIGs provide:
+
+### Autoscaling
+
+MIGs scale the number of VMs up and down based on load signals:
+
+- **CPU utilisation target** — add VMs when average CPU exceeds the target, remove when below
+- **Load balancer utilisation** — scale based on backend request rate or HTTP load
+- **Cloud Monitoring custom metrics** — scale on any metric (Pub/Sub queue depth, memory utilisation, custom app metrics)
+- **Scheduled scaling** — pre-scale before known traffic spikes
+
+```bash
+# Set autoscaling on a MIG
+gcloud compute instance-groups managed set-autoscaling my-mig \
+  --max-num-replicas=10 \
+  --min-num-replicas=2 \
+  --target-cpu-utilization=0.6 \
+  --zone=us-central1-a
+```
+
+### Health Checks and Autohealing
+
+MIGs continuously run health checks against instances. If an instance fails the health check for a configurable period, the MIG automatically replaces it with a new VM. This provides self-healing without operator intervention.
+
+### Managed vs Unmanaged Instance Groups
+
+| Feature | Managed Instance Group (MIG) | Unmanaged Instance Group |
+|---------|------------------------------|--------------------------|
+| VM configuration | Uniform (single instance template) | Heterogeneous (any VMs) |
+| Autoscaling | Yes | No |
+| Autohealing | Yes | No |
+| Rolling updates | Yes | No |
+| Use with load balancers | Yes (recommended) | Yes (limited) |
+| Typical use case | Scalable stateless services | Legacy grouping for LB only |
+
+### Regional vs Zonal MIGs
+
+- **Zonal MIGs** — all VMs in a single zone. Simpler, but a zone failure takes down the entire group.
+- **Regional MIGs** — VMs spread across multiple zones in a region. Provides HA at the zone level; recommended for production workloads.
+
+---
+
+## Preemptible and Spot VMs
+
+For fault-tolerant, batch, or interruptible workloads, GCP offers deeply discounted VM options.
+
+### Comparison
+
+| Feature | Preemptible VMs | Spot VMs |
+|---------|-----------------|----------|
+| Discount vs on-demand | Up to 80% | Up to 90% |
+| Maximum runtime | 24 hours | No maximum |
+| Preemption notice | 30 seconds (ACPI G2 shutdown) | 30 seconds |
+| Can be preempted by | GCP capacity needs | GCP capacity needs |
+| Availability | Variable | Variable |
+
+Spot VMs are the successor to Preemptible VMs. The 24-hour runtime limit of preemptible VMs does not apply to Spot VMs, making them more practical for long-running batch jobs. Both receive a 30-second ACPI shutdown signal before preemption — well-designed workloads checkpoint their state on receiving this signal.
+
+Spot and preemptible VMs are not suitable for databases, stateful applications, or any workload that cannot tolerate interruption. They are ideal for:
+
+- Batch data processing pipelines
+- Machine learning training jobs
+- Rendering workloads
+- CI/CD build agents
+
+---
+
+## Sole-Tenant Nodes
+
+Sole-tenant nodes are dedicated physical servers allocated exclusively to a single customer. All VMs on the node are yours — no other customers share the underlying hardware.
+
+Use cases:
+
+- **Software licensing tied to physical cores** — Oracle and some Windows Server licenses count cores on the physical host. Sole-tenant nodes ensure you only pay for the physical cores you use.
+- **Compliance isolation** — workloads that must not co-reside with other tenants on shared hardware.
+- **Predictable performance** — eliminates noisy-neighbour effects from other tenants' workloads.
+
+---
+
+## Metadata Server and Startup Scripts
+
+Every Compute Engine VM has access to a **metadata server** at `169.254.169.254`. This server provides:
+
+- VM identity and project information
+- The attached service account's access token (refreshed automatically)
+- Custom metadata values set on the VM or project
+- Startup and shutdown script contents
+
+**Startup scripts** are the standard mechanism for bootstrapping VM configuration. A startup script runs as root on first boot (and on every boot if configured). It can install packages, configure services, pull code from a repository, or register the VM with an orchestration system.
+
+```bash
+# Create a VM with an inline startup script
+gcloud compute instances create my-vm \
+  --machine-type=n2-standard-2 \
+  --zone=us-central1-a \
+  --metadata=startup-script='#!/bin/bash
+    apt-get update
+    apt-get install -y nginx
+    systemctl enable nginx
+    systemctl start nginx'
+```
+
+Scripts can also be stored in Cloud Storage and referenced by URL, keeping the instance template clean:
+
+```bash
+--metadata=startup-script-url=gs://my-bucket/bootstrap.sh
+```
+
+**Custom metadata** allows passing arbitrary key-value pairs to VMs at create time, which startup scripts can read from the metadata server:
+
+```bash
+# Read a custom metadata value from inside the VM
+curl -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/attributes/my-key
+```
+
+---
+
+## Live Migration and Maintenance Events
+
+Compute Engine performs maintenance (hardware repairs, security patches, hypervisor updates) via **live migration** — your VM is transparently moved to a different physical host without rebooting. This is one of Compute Engine's differentiating features compared to other cloud providers that rely on scheduled maintenance windows with reboots.
+
+Live migration is the default for most machine types. Exceptions include:
+
+- VMs with attached GPUs (cannot be live-migrated; they are terminated and restarted)
+- VMs with local SSDs (same limitation)
+- Preemptible/Spot VMs (terminated, not migrated)
+
+---
+
+## Cost Optimisation
+
+### Sustained Use Discounts (SUDs)
+
+If a VM runs for more than 25% of a billing month, GCP automatically applies a sustained use discount — no action required. The discount increases with usage up to 30% off the on-demand price for VMs running the full month.
+
+SUDs apply automatically to N1, N2, N2D, and M-series machine types.
+
+### Committed Use Discounts (CUDs)
+
+For predictable workloads, committing to 1-year or 3-year resource usage provides up to 57% discount on N2 and 70% on memory-optimised M3 machine types compared to on-demand. CUDs apply at the project level — you commit to a minimum resource level (vCPUs and memory), and any matching VM usage in that region is discounted automatically.
+
+### Rightsizing Recommendations
+
+The **GCP Recommender** analyses VM utilisation metrics from Cloud Monitoring and suggests rightsizing opportunities — VMs where the machine type is significantly over-provisioned for actual workload demands. These recommendations appear in the Cloud Console and can be retrieved via the Recommender API.
+
+```bash
+# List rightsizing recommendations for a project
+gcloud recommender recommendations list \
+  --project=my-project \
+  --location=us-central1-a \
+  --recommender=google.compute.instance.MachineTypeRecommender
+```

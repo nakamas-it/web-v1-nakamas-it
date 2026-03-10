@@ -1,0 +1,225 @@
+---
+title: "GCP — VPC Networking"
+category: "google"
+topic: "vpc"
+summary: "GCP Virtual Private Cloud — global VPC architecture, subnets, firewall rules, routes, shared VPC, and VPC peering."
+tags: ["gcp", "google-cloud", "vpc", "networking", "firewall-rules", "subnets", "shared-vpc"]
+order: 10
+draft: false
+---
+
+## Overview
+
+GCP's Virtual Private Cloud (VPC) is a software-defined network that provides the connectivity backbone for virtually all GCP resources. Understanding GCP VPC architecture is fundamental because almost every service decision — where to deploy VMs, how services communicate, how to isolate environments, how to connect to on-premises infrastructure — depends on how the VPC is configured.
+
+The most important concept to grasp immediately: **GCP VPCs are global resources**. A single VPC spans all GCP regions. Subnets are regional. This is architecturally different from AWS, where a VPC is confined to one region. In GCP, you can have one VPC with a subnet in `us-central1`, a subnet in `europe-west1`, and a subnet in `asia-east1`, and VMs in all three subnets communicate with each other over internal IPs across Google's global backbone — without VPNs, without Internet exposure.
+
+---
+
+## VPC Fundamentals
+
+### Auto Mode vs Custom Mode
+
+When you create a VPC, you choose between two modes that determine how subnets are provisioned. This choice is important and partially reversible.
+
+| Feature | Auto Mode | Custom Mode |
+|---------|-----------|-------------|
+| **Subnet creation** | One subnet per region created automatically using the `10.128.0.0/9` range | You define all subnets manually |
+| **IP ranges** | Pre-assigned by Google; no conflicts between auto-mode subnets | You control all ranges |
+| **Flexibility** | Limited — you cannot choose IP ranges for auto-created subnets | Full control |
+| **Recommendation** | Quick experimentation, learning, simple workloads | All production environments |
+| **Conversion** | Auto mode can be converted to custom (one-way — cannot revert) | Cannot be converted to auto mode |
+
+Auto mode is convenient for getting started quickly, but it has a significant limitation: because all auto-mode VPCs use the same `10.128.0.0/9` range divided by region, you cannot peer two auto-mode VPCs — their subnet ranges would overlap. Custom mode avoids this by giving you full control over IP address space planning.
+
+### Subnets
+
+A **subnet** (subnetwork) is a regional resource within a VPC. It defines a CIDR IP range from which VMs in that region-zone combination receive their internal IP addresses.
+
+Key properties of a subnet:
+- **Primary IP range**: The main CIDR block; VMs receive an IP from this range
+- **Secondary IP ranges**: Additional CIDR blocks associated with the subnet; used for GKE Pod and Service IP addresses, or alias IPs on VMs
+- **Private Google Access**: When enabled, VMs without external IPs can reach Google APIs and services (storage.googleapis.com, bigquery.googleapis.com, etc.) via internal routing on Google's network
+- **Region**: A subnet exists in exactly one region; it spans all zones within that region
+
+Subnets can be expanded (the CIDR prefix can be shortened to encompass a larger range) but cannot be shrunk. Plan IP ranges deliberately — a `/24` giving 254 usable addresses will become a bottleneck on a large GKE cluster.
+
+### The Default VPC
+
+Every new GCP project gets a **default VPC** created automatically — an auto-mode VPC with a subnet in every region and permissive default firewall rules (allow SSH, allow RDP, allow internal traffic, allow ICMP). This is intended for quick experimentation.
+
+For production workloads, delete the default VPC and create custom-mode VPCs with deliberately planned IP ranges and restrictive firewall rules. The `constraints/compute.skipDefaultNetworkCreation` organization policy constraint prevents the default VPC from being created in new projects automatically.
+
+---
+
+## Firewall Rules
+
+GCP firewall rules are applied at the **VM instance level**, not at the subnet level. This distinction matters: a firewall rule targeting a tag or service account affects only the matching VMs, regardless of which subnet they are in. VMs in the same subnet can have entirely different firewall rules applied.
+
+### Rule Components
+
+Every firewall rule consists of:
+
+| Component | Description |
+|-----------|-------------|
+| **Direction** | Ingress (inbound to VMs) or Egress (outbound from VMs) |
+| **Priority** | 0 (highest) to 65535 (lowest); lower number wins when multiple rules match |
+| **Action** | Allow or Deny |
+| **Target** | Which VMs the rule applies to: all instances, instances with a specific network tag, instances running a specific service account |
+| **Source/Destination** | IP ranges, tags (ingress only: source tags identify source VMs in same network), or service accounts |
+| **Protocol/Port** | TCP, UDP, ICMP, all; specific ports or ranges |
+
+### Network Tags
+
+**Network tags** are simple string labels applied to Compute Engine VMs. Firewall rules can target VMs by tag or reference source VMs by tag. Tags are arbitrary strings — `web-server`, `db-tier`, `allow-ssh` — and a VM can have multiple tags.
+
+Example: a firewall rule with target tag `db-tier` and source tag `web-tier` allows only VMs tagged `web-tier` to initiate connections to VMs tagged `db-tier`. Attackers who compromise an unrelated VM without the `web-tier` tag cannot reach the database tier even if they are in the same VPC.
+
+### Implied Rules
+
+Every VPC has two implied firewall rules that cannot be deleted but can be overridden by a rule with higher priority:
+
+- **Implied allow all egress** at priority 65535: VMs can initiate connections to any destination by default
+- **Implied deny all ingress** at priority 65535: No inbound connections are allowed by default unless explicitly permitted
+
+This means: by default, VMs can talk outbound to anything, but nothing can connect inbound to them without an explicit allow rule. This is a reasonable baseline that you refine by adding specific ingress allow rules and, if needed, egress deny rules for data exfiltration protection.
+
+### Stateful Rules
+
+GCP firewall rules are **stateful**: if an outbound TCP connection is allowed (by the egress rules on the source VM), the response traffic is automatically permitted inbound — you do not need a separate ingress rule to allow the response. This mirrors how most firewalls and security groups work and avoids the need to manage both directions of established connections.
+
+---
+
+## Routes
+
+Routes determine where packets from VMs are sent. GCP creates **system-generated routes** automatically:
+
+- **Default route** (`0.0.0.0/0`): Sends traffic not matching any more-specific route to the internet via the VPC's default internet gateway. This route exists in every VPC by default; deleting it prevents VMs from reaching the internet.
+- **Subnet routes**: For each subnet, a route is created that directs traffic destined for that subnet's IP range to the subnet itself (local delivery). These are auto-maintained by GCP.
+
+### Custom Static Routes
+
+Custom routes direct traffic to specific destinations via a specified next hop:
+- **Next hop instance**: Route traffic to a specific VM (typically acting as a network appliance or NAT gateway)
+- **Next hop IP address**: Route traffic to a specific internal IP
+- **Next hop VPN tunnel**: Route traffic to an on-premises network via a VPN tunnel
+- **Next hop Interconnect attachment**: Route traffic to a VLAN attachment for Cloud Interconnect
+
+Custom static routes are used for:
+- Directing all internet traffic through a centralized firewall or NAT appliance VM
+- Routing on-premises prefixes via VPN or Interconnect
+- Black-holing specific IP ranges (route to a `null0`-equivalent next hop)
+
+### Dynamic Routes via Cloud Router
+
+Cloud Router enables **BGP (Border Gateway Protocol)** dynamic routing between a GCP VPC and external networks (on-premises routers, partner networks). Cloud Router learns routes from the peer via BGP and propagates them as dynamic routes in the VPC — eliminating the need to manually maintain static routes as on-premises prefixes change.
+
+Cloud Router is required for:
+- HA VPN (Cloud VPN with 99.99% SLA)
+- Cloud Interconnect (Dedicated and Partner)
+
+---
+
+## Private Google Access
+
+**Private Google Access** is a subnet-level setting that allows VMs in that subnet **without external IP addresses** to reach Google APIs and services using internal routing across Google's network. Without Private Google Access, VMs without external IPs cannot reach `storage.googleapis.com`, `bigquery.googleapis.com`, or any other Google API — they have no internet path.
+
+With Private Google Access enabled:
+- A VM with only an internal IP can upload to Cloud Storage, publish to Pub/Sub, write to BigQuery, authenticate via IAM — all without a public IP
+- Traffic to Google APIs routes internally through `199.36.153.8/30` (restricted.googleapis.com) or `199.36.153.4/30` (private.googleapis.com), never touching the internet
+
+This is the standard architecture for VMs in secure environments: no external IPs, Private Google Access enabled, Cloud SQL Auth Proxy or service account credentials for database access.
+
+---
+
+## Shared VPC
+
+Shared VPC enables **centralised network administration** across multiple GCP projects within the same organisation.
+
+### How It Works
+
+One project is designated the **host project**. Its VPC (the Shared VPC) is shared out to one or more **service projects**. VMs in service projects can be created in the host project's subnets — they receive IP addresses from those subnets and participate in the host project's firewall rules and routing.
+
+```
+Organisation
+├── Host Project (network team owns this)
+│   └── Shared VPC
+│       ├── Subnet: 10.10.1.0/24 (us-central1) — shared to Project A and Project B
+│       └── Subnet: 10.10.2.0/24 (europe-west1) — shared to Project C only
+├── Service Project A (team A deploys their VMs here)
+├── Service Project B (team B deploys their VMs here)
+└── Service Project C (team C deploys their VMs here)
+```
+
+### Why Use It
+
+Shared VPC enforces separation of concerns between **network administration** and **resource administration**:
+- The network team manages the VPC in the host project — firewall rules, subnets, routes, Interconnect/VPN
+- Application teams manage their own compute resources in service projects — VMs, GKE clusters, Cloud SQL instances
+- Application teams cannot create VPCs or modify firewall rules; they use the network that the host project provides
+
+This is the standard architecture for enterprise GCP deployments where centralised network security and IP address management are required.
+
+### Shared VPC Permissions
+
+To attach a service project to a host project, the network team grants the `roles/compute.xpnAdmin` role to the Shared VPC admin. Application team members need `roles/compute.networkUser` on the specific subnets they are allowed to deploy VMs into.
+
+---
+
+## VPC Peering
+
+VPC Peering connects two VPCs so their VMs can communicate using internal IP addresses. The two VPCs can be in the same organisation or in different organisations — VPC peering is not restricted to within a single org.
+
+### Key Properties
+
+- **Non-transitive**: If VPC A peers with VPC B, and VPC B peers with VPC C, VMs in A cannot reach VMs in C through B. Each peering relationship is independent. To enable hub-and-spoke communication where spokes need to talk to each other, use Shared VPC or Network Connectivity Center.
+- **Bidirectional setup**: Both sides must independently create the peering connection. You cannot peer a VPC with another VPC without the other VPC's owner accepting.
+- **No IP range overlap**: Peered VPCs must not have overlapping IP ranges. This is the most common reason peering fails in practice.
+- **No encryption overhead**: Traffic between peered VPCs travels on Google's internal network using internal IPs; it is not encrypted by VPC Peering itself (though it is physically protected as all Google internal traffic is)
+
+### Shared VPC vs VPC Peering — Decision Guide
+
+| Consideration | Shared VPC | VPC Peering |
+|---------------|------------|-------------|
+| **Network admin centralization** | Yes — one VPC, one firewall policy | No — each VPC manages its own firewall |
+| **Cross-org connectivity** | No — same org only | Yes — different orgs supported |
+| **Transitivity** | N/A (all projects share one VPC) | Non-transitive |
+| **IP address management** | Centralised in host project | Each VPC manages its own |
+| **Best for** | Enterprise intra-org network management | Connecting partner/vendor VPCs; multi-org connectivity |
+
+---
+
+## Alias IP Addresses
+
+A single VM network interface can be assigned **multiple IP addresses** via Alias IP ranges. Unlike additional network interfaces, alias IPs all live on the same interface (`nic0`) and the same subnet.
+
+Use cases:
+- Running multiple services on one VM, each listening on a distinct IP
+- Assigning a range of IPs to a VM so it can assign them to containers or local processes
+- GKE uses alias IP ranges to assign Pod IPs from a subnet's secondary range — each node gets a `/24` (or similar) alias range, and Pods on that node get IPs from that range
+
+---
+
+## DNS in VPC
+
+### Internal DNS
+
+Every VM in GCP gets an internal DNS name automatically: `[instance-name].[zone].c.[project-id].internal`. This name resolves within the VPC to the VM's internal IP address. Services on the same network can reach VMs by their internal DNS name without knowing the IP address.
+
+### Cloud DNS Private Zones
+
+For custom internal domain names — `database.internal`, `auth-service.prod.example.com` — you create **Cloud DNS private zones**. A private zone is authoritative for a domain and resolves only within specified VPCs; it is not visible from the internet.
+
+Private zones support:
+- **DNS peering**: Share a private zone's records with a peered VPC, so VMs in the peered VPC can resolve names in that zone
+- **Inbound forwarding**: Forward DNS queries from on-premises DNS servers to Cloud DNS, resolving GCP internal names from on-premises
+- **Outbound forwarding**: Forward queries for specific domains (e.g., `corp.example.com`) from GCP to on-premises DNS servers
+
+### Inbound and Outbound Forwarding for Hybrid DNS
+
+A common hybrid DNS architecture:
+1. On-premises DNS server is configured to forward `*.gcp.example.com` queries to Cloud DNS inbound forwarder IP (`35.199.192.0/19` range)
+2. Cloud DNS private zone is created for `gcp.example.com` with A records for GCP resources
+3. Cloud DNS outbound forwarding policy forwards `*.corp.example.com` queries from GCP VMs to the on-premises DNS server
+
+Result: on-premises machines resolve GCP names; GCP VMs resolve on-premises names. Both networks share a coherent internal DNS namespace without merging their DNS infrastructure.

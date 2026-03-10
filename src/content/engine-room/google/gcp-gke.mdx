@@ -1,0 +1,281 @@
+---
+title: "GCP — Google Kubernetes Engine"
+category: "google"
+topic: "gke"
+summary: "Managed Kubernetes on GCP — standard vs Autopilot modes, node pools, workload identity, GKE networking, and cluster maintenance."
+tags: ["gcp", "google-cloud", "gke", "kubernetes", "containers", "autopilot"]
+order: 4
+draft: false
+---
+
+## Overview
+
+Google Kubernetes Engine (GKE) is a fully managed Kubernetes service on GCP. Google created Kubernetes internally as Borg and open-sourced it in 2014, so GKE runs the same orchestration system that underpins a significant portion of Google's own production infrastructure. As the original authors, Google's implementation is tightly integrated with the broader GCP platform — IAM, Cloud Monitoring, Cloud Logging, Cloud Load Balancing, and Artifact Registry all have native GKE integrations.
+
+Kubernetes itself is an open-source container orchestration system. It manages the deployment, scaling, and operation of containerised workloads across a cluster of machines. GKE takes the operational burden of running a Kubernetes control plane off your hands and integrates deeply with GCP's networking, storage, and security primitives.
+
+---
+
+## GKE vs Self-Managed Kubernetes
+
+Running Kubernetes yourself (on Compute Engine VMs, for example) gives you full control but requires managing:
+
+- etcd cluster health and backups
+- Control plane upgrades (kube-apiserver, kube-controller-manager, kube-scheduler)
+- Node OS patching
+- Certificate rotation
+- High availability of the control plane across zones
+- Integration with cloud provider networking and storage
+
+GKE handles all of this automatically. The GKE control plane is Google-managed, Google-operated, and covered by a 99.95% (zonal) or 99.99% (regional) uptime SLA. You focus on workloads; Google manages the Kubernetes machinery.
+
+---
+
+## Cluster Modes: Standard vs Autopilot
+
+GKE offers two cluster modes with fundamentally different operational models.
+
+### Standard Mode
+
+In Standard mode, you manage node pools — groups of Compute Engine VMs that form the cluster's worker nodes. You choose the machine type, OS image, disk size, and autoscaling settings for each node pool. You pay per node (per VM), regardless of how much of each VM's capacity your pods actually use.
+
+Standard mode is appropriate when:
+
+- You need privileged containers or DaemonSets that require host-level access
+- You have specific GPU or TPU node requirements
+- Your workloads have specialised node configuration requirements
+- You need fine-grained control over node pool configuration for cost or performance reasons
+
+### Autopilot Mode
+
+In Autopilot mode, Google manages the nodes entirely. You do not see or manage node pools. You declare pod resource requests and GKE provisions the right amount of compute automatically. You pay per pod resource request (CPU and memory), not per node.
+
+| Feature | Standard Mode | Autopilot Mode |
+|---------|--------------|----------------|
+| Node management | You manage node pools | Google manages nodes |
+| Billing unit | Per node (VM) | Per pod resource request |
+| Privileged containers | Allowed | Not allowed |
+| DaemonSets | Allowed | Restricted |
+| Custom node images | Allowed | Not available |
+| Cluster Autoscaler | Optional | Always enabled |
+| Cost for idle capacity | You pay for empty nodes | No charge for unscheduled capacity |
+| Use case | Complex or custom workloads | Simpler deployments, predictable billing |
+
+Autopilot is excellent for teams that want to focus on application code without platform engineering overhead. It removes the need to right-size node pools, manage node pool upgrades, or worry about bin-packing efficiency.
+
+---
+
+## Zonal vs Regional Clusters
+
+### Zonal Clusters
+
+A zonal cluster has its control plane in a single zone. Worker nodes can be spread across multiple zones if you configure multi-zone node pools, but the control plane itself is a single point of failure. If the zone hosting the control plane has an outage, the Kubernetes API becomes unavailable — existing workloads may continue running (kubelet operates independently) but you cannot deploy, scale, or make configuration changes.
+
+Zonal clusters have a 99.95% uptime SLA for the control plane.
+
+### Regional Clusters
+
+A regional cluster replicates the control plane across three zones within the selected region. All three replicas serve API traffic simultaneously; if any zone fails, the remaining two control plane replicas continue operating. Worker nodes are also spread across three zones by default.
+
+Regional clusters have a 99.99% uptime SLA. They are the correct choice for any production workload where cluster availability matters.
+
+```bash
+# Create a regional GKE cluster
+gcloud container clusters create my-cluster \
+  --region=us-central1 \
+  --num-nodes=2 \
+  --machine-type=n2-standard-4 \
+  --release-channel=regular
+```
+
+---
+
+## Node Pools
+
+A node pool is a group of nodes within a cluster that all share the same configuration (machine type, OS, disk, labels, and taints). A cluster can have multiple node pools with different configurations, allowing mixed workloads on the same cluster.
+
+Common multi-pool patterns:
+
+- **Default pool** — general-purpose N2 nodes for most workloads
+- **GPU pool** — A2 or G2 nodes for ML inference or training jobs (created on demand)
+- **High-memory pool** — M-series nodes for memory-intensive analytics workloads
+- **Spot pool** — Spot VMs for fault-tolerant batch workloads at reduced cost
+
+Nodes are tainted and pods use node selectors or tolerations to target specific pools:
+
+```yaml
+# Pod spec targeting the GPU node pool
+spec:
+  nodeSelector:
+    cloud.google.com/gke-nodepool: gpu-pool
+  tolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
+```
+
+### Node Auto-Provisioning
+
+Node Auto-Provisioning (NAP) is an extension of the Cluster Autoscaler that automatically creates and deletes node pools as needed. Instead of pre-configuring all possible node pools, NAP creates a pool with the right machine type when a pod cannot be scheduled anywhere else. When pods are no longer running on auto-provisioned nodes, NAP removes those nodes and eventually the pool.
+
+---
+
+## Key Kubernetes Objects
+
+Understanding core Kubernetes objects is prerequisite to working with GKE effectively.
+
+| Object | Purpose |
+|--------|---------|
+| **Pod** | Smallest deployable unit; one or more containers sharing a network namespace and storage |
+| **Deployment** | Manages a ReplicaSet; enables declarative rolling updates and rollbacks |
+| **StatefulSet** | For stateful applications; provides stable network identity and ordered pod management |
+| **DaemonSet** | Ensures one pod runs on every (or selected) node; used for log collectors, monitoring agents |
+| **Service** | Stable network endpoint for a set of pods; types: ClusterIP, NodePort, LoadBalancer |
+| **Ingress** | HTTP(S) routing rules; routes traffic to Services based on host and path |
+| **PersistentVolumeClaim (PVC)** | Request for persistent storage; GKE maps this to a GCP persistent disk |
+| **ConfigMap / Secret** | Inject configuration and sensitive data into pods without embedding in images |
+| **HorizontalPodAutoscaler** | Scales pod replica count based on CPU, memory, or custom metrics |
+
+---
+
+## Workload Identity
+
+Workload Identity is the recommended way for GKE pods to authenticate to GCP APIs. Without it, pods would need either a service account key file (a security risk) or be given the node's service account permissions (too broad — all pods on the node share the same identity).
+
+Workload Identity maps a **Kubernetes Service Account (KSA)** to a **GCP Service Account (GSA)**. Pods annotated with the KSA receive tokens that GCP accepts as proof of the GSA's identity, allowing fine-grained per-workload permissions with no key management.
+
+### Setup Steps
+
+1. Enable Workload Identity on the cluster
+2. Create a Kubernetes Service Account
+3. Create a GCP Service Account with required IAM roles
+4. Bind the KSA to the GSA
+5. Annotate the KSA with the GSA email
+
+```bash
+# Enable Workload Identity on cluster creation
+gcloud container clusters create my-cluster \
+  --workload-pool=my-project.svc.id.goog
+
+# Create GCP Service Account
+gcloud iam service-accounts create my-workload-sa
+
+# Grant the GCP SA permissions (e.g., Cloud Storage access)
+gcloud projects add-iam-policy-binding my-project \
+  --member="serviceAccount:my-workload-sa@my-project.iam.gserviceaccount.com" \
+  --role="roles/storage.objectViewer"
+
+# Bind the KSA to the GSA
+gcloud iam service-accounts add-iam-policy-binding my-workload-sa@my-project.iam.gserviceaccount.com \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="serviceAccount:my-project.svc.id.goog[my-namespace/my-ksa]"
+
+# Annotate the Kubernetes Service Account
+kubectl annotate serviceaccount my-ksa \
+  iam.gke.io/gcp-service-account=my-workload-sa@my-project.iam.gserviceaccount.com
+```
+
+---
+
+## GKE Networking
+
+### VPC-Native Clusters
+
+GKE clusters should be created as VPC-native clusters (the default for new clusters). In VPC-native mode, pods receive IP addresses from a secondary IP range on the cluster's subnet — alias IPs. This means pods are first-class citizens in the VPC network, reachable directly from on-premises or other VPCs via VPN/Interconnect/VPC Peering without network address translation.
+
+In contrast, routes-based (legacy) clusters use custom routes, which do not scale as well and are less compatible with VPC features like Shared VPC and VPC Service Controls.
+
+### Cluster IP Ranges
+
+Three separate CIDR ranges are required for a GKE cluster:
+
+1. **Node IP range** — the primary subnet range; one IP per node
+2. **Pod IP range (alias IP secondary range)** — typically /14 or larger; 256 IPs per node by default (configurable with `--max-pods-per-node`)
+3. **Service IP range (cluster services secondary range)** — for ClusterIP services within the cluster
+
+Plan these ranges carefully before cluster creation — they cannot be changed after the fact on most configurations.
+
+### Load Balancing in GKE
+
+When you create a Kubernetes Service of type `LoadBalancer`, GKE automatically provisions a GCP External Network Load Balancer (pass-through, regional) and assigns it a static IP. This is suitable for TCP/UDP services.
+
+For HTTP(S) workloads, the GKE Ingress controller provisions a GCP Global External HTTP(S) Load Balancer. An Ingress resource in Kubernetes translates to a URL map, backend services, and health checks in GCP — all managed automatically.
+
+```yaml
+# Example Ingress routing two services on different paths
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-ingress
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+spec:
+  rules:
+  - host: app.example.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 80
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-service
+            port:
+              number: 80
+```
+
+### Private Clusters
+
+In a Private GKE cluster, nodes have only private (RFC 1918) IP addresses — no public IPs. The cluster's control plane endpoint can also be made private (reachable only within the VPC or via Authorised Networks). Private clusters are the recommended configuration for production workloads that should not be directly reachable from the internet.
+
+---
+
+## Cluster Autoscaler
+
+The GKE Cluster Autoscaler (CA) automatically adjusts the number of nodes in a node pool based on scheduling demand. When pods cannot be scheduled due to insufficient resources, the CA adds nodes. When nodes are underutilised and their pods can be rescheduled elsewhere, the CA removes nodes.
+
+Cluster Autoscaler works at the node pool level. It respects:
+
+- Minimum and maximum node counts per pool
+- Pod Disruption Budgets (PDBs) — it will not drain a node if doing so would violate a PDB
+- Node labels and taints — it will only add nodes from pools that can actually schedule the pending pods
+
+---
+
+## Security Features
+
+### Binary Authorization
+
+Binary Authorization enforces a policy that only cryptographically signed container images can be deployed to GKE. Signing happens as part of the CI/CD pipeline (e.g., Cloud Build signs images after passing tests and vulnerability scanning). At deploy time, GKE's admission controller verifies the signature against the policy — unsigned or untrusted images are rejected.
+
+### GKE Sandbox (gVisor)
+
+GKE Sandbox adds an additional security layer around containers using gVisor, a Google-developed container sandbox. gVisor intercepts container system calls in a user-space kernel, isolating containers from the underlying node's kernel. It is useful for running untrusted or multi-tenant workloads where a container escape through a kernel vulnerability is a concern. Sandboxed pods have slightly higher overhead than standard containers.
+
+### Shielded GKE Nodes
+
+Shielded GKE Nodes use the same protections as Shielded VMs: Secure Boot, virtual TPM, and Integrity Monitoring. They prevent node images from being tampered with between provisioning and first boot, protecting against supply-chain attacks targeting the node OS.
+
+---
+
+## Cluster Maintenance Windows and Exclusions
+
+GKE automatically upgrades both the control plane and nodes to stay within a supported Kubernetes version range. Maintenance windows let you control when GKE performs these upgrades — for example, restricting upgrades to overnight hours or weekends.
+
+Maintenance exclusions allow you to prevent any upgrades during specific periods (e.g., freeze periods around major product launches or end-of-year trading).
+
+Release channels (Rapid, Regular, Stable) determine how quickly a cluster receives new Kubernetes versions. Most production clusters use the Regular channel; the Stable channel receives versions that have been validated for several months.
+
+```bash
+# Set a maintenance window and exclusion
+gcloud container clusters update my-cluster \
+  --maintenance-window-start=2026-01-01T02:00:00Z \
+  --maintenance-window-end=2026-01-01T06:00:00Z \
+  --maintenance-window-recurrence="FREQ=WEEKLY;BYDAY=SA,SU"
+```

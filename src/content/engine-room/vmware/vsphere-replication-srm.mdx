@@ -1,0 +1,89 @@
+---
+title: "vSphere Replication and Site Recovery Manager — Disaster Recovery"
+category: "vmware"
+topic: "vsphere-replication"
+summary: "How vSphere Replication asynchronously replicates virtual machine disks to a secondary site at configurable RPOs — and how Site Recovery Manager orchestrates the entire DR process from automated failover and recovery plan execution to non-disruptive testing and failback."
+tags: ["vmware", "vsphere-replication", "srm", "disaster-recovery", "vcpdcv"]
+order: 19
+draft: false
+---
+
+## Overview
+
+Disaster recovery for virtualised workloads involves two related but distinct problems. The first is data movement: ensuring that a recent copy of each protected VM's disk data exists at a recovery site, close enough in time to meet the recovery point objective (RPO) defined for that workload. The second is orchestration: ensuring that when a disaster occurs, the right VMs come online at the recovery site in the right order, with the right network configuration, without requiring an administrator to manually work through a checklist under pressure.
+
+VMware addresses both problems with two complementary products. **vSphere Replication** solves the data movement problem — it continuously replicates virtual disk changes from the protected site to the recovery site at a configurable RPO. **Site Recovery Manager (SRM)** solves the orchestration problem — it automates the failover workflow, enforces VM startup ordering, handles IP address remapping, provides a safe non-disruptive test mode, and produces audit-ready reports. vSphere Replication provides the data; SRM provides the plan.
+
+## vSphere Replication
+
+vSphere Replication is a hypervisor-level asynchronous replication product. It operates by tracking changes to a VM's virtual disk files on the source host and shipping those changes to the target site at configured intervals. Because replication is handled by the hypervisor rather than the storage array, the source and target datastores can be entirely different types — a VM replicated from a Fibre Channel SAN at the primary site can land on NFS storage at the recovery site. This storage agnosticism is one of the primary advantages over array-based replication, which requires identical storage hardware at both sites.
+
+### vSphere Replication Appliance
+
+vSphere Replication is not built into vCenter as a feature — it is deployed as a dedicated virtual appliance, the **vSphere Replication Appliance (VRA)**. One appliance must be deployed at each site: the source site and the target site. Each appliance is registered with the vCenter Server at its respective site. The VRA at the source site manages and schedules replication; the VRA at the target site receives the incoming disk data and writes it to the target datastore.
+
+### RPO Configuration
+
+The RPO is configured per virtual machine. The minimum supported RPO is **five minutes**; the maximum is 24 hours. Setting a five-minute RPO means that in the worst case, a disaster would result in losing up to five minutes of data changes. Lower RPOs consume more network bandwidth because changes must be shipped more frequently.
+
+Each VM's replication configuration specifies:
+
+- **Target site**: The VRA at the recovery site that will receive the data.
+- **Target datastore**: Where the replicated disk files will be stored.
+- **RPO**: The maximum acceptable data loss interval for this VM.
+- **Multiple-point-in-time (MPIT) recovery**: An optional setting that retains multiple recovery points — up to 24 snapshots — at the target site. Without MPIT, only the latest recovery point is available. With MPIT enabled, recovery is possible from any of the retained points, which is valuable if the damage to data occurred before the most recent sync.
+
+### Guest Quiescing
+
+By default, vSphere Replication creates a crash-consistent recovery point — the state of the disk at a given moment, as if the power had been cut. For stateless or simple workloads, this is adequate. For databases, email servers, or any workload with in-flight transactions, an application-consistent recovery point is required. Enabling guest quiescing uses VMware Tools to coordinate a VSS snapshot (on Windows) or pre/post scripts (on Linux) before capturing the replication point, ensuring the guest application is in a consistent state at the moment data is shipped.
+
+### Network Compression
+
+Replication traffic between sites can be compressed before transmission to reduce bandwidth consumption. This is a per-replication configuration option and is recommended when the inter-site link is constrained.
+
+## Site Recovery Manager
+
+SRM is the disaster recovery orchestration layer. It sits above vSphere Replication (or above array-based replication) and automates everything that happens after the replication data is in place — the failover, the VM startup sequencing, the IP address remapping, and the failback.
+
+SRM requires its own server appliance deployed at both the protected site and the recovery site, alongside a vCenter Server at each location. The two SRM instances are paired together during configuration and communicate over the inter-site network.
+
+### Protection Groups
+
+A protection group is a logical collection of VMs that share recovery characteristics. All VMs in a protection group are failed over together as a unit. Protection groups are defined at the protected site and reference either vSphere Replication-enabled VMs or a replicated datastore (in the array-based replication case). Grouping VMs by application or business service is the recommended approach — for example, all VMs that make up a three-tier application belong in the same protection group.
+
+### Recovery Plans
+
+A recovery plan is the automation script that SRM executes during a failover. It references one or more protection groups and defines the complete sequence of actions needed to bring the protected workloads online at the recovery site. A recovery plan includes:
+
+**VM startup groups and ordering**: VMs in Group 1 start first. After Group 1 VMs are confirmed running, Group 2 starts, and so on. This ordering enforces application tier dependencies — the database layer must be healthy before the application layer starts, and the application layer must be healthy before the web tier is exposed. Delays between groups can be configured to allow services time to initialise.
+
+**IP customisation rules**: In most DR architectures, the recovery site uses a different IP address range than the production site. SRM's IP customisation maps each VM's production IP to a recovery-site IP, applying the change automatically as each VM powers on. Administrators define the mapping once in SRM; it is applied consistently at every failover and test.
+
+**Pre- and post-steps**: Manual steps or automated runbooks can be inserted between VM groups. A manual step might require an administrator to confirm database connectivity before the application tier starts. An automated step might trigger an external script to update a DNS record or modify a load balancer pool.
+
+### Test Mode
+
+One of SRM's most operationally important capabilities is the ability to test a recovery plan without impacting production. When a recovery plan is executed in test mode, SRM powers on the replicated VMs in an isolated network bubble — a temporary port group that is not connected to any production network or the internet. The VMs start up, the recovery plan steps execute, and the administrator can verify that the application comes online correctly and that the IP customisation and startup ordering are working as designed.
+
+Critically, test mode does not interrupt replication. The production VMs at the protected site continue running, and replication continues to ship new data to the recovery site throughout the test. When the test is complete, the test VMs are cleaned up, and the environment returns to its pre-test state. DR testing with SRM is a non-destructive, repeatable operation — there is no excuse for skipping DR tests when the testing mechanism itself carries no risk.
+
+### Failover Types
+
+| Type | Description | Data Loss Risk |
+|---|---|---|
+| Planned migration | Graceful failover initiated by the administrator. Source VMs are cleanly powered off, a final synchronisation is performed, and VMs are powered on at the recovery site. | Zero |
+| Disaster recovery | Emergency failover when the protected site is unavailable. Replication cannot complete a final sync. VMs are recovered from the latest available recovery point. | Up to the configured RPO |
+
+### Failback
+
+After a disaster, once the primary site is restored and operational, workloads need to be returned. SRM's reprotect operation reverses the replication direction: the recovery site becomes the new source, and the original primary site becomes the new target. Once replication has converged and the recovery site data has been replicated back, a failback plan returns VMs to the primary site — either as a planned migration (graceful) or as a forced failover if needed.
+
+## SRM Versus vSphere Replication Alone
+
+vSphere Replication can be used independently of SRM — the VR appliances replicate VM disk data to the recovery site and the administrator can manually power on VMs there during a disaster. This approach is suitable for very small environments with a handful of VMs and simple recovery requirements.
+
+For anything beyond that, SRM provides the difference between an orderly, automated recovery and a manual emergency process performed under pressure. The value of SRM is not in the replication itself — that is vSphere Replication's job — but in the predictable, tested, documented, and automated execution of the recovery plan, including startup ordering, IP remapping, pre- and post-steps, and the ability to prove through regular non-disruptive tests that the plan actually works.
+
+## Summary
+
+vSphere Replication and Site Recovery Manager together form VMware's complete disaster recovery solution for virtualised workloads. vSphere Replication handles the continuous async data movement at configurable RPOs of five minutes to 24 hours, without requiring matched storage hardware at source and target. SRM handles the orchestration: grouping VMs into protection groups, defining ordered recovery plans with IP customisation and automated steps, enabling non-disruptive test failovers that validate DR readiness without interrupting production, and automating the failback sequence after the primary site recovers. The combination reduces the DR process from a chaotic manual operation to a documented, regularly tested, and automatically executed procedure.

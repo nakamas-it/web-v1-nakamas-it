@@ -1,0 +1,74 @@
+---
+title: "ESXi Host Architecture — VMkernel, Management Interfaces, and Host Profiles"
+category: "vmware"
+topic: "esxi-host"
+summary: "How an ESXi host is structured — the VMkernel that abstracts hardware for virtual machines, the management interfaces available at the console and over the network, lockdown modes that restrict access for security, and host profiles that enforce configuration consistency across many hosts."
+tags: ["vmware", "esxi", "vmkernel", "host-profiles", "vcpdcv"]
+order: 3
+draft: false
+---
+
+## Overview
+
+An ESXi host is more than a machine running virtual machines — it is a tightly engineered software stack that abstracts physical hardware into virtualised resources, manages competing demands from many VMs simultaneously, and exposes multiple management surfaces for different operational contexts. Understanding the internal structure of an ESXi host, how administrators access and configure it, and how configuration is enforced at scale with host profiles forms the foundation of ESXi operations in any vSphere environment.
+
+## VMkernel Architecture
+
+The VMkernel is ESXi's core operating kernel. It is a purpose-built microkernel, not derived from Linux, though the ESXi Shell uses a busybox-based CLI that superficially resembles a Linux shell. The VMkernel runs directly on bare-metal hardware and owns all physical resources from boot.
+
+The VMkernel provides four fundamental services to virtual machines:
+
+- **CPU scheduler** — assigns physical CPU cycles to vCPUs across all powered-on VMs, enforcing resource limits, reservations, and shares
+- **Memory manager** — maps virtual machine memory pages to physical RAM; uses techniques like transparent page sharing and balloon drivers to maximise physical memory utilisation
+- **Network I/O stack** — multiplexes VM traffic and host VMkernel traffic across physical NICs via virtual switches
+- **Storage I/O stack** — presents virtualised SCSI adapters to VMs while routing I/O to VMFS datastores, NFS mounts, RDMs, or vSAN objects via the Pluggable Storage Architecture
+
+Device drivers for physical hardware (HBAs, NICs, GPUs) run in the VMkernel, not in a parent OS. Hardware support is therefore limited to the VMware Hardware Compatibility List — ESXi does not dynamically load drivers from the internet at runtime.
+
+## Management Interfaces
+
+ESXi exposes four management surfaces, each with a different access path and use case:
+
+**DCUI (Direct Console User Interface)** is the text-mode interface on the physical console. It requires physical access or out-of-band management (iDRAC, iLO). From the DCUI, an administrator can configure the management network, set a hostname and DNS, restart management agents, enable or disable the ESXi Shell and SSH, and restore factory defaults. The DCUI is always the fallback when network connectivity to the host is broken.
+
+**ESXi Shell** is a local interactive CLI, disabled by default. When enabled (from DCUI or vSphere Client), it provides access to `esxcli`, `vim-cmd`, and other management commands. SSH access to the ESXi Shell follows a separate enable toggle. Both the local shell and SSH should be enabled only temporarily for troubleshooting — persistent enablement is a compliance concern.
+
+**vSphere Host Client** is an HTML5 browser interface served by the ESXi host at port 443. It is available on every ESXi host regardless of whether vCenter is present. Use it for initial host configuration, emergency management when vCenter is offline, or quick per-host operations on a standalone host.
+
+**vCenter-managed via vSphere Client** is the primary interface for production environments. All cluster-level operations — DRS, HA, vMotion, distributed switches, host profiles — are only available through vCenter. Direct host management via the Host Client continues to work even when a host is managed by vCenter.
+
+## Installation Methods
+
+Three methods exist for installing ESXi on physical hardware:
+
+- **Interactive**: Boot from an ISO image and step through the text-mode installer. Manual input for disk selection, root password, and network settings. Appropriate for single hosts or test environments.
+- **Scripted (Kickstart)**: Boot from an ISO, USB, or network source with a kickstart configuration file that automates the installation. The kickstart file supports `%pre`, `%main`, and `%post` script sections and can be served over HTTP, FTP, CD, or USB. Used for repeatable, unattended deployments of many hosts.
+- **Auto Deploy**: A stateless, network-boot method where ESXi is served to the host over PXE at every boot — nothing is written to local disk in stateless mode. A rules engine in vCenter maps hosts (by attributes like MAC address or hardware model) to image profiles and host profiles. Auto Deploy requires vCenter and an Enterprise Plus licence.
+
+ESXi must be installed to either BIOS or UEFI boot mode. This choice is made at installation time and cannot be changed afterwards without reinstalling. UEFI is the modern standard and is required for certain hardware and security features.
+
+## Lockdown Modes
+
+Lockdown mode restricts direct access to an ESXi host, forcing all management traffic through vCenter. This reduces the attack surface by ensuring that host configuration changes cannot be made by connecting directly to the host, bypassing vCenter's role-based access control and audit trail.
+
+| Mode | DCUI | ESXi Shell / SSH | vSphere Host Client | vCenter |
+|---|---|---|---|---|
+| **Not in lockdown** | Available | If enabled | Available | Available |
+| **Normal lockdown** | Available | Blocked | Blocked (limited) | Required |
+| **Strict lockdown** | Disabled | Blocked | Blocked | Required |
+
+In Normal lockdown, the DCUI remains accessible and an exception users list can be configured — users on this list can authenticate directly to the host even in lockdown mode. In Strict lockdown, the DCUI is disabled entirely, and only vCenter can manage the host. If vCenter itself becomes unavailable while strict lockdown is active, the host cannot be accessed until vCenter is restored.
+
+## Host Profiles
+
+Host Profiles solve the operational problem of maintaining configuration consistency across many ESXi hosts. Without Host Profiles, each host must be individually configured and manually audited for drift — a process that does not scale to dozens or hundreds of hosts.
+
+A host profile captures the complete configuration of an ESXi reference host — networking, storage, security settings, advanced parameters, and more — and saves it as a reusable policy object in vCenter. That profile is then attached to other hosts or to an entire cluster. vCenter can perform a **compliance check** that compares each host's live configuration against the attached profile and reports any deviations. Remediation applies the profile settings to bring non-compliant hosts back into conformance, which can be done manually or automated through the vSphere Lifecycle Manager workflow.
+
+Host-specific values (such as IP addresses, which differ per host) are captured in an **answer file** associated with each host-profile attachment. The answer file supplies the host-specific inputs so that the shared profile remains generic.
+
+Host Profiles require an **Enterprise Plus** licence. They are most valuable in conjunction with Auto Deploy, where a stateless host gets its full configuration — networking, storage adapters, and advanced settings — applied automatically from a host profile at every boot.
+
+## Summary
+
+ESXi runs the VMkernel directly on bare metal, providing CPU scheduling, memory management, and I/O handling for all VMs on the host. Management access flows through four surfaces — DCUI at the physical console, ESXi Shell over SSH, the per-host HTML5 Host Client, and vCenter's vSphere Client for cluster-aware operations. Lockdown mode (Normal or Strict) constrains access to vCenter only, closing the door to direct host management as a security measure. Host Profiles, requiring Enterprise Plus, capture and enforce host configuration at scale, and combine naturally with Auto Deploy for fully automated, consistent host provisioning.

@@ -1,0 +1,235 @@
+---
+title: "Linux — Cockpit & System Support"
+category: "linux"
+topic: "cockpit"
+summary: "Cockpit web console for RHEL 9 administration — enabling Cockpit, its management features, and Red Hat support tools including sosreport and insights-client."
+tags: ["linux", "rhel", "cockpit", "sosreport", "insights", "web-console", "support"]
+order: 15
+draft: false
+---
+
+## Overview
+
+RHEL 9 provides a web-based graphical management interface called **Cockpit** that delivers a subset of the command-line administration experience through a browser. It is particularly useful for administrators who prefer a visual overview of system health, for tasks where a graphical workflow reduces error risk (storage configuration, firewall rules), and as an entry point for operators who are not yet comfortable with the full command-line toolset.
+
+Beyond Cockpit, Red Hat provides two support tools that connect systems to Red Hat's infrastructure: **sos** generates a comprehensive diagnostic archive for submission to Red Hat Support, and **insights-client** registers the system with Red Hat Insights, a cloud-based predictive analytics platform that identifies configuration issues, known CVEs, and compliance violations before they become incidents.
+
+---
+
+## Cockpit Web Console
+
+### Installing and Enabling Cockpit
+
+Cockpit is available in the RHEL 9 AppStream repository and is often installed by default. To install and enable it:
+
+```bash
+dnf install cockpit                         # Install the base Cockpit package
+systemctl enable --now cockpit.socket       # Enable socket activation at boot and start now
+```
+
+Cockpit uses **socket activation**: the `cockpit.socket` systemd unit listens on TCP port 9090, and the actual `cockpit.service` is started on demand when the first browser connection arrives. This means `cockpit.service` does not need to be running continuously — it starts when needed and stops when idle, keeping resource usage minimal.
+
+If `firewalld` is active, open port 9090:
+
+```bash
+firewall-cmd --add-service=cockpit --permanent
+firewall-cmd --reload
+```
+
+### Accessing Cockpit
+
+Open a browser and navigate to `https://hostname:9090` or `https://IP-address:9090`. Cockpit uses a self-signed TLS certificate by default — expect a browser security warning on first access. The warning can be bypassed for trusted internal systems or resolved by installing a CA-signed certificate.
+
+Log in with any local system account credentials (the same username and password used for SSH or console login). By default, you are in **limited access mode**: you can view most system information but cannot make changes. Click "Limited access" and enter your password to escalate to full administrative mode (equivalent to `sudo`).
+
+---
+
+## Cockpit Features
+
+Cockpit organises its functionality into panels accessible from the left navigation sidebar:
+
+### Overview
+
+The Overview panel shows a real-time dashboard of system health: CPU usage, memory utilization, disk I/O, and network throughput. It also displays the hostname, OS version, hardware model, and uptime. Power management options (reboot, shutdown) are available here. The resource usage graphs use the same underlying data as `top` and `vmstat` and provide a quick visual confirmation that the system is operating within expected parameters.
+
+### Logs
+
+The Logs panel is a browser-based `journalctl` interface. It shows journal entries from the current boot with filters for severity (error and above, warning and above, or all messages) and time range. Entries can be searched by text. This allows administrators to investigate service failures without memorising `journalctl` filter syntax or switching to a terminal.
+
+### Storage
+
+The Storage panel shows all attached block devices, their partitions, LVM volume groups and logical volumes, and current mount points. From this panel administrators can:
+- Create, format, and mount new partitions
+- Create and manage LVM volume groups and logical volumes
+- Configure software RAID arrays
+- View per-device read/write throughput graphs
+
+This is one of the most useful Cockpit panels — operations that would require `fdisk`, `mkfs`, `pvcreate`, `vgcreate`, and `lvcreate` are consolidated in one visual workflow.
+
+### Networking
+
+The Networking panel displays active network interfaces with real-time throughput graphs. From here administrators can add, modify, and remove NetworkManager connection profiles, configure bonding and bridge interfaces, and manage firewall zones and rules. The firewall section mirrors `firewall-cmd` functionality in a graphical form.
+
+### Accounts
+
+The Accounts panel lists all local user accounts with their UID, group memberships, and account status. Administrators can create new users, set passwords, lock or unlock accounts, and manage SSH authorized keys — without touching `/etc/passwd`, `/etc/shadow`, or `~/.ssh/authorized_keys` directly.
+
+### Services
+
+The Services panel shows all systemd units with their current state: running, stopped, or failed. Units can be started, stopped, restarted, enabled, and disabled from the panel. Failed units show their journal output inline, making it easy to diagnose a startup failure without switching to a terminal.
+
+### Terminal
+
+The Terminal panel provides a fully functional shell inside the browser window, running as the authenticated user with the same environment as an SSH session. This is useful when only port 9090 is accessible (firewall blocks SSH port 22), when a quick command is needed without switching applications, or when demonstrating commands to someone observing the Cockpit session.
+
+### Diagnostic Reports
+
+The Diagnostic Reports panel is a graphical interface for the `sos report` command. With administrative access, click "Create Report" to generate a comprehensive diagnostic archive. The resulting file can be downloaded from the browser for submission to Red Hat Support.
+
+---
+
+## Cockpit Extensions
+
+The base Cockpit package covers most common tasks. Additional functionality is available through extension packages installed with `dnf`:
+
+| Package | Adds |
+|---|---|
+| `cockpit-machines` | Virtual machine management via libvirt — create, start, stop, and configure VMs, including console access |
+| `cockpit-storaged` | Extended storage management (integrated into the RHEL 9 base Cockpit package) |
+| `cockpit-pcp` | Performance Co-Pilot integration for historical metrics and trending |
+| `cockpit-podman` | Container management for Podman (rootless containers) — pull images, start/stop containers, view logs |
+| `cockpit-packagekit` | Software update interface for installing and updating RPM packages |
+| `cockpit-session-recording` | Record terminal sessions for compliance and audit purposes |
+
+After installing an extension, refresh the Cockpit browser page — the new panel appears in the navigation sidebar automatically without restarting any service.
+
+---
+
+## Red Hat Subscription Manager and Simple Content Access
+
+The `subscription-manager` service connects RHEL systems to Red Hat's Customer Portal. **Simple Content Access (SCA)** simplifies subscription management: with SCA enabled on the Customer Portal (the default for most organizations since 2021), every registered system can access all repositories from all subscriptions in the organization — no per-system subscription attachment step is required.
+
+```bash
+subscription-manager register                                  # Interactive registration
+subscription-manager register --username USER --password PASS  # Non-interactive
+subscription-manager status                                    # Show registration and compliance status
+subscription-manager repos --list                              # List available repositories
+subscription-manager repos --enable=repo-id                    # Enable a specific repository
+subscription-manager unregister                                # Remove from the portal
+```
+
+Registration is required before DNF can access Red Hat CDN repositories. Without it, package installation will report repository errors.
+
+---
+
+## sos Report — Diagnostic Data Collection for Support
+
+When opening a Red Hat support case, the support team needs detailed system information to diagnose the problem. The **sos** package automates comprehensive data collection into a single archive.
+
+```bash
+dnf install sos                                       # Install if not already present
+sos report                                             # Interactive collection (prompts for case ID)
+sos report --case-id 12345678                         # Associate with a specific support case
+sos report --batch                                     # Non-interactive, no prompts
+sos collect                                            # Collect from multiple nodes in a cluster
+```
+
+Output is saved to `/var/tmp/` as a compressed archive:
+
+```
+/var/tmp/sosreport-HOSTNAME-DATE-UNIQUECODE.tar.xz
+```
+
+### What sos report Collects
+
+The archive includes:
+- Running kernel version, loaded modules, and kernel parameters (`sysctl -a`)
+- Network interface configuration, routing tables, and firewall rules
+- Storage device layout, LVM and RAID configuration, filesystem details
+- Systemd service status for all units
+- System and service configuration files from `/etc/`
+- Recent journal and log file content from `/var/log/`
+- Complete RPM package database (installed packages and versions)
+- SELinux policy status and AVC denial logs from `/var/log/audit/`
+- Hardware inventory (CPU, memory, PCI devices)
+
+This covers virtually everything a support engineer needs to begin diagnosis without interactive access to the system.
+
+### Handling Sensitive Data
+
+sos reports can contain hostnames, IP addresses, and other potentially sensitive information. The `sos clean` subcommand obfuscates this before sharing:
+
+```bash
+sos clean /var/tmp/sosreport-*.tar.xz      # Obfuscate IP addresses, hostnames, and MAC addresses
+```
+
+### Uploading Reports
+
+```bash
+sos report --upload                                    # Generate and upload directly to Red Hat FTP
+# Or attach the .tar.xz file manually via the Red Hat Customer Portal support case interface
+```
+
+---
+
+## Red Hat Insights — Predictive Analytics
+
+**Red Hat Insights** is a SaaS predictive analytics platform included with every RHEL subscription. Rather than waiting for a problem to occur, Insights continuously analyzes system metadata and proactively surfaces issues before they cause downtime.
+
+### Architecture
+
+1. `insights-client` runs on the RHEL system and collects system metadata: package versions, configuration file content, running services, kernel version, and hardware specifications
+2. The client uploads this metadata to `console.redhat.com` via HTTPS (only metadata is sent — no file contents, no credential data)
+3. Red Hat's Insights analysis engine compares the metadata against a knowledge base of known issues, CVEs, and best practices
+4. Findings and recommendations appear in the Insights web console at `https://console.redhat.com/insights`
+
+### Installation and Registration
+
+```bash
+dnf install insights-client                            # Install (included by default on RHEL 8+)
+insights-client --register                             # Register with the Insights service
+insights-client                                        # Manually trigger a metadata upload
+insights-client --unregister                           # Remove the system from Insights
+```
+
+After registration, the client automatically uploads metadata on a scheduled basis (daily by default). The system appears in the Hybrid Cloud Console inventory.
+
+### Insights Services
+
+| Service | Purpose |
+|---|---|
+| **Advisor** | Configuration recommendations from the Red Hat support knowledge base — identifies settings known to cause problems |
+| **Vulnerability** | Lists CVEs from the Red Hat Security Database that affect installed package versions, ranked by severity and exploitability |
+| **Compliance** | OpenSCAP-based policy compliance checking against CIS Benchmarks, PCI-DSS, HIPAA, and other standards |
+| **Patch** | Lists available advisories (security, bug fix, enhancement) for installed packages; shows which systems are unpatched |
+| **Drift** | Compare system configuration across two systems or the same system at different points in time |
+| **Policies** | Define custom alert rules that trigger when system metadata changes in specified ways |
+| **Inventory** | Central list of all registered RHEL systems with their basic configuration data |
+| **Remediations** | Automatically generates Ansible Playbooks to remediate identified issues — enables bulk remediation at scale |
+
+### Insights vs sos report
+
+| Tool | When to use |
+|---|---|
+| `insights-client` | Continuous proactive monitoring — identify issues before they become incidents |
+| `sos report` | Reactive collection after an incident — provide detailed data when opening a support case |
+
+`sos report` generates a large, detailed snapshot for human review by Red Hat support engineers. `insights-client` sends lightweight, ongoing metadata for automated analysis and trending. Both tools are part of a complete RHEL support strategy, not alternatives to each other.
+
+---
+
+## RHEL System Roles
+
+Red Hat provides **RHEL System Roles** — a curated collection of Ansible roles that automate common RHEL administration tasks consistently and idempotently. These roles wrap the underlying CLI tools (`nmcli`, `firewall-cmd`, `sshd`, `chrony`, and others) in tested, policy-compliant automation.
+
+```bash
+dnf install rhel-system-roles              # Install the role collection
+```
+
+Available roles include `network`, `firewall`, `sshd`, `timesync`, `storage`, `kdump`, `selinux`, and `logging`. System Roles allow administrators to define desired state in YAML and apply it consistently across fleets of RHEL systems using Ansible — making the same administrative tasks reproducible and auditable at any scale.
+
+---
+
+## Summary
+
+Cockpit provides a browser-based management console accessible at `https://hostname:9090`, enabled with `systemctl enable --now cockpit.socket` and opened in `firewalld` with `firewall-cmd --add-service=cockpit --permanent`. Its panels cover system overview with real-time performance graphs, journal-based log viewing, storage and LVM management, network interface and firewall configuration, user account management, service control, a browser terminal, and diagnostic report generation. Extensions such as `cockpit-machines` add VM management via libvirt. The `sos report` command generates a comprehensive diagnostic archive in `/var/tmp/` covering kernel state, network configuration, storage layout, service status, and log files — use `sos clean` to obfuscate sensitive data before uploading. `insights-client --register` connects the system to Red Hat Insights, which continuously analyzes system metadata and surfaces vulnerabilities via the Vulnerability service, configuration problems via Advisor, compliance drift via the Compliance service, and available patches via Patch — all in the Hybrid Cloud Console, complementing the reactive diagnostics of `sos`.

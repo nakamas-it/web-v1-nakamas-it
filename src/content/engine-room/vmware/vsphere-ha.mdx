@@ -1,0 +1,94 @@
+---
+title: "vSphere High Availability — Host Failure Detection and VM Restart"
+category: "vmware"
+topic: "vsphere-ha"
+summary: "How vSphere HA monitors ESXi hosts and automatically restarts virtual machines on surviving hosts when a failure is detected — covering heartbeat mechanisms, admission control policies that reserve failover capacity, VM restart priority, and VMCP for datastore-level failure handling."
+tags: ["vmware", "vsphere-ha", "high-availability", "admission-control", "vcpdcv"]
+order: 7
+draft: false
+---
+
+## Overview
+
+When an ESXi host fails unexpectedly — whether due to a hardware fault, kernel panic, or power loss — the virtual machines that were running on it are lost. Without intervention, they stay down until an administrator notices, accesses vCenter, and manually powers them on elsewhere. In a production environment, that response time is unacceptable for most workloads.
+
+vSphere High Availability (HA) automates that recovery. It is a cluster-level feature that continuously monitors host health and, when a host is confirmed failed, automatically restarts its virtual machines on the remaining hosts in the cluster. The VMs do not migrate live — they experience a hard shutdown and restart, similar to a cold reboot — but the recovery is automatic and typically completes within minutes, without any administrator involvement.
+
+vSphere HA is not the same as vCenter HA, which protects the vCenter Server management appliance itself. vSphere HA protects the workloads running on the ESXi hosts underneath it.
+
+## Failure Detection — Heartbeat Mechanisms
+
+HA detects host failures through two independent heartbeat channels used in combination:
+
+**Management network heartbeats**: One host per cluster is elected as the primary host. The primary continuously monitors all other (secondary) hosts by sending and expecting heartbeat packets over the management network every second. If a secondary host stops responding for a configurable period (default five seconds), the primary begins investigating whether the host has failed or is simply isolated from the network.
+
+**Datastore heartbeats**: To distinguish a dead host from one that has merely lost its management network connection, HA writes heartbeat files to shared datastores. The primary checks whether the suspect host is still updating its datastore heartbeat file. Two datastores are selected per cluster for this purpose — vCenter chooses them automatically from shared datastores, though administrators can configure preferred datastores.
+
+The decision logic combines both signals:
+
+| Management heartbeat | Datastore heartbeat | Conclusion |
+|---|---|---|
+| Present | N/A | Host is healthy |
+| Absent | Absent | Host declared failed — VMs restarted on other hosts |
+| Absent | Present | Host is isolated from management network, not dead |
+
+## Isolation Response
+
+When a host loses its management network heartbeat but continues to update the datastore heartbeat, HA treats it as isolated rather than failed. After a 12-second waiting period, the isolated host triggers its configured isolation response, which governs what happens to the VMs still running on it:
+
+- **Leave powered on** (the default): VMs continue running on the isolated host. This is the safest option when the host is still functional and the storage is still accessible — VMs keep serving their workloads. The risk is split-brain if the primary eventually restarts those VMs elsewhere while they are still running.
+- **Power off and restart VMs**: VMs are powered off forcibly (no graceful shutdown) and HA restarts them on other hosts. Use this when you prefer guaranteed recovery over continuity risk.
+- **Shut down and restart VMs**: VMware Tools is used to send a graceful shutdown signal. If the VM does not shut down within 300 seconds, it is powered off. This is gentler for the guest OS but slower.
+
+## Admission Control
+
+Admission control is the mechanism that ensures the cluster always has enough spare capacity to restart the VMs from a failed host. Without it, a cluster running at 100% utilisation might not be able to restart any VMs after a host failure — HA would detect the failure but have nowhere to place the VMs.
+
+Three admission control policies are available:
+
+**Cluster resource percentage**: The administrator specifies what percentage of total cluster CPU and memory should be reserved for failover capacity. For example, reserving 25% in a four-host cluster is roughly equivalent to tolerating one host failure. This is the most flexible policy and is recommended for most environments.
+
+**Slot policy**: HA calculates a slot size based on the largest CPU and memory reservations among all powered-on VMs. It then determines how many slots each host can hold and reserves enough capacity for a specified number of host failures. The weakness of this policy is that a single VM with a very large reservation inflates the slot size across the entire cluster, wasting capacity. Advanced options (`das.slotCpuInMHz`, `das.slotMemInMB`) can cap the slot size to prevent this distortion.
+
+**Dedicated failover hosts**: Specific hosts are designated as failover hosts and kept empty of running VMs during normal operations. When a failure occurs, VMs restart on the designated hosts. This is the most deterministic policy but the most expensive in terms of wasted idle capacity.
+
+## VM Restart Priority
+
+Not all VMs have equal importance. A domain controller and a test workstation should not be given the same priority when restarting after a failure. HA addresses this through per-VM restart priority settings:
+
+| Priority | Effect |
+|---|---|
+| Disabled | HA will not restart this VM after a host failure |
+| Lowest / Low | Restarted last; waits for higher-priority VMs to start first |
+| Medium (default) | Standard priority |
+| High / Highest | Restarted first, before medium and low priority VMs |
+
+Higher-priority VMs are restarted immediately using the admission control reserves. Lower-priority VMs wait until the higher-priority restarts are complete and resources are confirmed available. This ordering is critical for tiered applications where a database must be running before application servers start.
+
+## VM Component Protection (VMCP)
+
+vSphere HA traditionally handles host-level failures. VMCP extends that protection to storage failures — scenarios where a host itself is running but it can no longer reach the storage backing its VMs.
+
+Two storage failure modes are recognised:
+
+**Permanent Device Loss (PDL)**: The storage array or fabric signals that the storage device is permanently gone — it will not come back. VMCP responds aggressively: HA powers off the affected VMs and restarts them on other hosts that still have storage access.
+
+**All Paths Down (APD)**: All I/O paths to the storage device are lost, but no permanent-failure signal has been received. This could be a transient cable or fabric issue. VMCP's APD response is more cautious because acting too quickly on a transient failure wastes a VM restart. Two response modes are available:
+- **Conservative**: Power off VMs only if HA can confirm that another host can restart them.
+- **Aggressive**: Power off VMs regardless of whether a target host is confirmed available, betting that the storage will recover there even if it is lost here.
+
+## Proactive HA
+
+Proactive HA integrates with hardware management tools (such as HPE iLO or Dell OMIVV) to receive degradation signals from host hardware before an actual failure occurs. A host reporting degraded memory, a failing PSU, or rising temperatures can be placed into quarantine mode — DRS avoids placing new VMs on it while existing VMs continue running — or maintenance mode, where DRS evacuates all VMs proactively. This shifts the recovery from reactive (restart after failure) to preventive (migrate before failure), eliminating the downtime window entirely for hardware degradation scenarios.
+
+## HA Requirements
+
+- Shared storage accessible by all hosts in the cluster (required for datastore heartbeating)
+- Management network connectivity between all hosts
+- Static IP addresses on all ESXi hosts — IPs must not change across reboots
+- DNS resolution of all host names from every host in the cluster
+- vSphere HA does not require vMotion or DRS to be configured, though the combination of all three is the standard production configuration
+
+## Summary
+
+vSphere HA is the first line of defence against unplanned host failures in a vSphere cluster. Its dual heartbeat mechanism — management network plus datastore — distinguishes true failures from network isolation, avoiding spurious VM restarts. Admission control guarantees that spare capacity always exists to absorb a failure without resource contention. Restart priority lets administrators encode application tier dependencies into the recovery sequence. VMCP extends coverage from host failures to storage failures. Together these mechanisms mean that most unplanned infrastructure events result in automatic, ordered VM recovery within minutes rather than requiring manual intervention.

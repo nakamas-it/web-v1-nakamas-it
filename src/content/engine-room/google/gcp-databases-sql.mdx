@@ -1,0 +1,158 @@
+---
+title: "GCP — Managed SQL Databases"
+category: "google"
+topic: "cloud-sql"
+summary: "Cloud SQL and Cloud Spanner — GCP's relational database offerings, their architectures, replication models, and when to choose each."
+tags: ["gcp", "google-cloud", "cloud-sql", "cloud-spanner", "databases", "postgresql", "mysql"]
+order: 7
+draft: false
+---
+
+## Overview
+
+GCP offers two distinct managed relational database services: **Cloud SQL** for traditional single-region relational workloads, and **Cloud Spanner** for globally distributed relational workloads requiring horizontal scale and strong consistency. A third option, **AlloyDB**, targets PostgreSQL workloads that have outgrown Cloud SQL but don't need the global distribution of Spanner. Understanding the architectural differences between these services — and what drives the cost differential — is essential for making the right selection for a given workload.
+
+---
+
+## Cloud SQL
+
+Cloud SQL is GCP's managed relational database service supporting three engines: **MySQL**, **PostgreSQL**, and **SQL Server**. "Managed" means Google handles patching, backups, failover, and storage auto-growth. You retain control over schema, query optimization, connection management, and configuration parameters.
+
+### Instance Specifications
+
+Cloud SQL instances scale vertically — you select a machine type and can resize it (with a brief restart). Maximum instance sizes are substantial:
+- Up to **96 vCPUs** and **624 GB of RAM**
+- Up to **64 TB of storage**, with auto-growth enabled by default (storage only grows, never shrinks automatically)
+- SSD or HDD storage tiers; SSD is recommended for most workloads
+
+### High Availability
+
+Cloud SQL HA operates on an active/standby model within a single region:
+- A **primary instance** serves all reads and writes in one zone
+- A **standby instance** in a different zone within the same region receives synchronous replication
+- If the primary zone fails, Cloud SQL automatically promotes the standby — failover typically completes in under 60 seconds
+- The connection string does not change after failover; Cloud SQL handles the DNS update transparently
+
+HA doubles the instance cost because two instances run simultaneously (primary + standby). HA does **not** provide cross-region protection — it covers zone failures only.
+
+### Read Replicas
+
+Read replicas serve SELECT queries to offload read traffic from the primary. They use **asynchronous replication**, which means there is a small replication lag — applications that write and immediately read may see stale data.
+
+| Replica Type | Location | Promotion |
+|--------------|----------|-----------|
+| **In-region replica** | Same region as primary | Can be promoted to standalone instance |
+| **Cross-region replica** | Different region | Can be promoted for cross-region DR |
+| **Cascading replica** | Replica of a replica | Reduces primary load further |
+
+Cross-region replicas are the mechanism for Cloud SQL disaster recovery across regions. They do not fail over automatically — a DBA must manually promote the cross-region replica if the primary region fails. This is a deliberate design choice; automatic cross-region failover would risk split-brain scenarios.
+
+### Automated Backups and Point-in-Time Recovery
+
+Cloud SQL takes automated daily backups during a configurable maintenance window and retains them for a configurable period (1–365 days). Beyond point-in-time snapshots, Cloud SQL supports **Point-in-Time Recovery (PITR)**: restore the database to any second within the binary log retention window (up to 7 days). PITR requires binary logging to be enabled (it is for MySQL/PostgreSQL HA instances by default).
+
+### Maintenance Windows
+
+Google applies patches to Cloud SQL instances during a configurable weekly maintenance window (day of week + hour). Patches may cause a brief restart. Best practice: set the maintenance window to off-peak hours and ensure the application handles brief disconnections gracefully.
+
+### Cloud SQL Auth Proxy
+
+Direct TCP connections to Cloud SQL require either a public IP (with authorized networks) or a private IP within the same VPC. The **Cloud SQL Auth Proxy** is a binary that runs alongside your application and handles:
+- **Authentication**: Uses the application's Google credentials (service account) to authenticate to Cloud SQL — no passwords in connection strings
+- **Encryption**: Wraps the connection in TLS automatically
+- **Connectivity**: Works from any environment (on-premises, GKE, Cloud Run, Compute Engine, local dev) without firewall rule changes
+
+The proxy listens on `127.0.0.1:<port>` and forwards to the Cloud SQL instance. Applications connect to `localhost` as if Cloud SQL were a local database. This is the recommended connection method for all non-VPC environments and for GKE workloads.
+
+---
+
+## Cloud Spanner
+
+Cloud Spanner is a fundamentally different kind of relational database. It is horizontally scalable — meaning you add capacity by adding **nodes** (processing units), and it automatically reshards data across them. It maintains a SQL interface with strong ACID semantics and strong consistency across all nodes globally. This combination — horizontal scale + relational model + global strong consistency — is what makes Spanner unusual.
+
+### TrueTime and External Consistency
+
+The foundational technology that enables Spanner's global consistency is **TrueTime**: a globally synchronized clock built on GPS receivers and atomic clocks in every Google data center. TrueTime provides a bounded uncertainty interval for the current time — rather than a single timestamp, each TrueTime call returns a range [earliest, latest] within which the true time lies.
+
+Spanner uses TrueTime to assign commit timestamps to transactions. Before committing, Spanner waits for the TrueTime uncertainty interval to pass, ensuring that no two transactions in different regions can be assigned overlapping timestamps. The result is **external consistency** (a stronger form of serializability): if transaction T1 commits before T2 starts in wall-clock time, T2 is guaranteed to see T1's writes — even if T1 committed in Iowa and T2 started in Singapore.
+
+This eliminates the clock skew and coordination overhead that makes global strong consistency impractical in conventional distributed databases.
+
+### Nodes and Instances
+
+Spanner capacity is purchased in **processing units** (1,000 processing units = 1 node). A single node provides roughly:
+- 2,000 QPS for reads
+- 1,000 QPS for writes
+- Up to ~2 TB of storage per node (soft limit; Spanner recommends staying under ~2 TB/node for performance)
+
+Processing units are divisible: you can start with 100 processing units (0.1 node) for small workloads, then scale incrementally without downtime.
+
+### Instance Configurations
+
+| Configuration | SLA | Replica Count | Use Case |
+|---------------|-----|---------------|----------|
+| **Regional** | 99.99% | 3 read-write replicas across 3 zones | Low latency for single-region workloads |
+| **Multi-region** | 99.999% | Replicas in multiple regions + read-only replicas | Global applications, highest availability |
+
+Multi-region configurations include "leader" regions (where writes are committed) and "non-leader" regions (which maintain read-write replicas and serve reads locally). Read latency from a non-leader region is local; write latency includes a round trip to the leader.
+
+### Interleaved Tables
+
+Spanner stores related parent-child data together physically through **table interleaving**. By declaring a child table as interleaved in a parent table, rows from the child table with the same parent key are stored adjacent to the parent row on disk.
+
+```sql
+CREATE TABLE Orders (
+  CustomerId INT64 NOT NULL,
+  OrderId INT64 NOT NULL,
+  OrderDate DATE
+) PRIMARY KEY (CustomerId, OrderId),
+  INTERLEAVE IN PARENT Customers ON DELETE CASCADE;
+```
+
+Without interleaving, querying a customer's orders would require fetching rows from two separate tablet ranges, potentially on different servers. With interleaving, the data co-locates, and the join is local. Interleaving is the Spanner-specific optimization for one-to-many relationships.
+
+### Secondary Indexes
+
+Spanner supports secondary indexes, but they work differently from traditional databases: each secondary index is stored as a separate interleaved table internally. Index writes are executed as distributed transactions, adding latency compared to indexes in traditional databases. For this reason, index design is more impactful in Spanner — avoid over-indexing.
+
+---
+
+## Cloud SQL vs Cloud Spanner — Decision Criteria
+
+| Dimension | Cloud SQL | Cloud Spanner |
+|-----------|-----------|---------------|
+| **Engine** | MySQL, PostgreSQL, SQL Server | Spanner SQL (ANSI 2011 superset) |
+| **Scale model** | Vertical (resize instance) | Horizontal (add nodes/processing units) |
+| **Multi-region HA** | No (HA is single-region only) | Yes (built-in, part of the product) |
+| **Consistency model** | Strong within instance | Strong globally (external consistency) |
+| **Write throughput ceiling** | Single primary limits writes | Scales linearly with nodes |
+| **Cost** | Low to medium | High (minimum billing, per-node pricing) |
+| **Best for** | Standard OLTP workloads, web apps, microservices with regional scope | Global OLTP requiring no downtime, financial ledgers, inventory systems with global users |
+
+The core decision: **if you can keep the database in one region and vertical scale is sufficient, Cloud SQL is almost always the right choice** — it is far cheaper, more familiar, and operationally simpler. If your write volume exceeds what a single Cloud SQL primary can handle, or if you genuinely need strong consistency across multiple regions without application-level conflict resolution, Spanner justifies its cost.
+
+---
+
+## AlloyDB for PostgreSQL
+
+AlloyDB is GCP's newest managed database offering — a PostgreSQL-compatible database built on a custom storage engine optimized for Google's infrastructure. Key characteristics:
+
+- **PostgreSQL wire-compatible**: Existing PostgreSQL applications connect without modification
+- **Columnar engine**: An in-memory columnar cache (enabled with a flag) accelerates analytical queries against the same database that serves OLTP — enabling HTAP (Hybrid Transactional and Analytical Processing) workloads
+- **Higher performance than Cloud SQL**: Google claims 4x faster transactional throughput and 100x faster analytical queries compared to standard PostgreSQL on Cloud SQL
+- **HA within a region**: Primary + read pool (one or more read replicas) with automatic failover under 60 seconds
+- **No cross-region replication at launch** (cross-region support has been added progressively)
+
+AlloyDB occupies the space between Cloud SQL and Cloud Spanner: more capable and higher performance than Cloud SQL, but regional (not globally distributed) and significantly cheaper than Spanner. It is the appropriate choice when you have a demanding PostgreSQL workload that has hit Cloud SQL limits but does not require Spanner's global distribution.
+
+---
+
+## Connection Management Best Practices
+
+All three services (Cloud SQL, Spanner, AlloyDB) benefit from connection pooling. Database connections are expensive to establish — each connection has memory overhead on the database server.
+
+- For Cloud SQL: use **PgBouncer** (PostgreSQL) or **ProxySQL** (MySQL) as a connection pooler in front of Cloud SQL, or rely on the connection pooling built into frameworks
+- For Cloud Run and serverless workloads: use the **Cloud SQL connector libraries** (available for Python, Java, Go, Node.js) which handle connection lifecycle, reconnection, and Auth Proxy functionality without the sidecar binary
+- For Cloud Spanner: the client libraries handle session pooling internally — Spanner uses "sessions" rather than raw connections; configure the session pool size based on expected query concurrency
+
+Avoid opening a new database connection on every HTTP request in serverless environments. Connection pooling or the connector libraries are mandatory for production Cloud SQL workloads on Cloud Run or Cloud Functions.

@@ -1,0 +1,67 @@
+---
+title: "vSphere VM Encryption, vTPM, and Trust Authority"
+category: "vmware"
+topic: "vsphere-vm-encryption"
+summary: "How vSphere protects virtual machine data at rest and in motion through VM Encryption tied to an external Key Management Server, virtual Trusted Platform Module for guest OS security features, and vSphere Trust Authority for attestation-based host trust without requiring all hosts to connect directly to KMS."
+tags: ["vmware", "vm-encryption", "vtpm", "kms", "trust-authority", "vcpdcv"]
+order: 12
+draft: false
+---
+
+## Overview
+
+vSphere VM Encryption provides at-rest encryption for virtual machine data at the hypervisor layer — below the guest OS, transparent to the workload running inside the VM. Combined with the virtual Trusted Platform Module (vTPM) for guest security features and vSphere Trust Authority for scalable key distribution without direct KMS access from every host, these three technologies form vSphere's data protection stack. Understanding how they relate to each other — and what each one does and does not cover — is central to designing and managing a secure VMware environment.
+
+## VM Encryption
+
+VM Encryption encrypts the files that make up a virtual machine on the datastore: the virtual disk data file (`-flat.vmdk`), the VM configuration file (`.vmx`), and the VM swap file. The encryption and decryption operations are performed by the ESXi host itself, in the VMkernel, before data is written to or after it is read from the datastore. The guest OS sees unencrypted storage — it has no visibility into the fact that data is being encrypted beneath it.
+
+This architecture means VM Encryption protects against an attacker who gains physical access to the storage media, extracts raw LUN or datastore data, or acquires a cold copy of VMDK files. It does not protect against an attacker who has live access to the running VM at the guest OS level.
+
+### Key Management
+
+VM Encryption requires a key provider. Two types are supported:
+
+- **Standard Key Provider** — an external KMIP-compliant Key Management Server (KMS), such as HashiCorp Vault, Thales, or HyTrust KeyControl. vCenter connects to the KMS to retrieve Key Encryption Keys (KEKs), which are used to wrap the Data Encryption Keys (DEKs) that ESXi hosts use for actual encrypt/decrypt operations. The DEK is stored wrapped in the `.vmx` file; the KMS holds the KEK.
+- **Native Key Provider (NKP)** — introduced in vSphere 7.0, built directly into vCenter Server. No external KMS is required. Keys are stored in the VCSA. An encrypted backup of the NKP key material must be taken and secured externally — if vCenter is lost without a backup, encrypted VMs cannot be recovered.
+
+Before any VM on a host can be encrypted, the host itself must have **Host Encryption Mode** enabled. When a VM is encrypted, vCenter distributes the DEK to the host after retrieving it from the key provider. If the host cannot reach the key provider, it cannot obtain keys and encryption or decryption operations will fail.
+
+### Encrypted vMotion
+
+vMotion traffic — the live transfer of a running VM's memory and storage state between hosts — can be encrypted independently of whether the VM itself is encrypted. The encrypted vMotion setting has three states: **Disabled**, **Opportunistic** (encrypts if both source and destination hosts support it), and **Required** (refuses to vMotion if either host cannot support encryption). For VMs that handle sensitive data but are not encrypted at rest, encrypted vMotion provides protection against network eavesdropping during migration.
+
+## Virtual Trusted Platform Module (vTPM)
+
+A vTPM adds a virtual TPM 2.0 chip to a virtual machine. From the guest OS's perspective, it looks and behaves exactly like a physical TPM chip soldered to a motherboard. This enables guest OS features that depend on TPM hardware:
+
+- **Windows 11 installation requirement** — Microsoft requires TPM 2.0 for Windows 11; a vTPM satisfies this requirement for VMs
+- **BitLocker** — can seal encryption keys to the vTPM, enabling BitLocker without an external USB key or network unlock server
+- **Windows Hello** — biometric and PIN-based authentication that relies on TPM-protected key material
+- **Credential Guard** — uses Virtualisation-Based Security (VBS) to isolate the Windows credential store; requires both TPM and UEFI Secure Boot
+
+A vTPM does **not** encrypt the VM's VMDK data. What the vTPM does is encrypt its own secrets — the key material it stores on behalf of the guest OS. Those vTPM secrets are stored in an encrypted file alongside the VM. This is why vTPM **requires VM Encryption** to be configured: the vTPM's key file must be encrypted at rest, and that encryption relies on the VM Encryption key infrastructure (a key provider must be configured in vCenter).
+
+## Secure Boot
+
+Secure Boot is a UEFI firmware feature that validates the cryptographic signatures of the bootloader and operating system kernel before allowing them to execute. For VMs, Secure Boot is configured at the firmware level per VM — the VM must use a UEFI machine type (not BIOS). When Secure Boot is enabled, the VM will refuse to boot any unsigned or invalidly signed code, providing protection against bootkit and rootkit attacks that attempt to compromise the boot chain.
+
+## vSphere Trust Authority
+
+In a large environment with many ESXi hosts, requiring every host to have direct connectivity to the KMS server creates a management and security challenge. vSphere Trust Authority solves this by introducing a dedicated cluster of trusted hosts that acts as an attestation and key distribution authority.
+
+The **Trusted Authority (TA) cluster** is a separate, hardened group of ESXi hosts. ESXi hosts in workload clusters — the hosts that actually run encrypted VMs — must be **attested** by the TA cluster before they are permitted to receive encryption keys. Attestation uses the physical TPM 2.0 chip on each ESXi host to verify that the host is running expected, unmodified software. Only after a host passes attestation does the TA cluster provide it with the keys needed to operate encrypted VMs.
+
+This architecture means that only the TA cluster hosts need direct connectivity to the KMS. Workload hosts communicate with the TA cluster instead. It also provides a stronger security posture: a compromised or tampered workload host fails attestation and is denied keys.
+
+## What VM Encryption Does Not Cover
+
+Several scenarios and constraints are worth noting:
+
+- **vSAN Encryption** is a separate feature that encrypts data at the vSAN datastore level rather than per-VM. vSAN Encryption and VM Encryption can coexist but serve different threat models — vSAN Encryption protects the storage tier; VM Encryption protects individual VM files even when stored on non-vSAN datastores.
+- Encrypted VMs **cannot use snapshots with memory state** and **cannot use Fault Tolerance**. Standard disk-only snapshots work, but they capture encrypted data.
+- A VM with a vTPM **cannot be moved** to a vCenter that does not share the same key provider trust — the vTPM's encrypted secrets would be unreadable.
+
+## Summary
+
+VM Encryption, vTPM, and vSphere Trust Authority address different layers of the same problem: keeping virtual machine data protected even when the underlying storage or network infrastructure is compromised. VM Encryption secures VMDK and VMX files at rest using a key provider (external KMS or Native Key Provider). The vTPM extends TPM hardware trust into the guest OS for features like BitLocker and Windows 11 compatibility. vSphere Trust Authority adds attestation-based host validation, ensuring only trusted hosts can receive encryption keys — without requiring every host in the environment to have direct KMS connectivity.

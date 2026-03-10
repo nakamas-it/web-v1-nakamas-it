@@ -1,0 +1,75 @@
+---
+title: "VMware vSphere — ESXi, vCenter, and the Virtualisation Stack"
+category: "vmware"
+topic: "vsphere-overview"
+summary: "What VMware vSphere is — the relationship between ESXi hypervisors and vCenter Server, the editions and licensing model, and the key optional components like vSAN and Tanzu that extend the core platform."
+tags: ["vmware", "vsphere", "esxi", "vcenter", "vcpdcv"]
+order: 1
+draft: false
+---
+
+## Overview
+
+VMware vSphere is not a single product — it is a suite of technologies used to virtualise enterprise data centres and build private clouds. The two installable core components are ESXi and vCenter Server. Everything else in the vSphere ecosystem — vSAN, Tanzu, Site Recovery Manager, the Aria suite — extends or depends on this foundation. Understanding the relationship between these two core components, and knowing which management interface applies to which scenario, is the starting point for working with any VMware environment.
+
+## ESXi — The Hypervisor
+
+ESXi is a Type 1 bare-metal hypervisor. It runs directly on physical server hardware with no underlying parent operating system. The kernel that manages hardware resources is called the **VMkernel** — a purpose-built microkernel that is not derived from Linux, despite superficial similarities in its command-line tooling. The VMkernel handles CPU scheduling, memory management, network I/O, storage I/O, and device driver execution for every virtual machine running on the host.
+
+Each physical server runs a single ESXi instance. That instance hosts one or more virtual machines, each of which receives an isolated slice of physical CPU, memory, network, and storage resources. From the virtual machine's perspective, it sees virtualised hardware — a standard x86 CPU, a virtualised NIC, a virtualised SCSI adapter. The VMkernel translates those virtualised hardware interactions into real hardware operations transparently.
+
+## vCenter Server — The Management Plane
+
+ESXi hosts can be managed individually through the vSphere Host Client, a per-host HTML5 browser interface available directly from the host at port 443. This interface is sufficient for managing a single host during initial setup or emergency access when vCenter is unavailable. However, it has no awareness of other hosts, no ability to coordinate migrations between hosts, and no cluster-level features.
+
+vCenter Server is the centralised management plane that changes this picture. It provides the **vSphere Client** — an HTML5 interface that manages the full inventory across all connected ESXi hosts, clusters, virtual machines, networks, and datastores from a single session. vCenter enables every coordinated operation across hosts: live VM migration with vMotion, DRS load balancing, vSphere HA restart of failed VMs, distributed networking with vDS, and storage cluster management with SDRS. Without vCenter, these capabilities do not exist.
+
+| Interface | Requires vCenter | Scope |
+|---|---|---|
+| vSphere Host Client | No | Single ESXi host |
+| vSphere Client | Yes | Full multi-host inventory |
+
+## Licensing — Editions and Socket Rules
+
+ESXi licensing is **per CPU socket**, not per server or per core. Each physical CPU socket on a host requires one ESXi licence. Starting with vSphere 7.0, a socket with more than 32 cores consumes an additional licence — a two-socket host with 48-core CPUs uses two sockets but each CPU exceeds 32 cores, so it requires four licence units in total.
+
+Two main ESXi editions exist for the exam:
+
+| Feature | Standard | Enterprise Plus |
+|---|---|---|
+| vMotion, HA, DRS, Storage vMotion | Yes | Yes |
+| vSphere Replication, NIOC | Yes | Yes |
+| Fault Tolerance (up to 2 vCPU) | Yes | Yes |
+| Fault Tolerance (up to 8 vCPU) | No | Yes |
+| Host Profiles | No | Yes |
+| Auto Deploy | No | Yes |
+| Storage I/O Control (SIOC) | No | Yes |
+| Storage DRS | No | Yes |
+
+Enterprise Plus adds features that matter in large, automated environments: Auto Deploy for stateless host provisioning, Host Profiles for configuration consistency, Storage DRS for intelligent datastore placement, and SIOC for I/O prioritisation under contention.
+
+vCenter Server has its own licencing model. The **Foundation** edition supports up to four hosts. **Essentials** and **Essentials Plus** are SMB bundle kits. **Standard** supports unlimited hosts and is required for Enhanced Linked Mode — the feature that links up to 15 vCenter instances into a single management pane.
+
+## The Flash-Based Web Client Is Gone
+
+The legacy Flash-based vSphere Web Client was deprecated and removed in vSphere 7.0. The current management interfaces are exclusively HTML5: the vSphere Client (via vCenter) and the vSphere Host Client (per host). Any reference to the Flash client in a modern vSphere 7+ context is incorrect.
+
+## Optional and Add-On Components
+
+Several components extend the core vSphere platform and appear on the exam at varying depths:
+
+| Component | Purpose |
+|---|---|
+| **vSAN** | Hyper-converged software-defined storage using local disks across ESXi hosts |
+| **vSphere with Tanzu** | Run Kubernetes supervisor clusters on vSphere infrastructure |
+| **vSphere Replication** | VM-level asynchronous replication for disaster recovery scenarios |
+| **Site Recovery Manager (SRM)** | Orchestrated DR failover and failback with recovery plans |
+| **VMware Aria Operations** | Performance analytics and capacity management (formerly vRealize Operations) |
+| **VMware Aria Automation** | Self-service IT provisioning and infrastructure automation |
+| **NSX** | Software-defined networking and micro-segmentation |
+
+vSAN is the add-on most heavily tested on the VCP-DCV exam — it integrates deeply with SPBM storage policies and vSphere cluster features. The others — NSX, SRM, Aria — are tested conceptually rather than in operational depth.
+
+## Summary
+
+vSphere = ESXi (the hypervisor) + vCenter Server (the management plane), with optional components bolted on for storage, Kubernetes, DR, and operations. The VMkernel abstracts hardware for virtual machines; vCenter coordinates across hosts for everything that requires multi-host awareness. Licensing is per CPU socket with an extra charge beyond 32 cores, and the edition (Standard vs Enterprise Plus) determines which advanced features are available. All management today is HTML5 — there is no Flash client in vSphere 7 or 8.

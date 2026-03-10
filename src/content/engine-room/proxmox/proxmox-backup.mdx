@@ -1,0 +1,170 @@
+---
+title: "Proxmox VE — Backup and Restore"
+category: "proxmox"
+topic: "backup"
+summary: "Proxmox backup with vzdump — snapshot/suspend/stop modes, backup schedules, Proxmox Backup Server, and restoring VMs and containers."
+tags: ["proxmox", "backup", "vzdump", "proxmox-backup-server", "restore", "snapshot"]
+order: 12
+draft: false
+---
+
+## The Role of vzdump
+
+`vzdump` is the primary backup engine for Proxmox VE. It handles both KVM virtual machines and LXC containers through a unified interface. The command can be invoked directly from the CLI or scheduled through the GUI, and it works with any storage target that Proxmox recognises — local directories, NFS shares, or a dedicated Proxmox Backup Server appliance.
+
+Understanding `vzdump` is important because backups in Proxmox are not the same as snapshots. A snapshot captures state at a point in time and lives inside the same storage pool as the running VM. A backup produces a standalone archive file that can be copied off-site, stored on a separate storage system, and used to recreate the VM on any Proxmox host. These are complementary tools, not substitutes for each other.
+
+## Backup Modes
+
+`vzdump` supports three backup modes, and the choice of mode determines the trade-off between backup quality and VM downtime.
+
+**Snapshot mode** is the preferred mode for most workloads. Proxmox creates a storage-level snapshot of the VM's disk, then backs up from the snapshot while the VM continues running. The VM experiences zero downtime during the backup — from the guest's perspective, nothing happens. For this to work, the underlying storage must support live snapshots (qcow2 format, ZFS pools, Ceph RBD, or LVM-Thin all qualify). Directory storage with raw disk images does not support snapshot-mode backups.
+
+**Suspend mode** briefly pauses the VM, creates a disk snapshot, then resumes the VM. The pause lasts seconds, not minutes. This mode is useful when snapshot-capable storage is not available but full downtime is unacceptable. The resulting backup is application-consistent because the VM was paused with a clean disk state at the moment of snapshot.
+
+**Stop mode** gracefully shuts the VM down, creates the backup, then powers it back on. This produces the cleanest possible backup because the VM filesystems are fully quiesced at the time of backup — no open transactions, no dirty journal entries. The downside is real downtime equal to the VM's shutdown time plus the backup duration. For non-critical or low-traffic VMs, stop mode is acceptable and produces the most reliable backups.
+
+| Mode | Downtime | Storage Requirement | Best For |
+|------|----------|---------------------|---------|
+| Snapshot | None | Snapshot-capable storage | Production VMs on ZFS, Ceph, or qcow2 |
+| Suspend | Seconds | Any | VMs that cannot tolerate stop but lack snapshot storage |
+| Stop | Minutes | Any | Dev/test VMs, maximum backup reliability |
+
+## Backup File Formats and Compression
+
+Proxmox backup archives use two formats depending on the guest type:
+
+- **`.vma`** — the proprietary Proxmox archive format for KVM virtual machines. It bundles the VM configuration, disk data, and metadata into a single streaming archive.
+- **`.tar`** — standard tar archive for LXC containers. The container root filesystem is archived directly.
+
+Both formats are compressed with the selected algorithm and named with a timestamp: `vzdump-qemu-<vmid>-<date>.vma.lzo` or `vzdump-lxc-<ctid>-<date>.tar.gz`.
+
+Compression options:
+
+- **None** — fastest backup creation; largest file size; appropriate when backup storage is fast (local NVMe) and space is plentiful.
+- **LZO** — fast compression with moderate size reduction; good default for most environments.
+- **GZIP** — highest compression ratio; significantly slower than LZO; useful when backup storage space is constrained.
+- **pigz** — parallel GZIP that uses multiple CPU cores simultaneously. Effectively matches or beats LZO speed on multi-core hosts while achieving GZIP-level compression ratios. Set `pigz = 1` in `/etc/vzdump.conf` to use it automatically when GZIP is selected.
+
+## Running Backups from the CLI
+
+```bash
+# Backup a specific VM with snapshot mode and LZO compression to NFS storage
+vzdump 100 --mode snapshot --compress lzo --storage nfs-backup
+
+# Backup all VMs on the node with stop mode and GZIP compression
+vzdump --all --mode stop --compress gzip --storage nfs-backup
+
+# Backup a specific VM to a local directory
+vzdump 100 --mode snapshot --compress lzo --dumpdir /var/backup/
+
+# Backup with bandwidth limit (useful to avoid saturating storage network)
+vzdump 100 --mode snapshot --compress lzo --storage nfs-backup --bwlimit 50000
+```
+
+The `--bwlimit` parameter is in kilobytes per second. Setting it is a good practice when backups share a network path with live VM traffic.
+
+Global defaults for `vzdump` are set in `/etc/vzdump.conf`:
+
+```
+bwlimit: 50000       # KB/s bandwidth cap
+lockwait: 3          # Minutes to wait for VM lock before giving up
+stopwait: 10         # Minutes to wait for VM to stop in stop mode
+pigz: 1              # Use parallel gzip
+```
+
+## Scheduled Backups via GUI
+
+Navigate to `Datacenter | Backup | Add` to create a scheduled backup job. The wizard collects:
+
+- **Node** — which Proxmox nodes to include (or all nodes)
+- **Storage** — destination backup storage target
+- **Schedule** — cron-style schedule (e.g., daily at 02:00)
+- **Selection** — all VMs, all except selected, or specific VM IDs
+- **Mode** — snapshot, suspend, or stop
+- **Compression** — LZO, GZIP, or none
+- **Retention** — how many backups to keep
+- **Email notification** — on failure, success, or never
+
+Scheduled backup jobs are cluster-wide and stored in `/etc/pve/jobs.cfg`. Every node that participates in the job runs backups of the VMs assigned to it.
+
+## Retention Policies
+
+Proxmox backup schedules support granular retention settings that determine how many backups are kept over different time horizons:
+
+| Policy | Description |
+|--------|-------------|
+| **Keep Last** | Always keep the N most recent backups regardless of age |
+| **Keep Hourly** | Keep the most recent backup for each hour of the day |
+| **Keep Daily** | Keep the most recent backup for each calendar day |
+| **Keep Weekly** | Keep the most recent backup for each week |
+| **Keep Monthly** | Keep the most recent backup for each month |
+
+These policies can be combined. A typical production configuration might be: keep-last 3, keep-daily 7, keep-weekly 4, keep-monthly 3. This keeps the three most recent backups, one per day for the past week, one per week for the past month, and one per month for the past quarter.
+
+Retention pruning runs automatically after each backup job completes and removes archive files that no longer qualify under any of the retention rules.
+
+## Proxmox Backup Server (PBS)
+
+Proxmox Backup Server is a separate open-source product designed specifically as a backup target for Proxmox VE environments. It runs as a standalone appliance (a bare-metal install or a VM on a different host) and offers capabilities that standard NFS-based backup targets cannot provide:
+
+**Deduplication** — PBS maintains a content-addressed chunk store. Backup data is split into variable-size chunks and stored once regardless of how many backups reference the same data. Identical VM disk regions across multiple backup runs are stored only once, dramatically reducing backup storage consumption for environments where VM disk content changes slowly.
+
+**Incremental backups** — after an initial full backup, subsequent runs send only the chunks that have changed since the last backup. Combined with deduplication, this makes daily backups of large VMs extremely fast and space-efficient.
+
+**Encryption** — backups are encrypted client-side before transmission. The PBS server stores only ciphertext and cannot access backup contents without the client key. This makes off-site or cloud-hosted PBS instances safe for sensitive workloads.
+
+**Backup verification** — PBS supports scheduled verification runs that read backup data from the store and confirm data integrity by comparing stored chunks against their checksums. Verification catches silent corruption before a restore is needed.
+
+To use PBS as a storage target, add it in `Datacenter | Storage | Add | Proxmox Backup Server`. Provide the PBS server address, credentials, and datastore name. PBS then appears as an available storage target in the backup job configuration.
+
+## Restoring VMs and Containers
+
+**Via GUI:**
+
+Navigate to `Datacenter | Storage | <backup storage> | Content`. The content list shows all backup archives with timestamps and VM IDs. Select an archive and click **Restore**. You can restore to the original VM ID (if the VM no longer exists) or assign a new ID.
+
+Alternatively, open any VM's **Backup** tab to see backups associated with that VM ID. Selecting a backup from this tab pre-fills the restore dialog with the correct VM ID and storage.
+
+**Via CLI:**
+
+```bash
+# Restore a KVM VM backup to VM ID 100
+qmrestore /var/backup/vzdump-qemu-100-2024_01_15-02_00_01.vma.lzo 100
+
+# Restore to a different VM ID (useful when original VM still exists)
+qmrestore /var/backup/vzdump-qemu-100-2024_01_15-02_00_01.vma.lzo 105
+
+# Restore an LXC container backup
+pct restore 101 /var/backup/vzdump-lxc-101-2024_01_15-02_00_01.tar.lzo
+
+# Force overwrite if a VM with that ID already exists
+qmrestore --force /var/backup/vzdump-qemu-100-2024_01_15-02_00_01.vma.lzo 100
+```
+
+When restoring, specify the destination storage for the VM disks. The restore wizard will ask where to place the restored disk image — it does not have to match the original storage target.
+
+## Extracting Individual Files from a Backup
+
+A full VM restore is the right approach for disaster recovery, but sometimes only a single file or directory is needed. Proxmox provides tools to mount backup archives without a full restore:
+
+```bash
+# Mount a VMA archive to extract individual files (requires vma tool)
+vma extract /var/backup/vzdump-qemu-100-2024_01_15.vma.lzo /tmp/restore-dir/
+
+# For LXC backups, use standard tar extraction
+tar -xzf /var/backup/vzdump-lxc-101-2024_01_15.tar.gz -C /tmp/restore-dir/ \
+    ./rootfs/etc/nginx/nginx.conf
+```
+
+This approach is significantly faster than restoring an entire VM when only a configuration file or a few data files are needed.
+
+## Key Operational Notes
+
+**Never store VM backups on the same storage as the VM disks.** A storage failure would destroy both the production data and the recovery data simultaneously. Backups must go to a separate physical system — a dedicated NFS server, a PBS instance, or an external backup target.
+
+**Test restores regularly.** A backup that has never been restored is an untested backup. Schedule periodic restore tests to a temporary VM ID to verify that backup files are valid and the restoration process works as expected. Backup verification in PBS automates the integrity check portion, but a full application-level test (does the VM actually boot and function?) requires an actual restore.
+
+**Back up before updates.** Before any Proxmox upgrade or major guest OS update, run a fresh backup. Rollback from a backup is simpler and more reliable than rollback from a snapshot in many failure scenarios.
+
+**Monitor backup job outcomes.** Configure email notifications on backup jobs so failures are immediately visible. Backup jobs that silently fail leave you without recovery options when you actually need them.

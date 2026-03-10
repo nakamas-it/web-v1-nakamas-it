@@ -1,0 +1,192 @@
+---
+title: "GCP — Resource Hierarchy and Organisation"
+category: "google"
+topic: "gcp-foundations"
+summary: "How GCP structures organisations, folders, projects, and resources — and how IAM policies inherit down the hierarchy."
+tags: ["gcp", "google-cloud", "resource-hierarchy", "organisation", "projects", "iam"]
+order: 1
+draft: false
+---
+
+## Overview
+
+Everything in Google Cloud Platform lives inside a four-level resource hierarchy: **Organisation → Folders → Projects → Resources**. This hierarchy is not just an organisational nicety — it is the mechanism through which IAM policies propagate, billing is attributed, and governance constraints are applied. Understanding it is the foundation for every other GCP design decision.
+
+The hierarchy is rooted at the Organisation node, which corresponds to a company's Google Workspace or Cloud Identity domain. Below that, folders group projects logically. Projects are the primary unit of billing, API enablement, and resource ownership. At the leaves sit the actual GCP resources: Compute Engine VMs, Cloud Storage buckets, Cloud SQL instances, BigQuery datasets, and everything else the platform offers.
+
+---
+
+## The Four Levels
+
+### Organisation
+
+The Organisation is the root node of the hierarchy. It is created automatically when a Google Workspace or Cloud Identity domain is established. Every GCP resource ultimately belongs to an Organisation. IAM policies granted at the Organisation level apply to every folder, project, and resource beneath it.
+
+Key facts:
+
+- An Organisation is tied 1:1 to a domain (e.g., `nakamas-it.com`)
+- Organisation-level IAM bindings inherit downward to all children
+- The **Organisation Administrator** role controls who can manage Organisation-level settings
+- Google recommends granting the Organisation Admin role to a group, not individual users, to avoid single points of access
+
+### Folders
+
+Folders are an optional grouping layer between the Organisation and Projects. They are commonly used to model:
+
+- **Business units** — separate Engineering, Finance, and Operations teams
+- **Environments** — group all dev projects together, all prod projects together
+- **Geographic regions** — align projects with data residency requirements
+
+Folders can be nested up to 10 levels deep, allowing complex organisational structures. IAM policies applied to a folder cascade to all projects and resources within that folder. This makes folders a powerful delegation mechanism: grant a team's admin access at the folder level rather than on each individual project.
+
+### Projects
+
+The Project is the primary organisational unit for GCP. Every resource belongs to exactly one project. Projects serve three main purposes:
+
+1. **Billing boundary** — each project is linked to a billing account; all resource costs accrue to that project
+2. **API enablement** — APIs (Compute Engine API, Cloud Storage API, etc.) are enabled per project; a resource in Project A cannot use an API only enabled in Project B
+3. **IAM scope** — IAM policies on a project apply to all resources within it
+
+Every project has three identifiers:
+
+| Identifier | Characteristics |
+|------------|----------------|
+| **Project ID** | Globally unique across all of GCP; chosen at creation; immutable once set; used in API calls and `gcloud` commands |
+| **Project Name** | Human-readable label; editable at any time; not unique |
+| **Project Number** | Assigned by GCP; immutable; used internally by some APIs |
+
+When working with `gcloud`, you almost always use the Project ID:
+
+```bash
+gcloud config set project my-project-id
+gcloud compute instances list --project=my-project-id
+```
+
+Projects can be deleted, which schedules all resources within them for deletion after a 30-day hold period. During the hold period, resources stop incurring charges and the project can be recovered.
+
+### Resources
+
+Resources are the actual GCP services: virtual machines, storage buckets, Pub/Sub topics, Cloud Run services, BigQuery tables, and so on. Resources always belong to exactly one project. Some resources are global (e.g., a VPC network), some are regional (Cloud SQL instances), and some are zonal (a persistent disk).
+
+---
+
+## IAM Policy Inheritance
+
+IAM policies in GCP are **additive and inherited downward**. A policy set at the Organisation level applies to all folders, projects, and resources beneath it. A policy at the folder level applies to all projects and resources within that folder. A policy at the project level applies to all resources within the project.
+
+There is no deny mechanism in standard IAM — only grants. This means you cannot use a higher-level policy to restrict permissions granted at a lower level. If a user has `roles/editor` at the Organisation level and `roles/viewer` at a specific project, the effective permission at the project level is still Editor (the union of both).
+
+The practical consequence: **grant permissions at the lowest level that makes operational sense**. If a developer only needs access to a single project, grant the role at the project level — not the folder or Organisation level. Granting broad access at the top of the hierarchy cannot be selectively narrowed below.
+
+Organisation Policy constraints (a separate mechanism from IAM) can restrict what actions are allowed across the hierarchy regardless of IAM permissions — more on that in the IAM article.
+
+---
+
+## Billing Accounts
+
+A billing account stores payment information and is charged for GCP resource usage. Billing accounts are linked to projects; a project can have at most one billing account, but a single billing account can be linked to many projects.
+
+Billing accounts exist outside the resource hierarchy — they are managed separately under the Google Cloud Billing console. However, the ability to link a billing account to a project can be controlled via IAM (`roles/billing.projectManager`).
+
+For large organisations, the recommended pattern is:
+
+- Create a dedicated **billing project** for centralised billing management
+- Use **billing subaccounts** for resellers or divisions that need separate invoicing
+- Export billing data to BigQuery for detailed cost analysis and chargebacks
+
+---
+
+## Labels, Tags, and Network Tags
+
+GCP uses three similar-sounding but distinct metadata mechanisms:
+
+| Mechanism | Scope | Purpose | IAM Impact |
+|-----------|-------|---------|------------|
+| **Labels** | Most GCP resources | Key-value pairs for billing attribution, filtering, and automation | None — labels do not affect IAM |
+| **Tags** (resource tags) | Hierarchical resources | Key-value pairs that can be referenced in IAM Conditions for conditional access control | Yes — can gate access via IAM Conditions |
+| **Network tags** | Compute Engine VMs only | String tags used to target firewall rules at specific VMs | None directly — but control which firewall rules apply |
+
+Labels are the most commonly used. A well-designed labelling strategy might include:
+
+```
+environment = prod | staging | dev
+team        = platform | backend | frontend
+cost-centre = eng-123
+```
+
+Labels applied to projects propagate to billing export, making cost attribution by team or environment straightforward. Labels on individual resources allow more granular filtering in the Cloud Console and via the `gcloud` CLI.
+
+Resource tags (the newer IAM-aware type) are distinct objects in the hierarchy — they must be defined at the Organisation or project level as tag keys and values, then bound to resources. They enable conditional IAM policies such as "grant this role only on resources tagged `environment: prod`."
+
+Network tags on Compute Engine VMs are purely for firewall rule targeting. A firewall rule can be scoped to `target tags: [web-server]`, and only VMs with that tag receive the rule. They have no billing or IAM effect.
+
+---
+
+## Folder Design Patterns
+
+When designing a folder structure, consider the following patterns:
+
+**Environment-first (recommended for most organisations)**
+
+```
+Organisation
+  ├── Production
+  │     ├── Project: prod-network
+  │     ├── Project: prod-app-frontend
+  │     └── Project: prod-app-backend
+  ├── Non-Production
+  │     ├── Project: staging-app
+  │     └── Project: dev-app
+  └── Shared Services
+        └── Project: shared-vpc-host
+```
+
+Granting security team read access at the Production folder level gives visibility into all production resources without touching non-production environments.
+
+**Team-first (for large organisations with strong decentralisation)**
+
+```
+Organisation
+  ├── Team: Platform
+  │     ├── Project: platform-prod
+  │     └── Project: platform-dev
+  └── Team: Data Engineering
+        ├── Project: data-prod
+        └── Project: data-dev
+```
+
+Teams own their folder, giving them autonomy while the Organisation Admin retains top-level control.
+
+---
+
+## Practical gcloud Commands
+
+```bash
+# List all projects visible to your account
+gcloud projects list
+
+# Describe a specific project
+gcloud projects describe my-project-id
+
+# List folders under an organisation (requires org resource manager permissions)
+gcloud resource-manager folders list --organization=ORGANISATION_ID
+
+# Move a project to a different folder
+gcloud projects move my-project-id --folder=FOLDER_ID
+
+# Get the IAM policy on a project
+gcloud projects get-iam-policy my-project-id
+```
+
+---
+
+## Key Design Principles
+
+The GCP resource hierarchy enforces a few non-negotiable patterns that drive architecture decisions:
+
+- **One project per environment per application** is a common best practice. It provides clear billing isolation, independent API enablement, and a clean IAM scope. Mixing production and development resources in a single project is a security and billing anti-pattern.
+- **Shared VPC** requires a dedicated host project. Service projects (with the workloads) attach to the host project's VPC subnets. The host project belongs to a folder shared across all service projects — network admin lives in the host, application admin lives in the service projects.
+- **Organisation-level IAM** should be reserved for Organisation Administrators and security auditors. Developers and application teams should receive access at the project or folder level only.
+- **Project quotas** are per-project. If a single application is generating excessive resource pressure, splitting it across projects distributes the quota footprint. However, cross-project communication incurs egress costs.
+
+Understanding the resource hierarchy is not just administrative groundwork — it directly shapes network design (Shared VPC topology), security posture (where IAM bindings live), cost management (label-based billing attribution), and compliance (Organisation Policy constraints that enforce data residency). Every subsequent GCP architecture decision builds on top of it.

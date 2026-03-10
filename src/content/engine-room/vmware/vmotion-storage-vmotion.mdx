@@ -1,0 +1,83 @@
+---
+title: "vMotion and Storage vMotion — Live VM and Disk Migration"
+category: "vmware"
+topic: "vmotion"
+summary: "How vSphere migrates running virtual machines between hosts with vMotion and between datastores with Storage vMotion — the network and hardware requirements that must be met, Enhanced vMotion Compatibility that bridges CPU generation gaps, and cross-vCenter migration for moving VMs between vCenter instances."
+tags: ["vmware", "vmotion", "storage-vmotion", "live-migration", "evc", "vcpdcv"]
+order: 9
+draft: false
+---
+
+## Overview
+
+A virtual machine is, at its core, a running process on an ESXi host and a set of files on a datastore. That representation makes something possible that is impossible with physical servers: the running state of a VM can be transferred to a different host or its disk files can be moved to a different datastore — both while the VM continues running and serving its workloads.
+
+vMotion is the feature that moves a running VM from one ESXi host to another with no perceptible downtime. Storage vMotion moves a VM's disk files between datastores, again while the VM stays running. Both operations are fundamental to day-to-day operations in a vSphere cluster: they enable host maintenance without scheduling downtime, let DRS rebalance the cluster silently, and allow storage migrations without service windows.
+
+## How vMotion Works
+
+vMotion transfers a running VM's compute state — memory contents, CPU register state, device state — from the source host to the destination host across a dedicated vMotion network. The process works in iterative stages:
+
+1. The destination host allocates CPU and memory capacity for the incoming VM and establishes a connection over the vMotion VMkernel network.
+2. Memory pages are copied from source to destination in rounds. During each round, the VM continues running, which means some pages are modified (dirtied) while they are being copied. Dirty pages are tracked and re-copied in subsequent rounds.
+3. When the amount of remaining dirty memory falls below a threshold, the VM is briefly stunned — typically for less than a second. During this final pause, the remaining dirty pages are transferred along with the device state and CPU registers.
+4. The destination host takes control of the VM. Networking is updated so that existing connections continue. The VM resumes running on the new host.
+5. The source host releases the VM's CPU and memory.
+
+From the guest OS perspective, the stun period is indistinguishable from a brief network hiccup or a moment of high load. Applications continue running without restarting.
+
+## vMotion Requirements
+
+Several conditions must be satisfied for vMotion to succeed:
+
+- **Shared storage**: Both the source and destination host must have read/write access to the datastore containing the VM's disk files. Without shared storage, the disk files are not accessible from the destination host and vMotion cannot complete. (The exception is combined vMotion + Storage vMotion, where both are performed simultaneously.)
+- **Compatible CPUs**: The destination host's CPU must support at least the same instruction set that the guest OS has been exposed to on the source host. A VM that has been told it has AVX-512 support cannot vMotion to a host that does not have AVX-512. EVC mitigates this by masking CPU features to a common baseline.
+- **vMotion VMkernel adapter**: Each host must have a VMkernel adapter tagged for vMotion traffic on both the source and destination.
+- **Same vCenter management**: Both hosts must be in the same vCenter Server inventory. Cross-vCenter vMotion requires additional configuration.
+- **Sufficient bandwidth**: VMware recommends 10 GbE for vMotion traffic. A single vMotion migration can consume significant bandwidth proportional to the VM's active memory working set. Up to 128 simultaneous vMotion operations are supported per host.
+- **No blocking devices**: Some device types prevent vMotion — physical RDMs in physical compatibility mode, NPIV, USB passthrough, connected CD-ROM from a local ISO, and serial or parallel ports.
+
+## Enhanced vMotion Compatibility (EVC)
+
+EVC enables vMotion between hosts with different CPU generations by masking CPU feature flags. When EVC is enabled on a cluster, all hosts advertise only the features present in the configured EVC baseline, regardless of what the physical CPU actually supports. VMs in that cluster run with the masked feature set and can be freely migrated to any host in the cluster.
+
+EVC baselines are vendor-specific — Intel and AMD have separate baseline families. A cluster cannot contain a mix of Intel and AMD processors.
+
+Representative Intel EVC baselines from oldest to newest include Merom, Penryn, Nehalem, Westmere, Sandy Bridge, Ivy Bridge, Haswell, Broadwell, Skylake, Cascade Lake, Ice Lake, and Sapphire Rapids. Each newer baseline adds instruction sets available only from that CPU generation. Setting the cluster to an older baseline means VMs do not benefit from newer CPU features, but migration flexibility is maximised.
+
+A VM powered off in one EVC cluster can be powered on in a cluster with a higher (newer) EVC baseline — the VM will gain access to the additional CPU features. Moving a VM to a cluster with a lower baseline requires the VM to be powered off first.
+
+## Storage vMotion
+
+Storage vMotion migrates a VM's disk files (VMDKs) from one datastore to another while the VM remains running. The host stays the same; only the storage location changes.
+
+The process uses changed block tracking. As the migration begins, the disk is mirrored — all new writes are tracked and applied to both the source and destination disks simultaneously. When the initial copy of the disk is complete and the delta of remaining changed blocks is small, the VM briefly pauses disk I/O, the final changes are applied to the destination disk, and the VM resumes using the new disk location.
+
+Storage vMotion can also change a virtual disk's format during migration — for example, converting a lazy-zeroed thick disk to a thin-provisioned disk, or the reverse.
+
+Use cases include:
+
+- Moving VM disks to faster or larger datastores without a maintenance window
+- Retiring old storage arrays by migrating all VMs off them live
+- Rebalancing storage utilisation across datastores
+- Decommissioning a datastore that needs to go offline
+
+## Combined Migration
+
+vMotion and Storage vMotion can be performed simultaneously in a single operation. The VM moves to a different host and its disks move to a different datastore at the same time. This is useful when neither the source host nor the source datastore is available to the destination host — for example, when migrating between completely separate storage environments during an infrastructure refresh.
+
+The combined operation requires that the destination host can reach the destination datastore, but the source host does not need access to the destination datastore.
+
+## Cross-vCenter vMotion
+
+Standard vMotion requires both hosts to be managed by the same vCenter instance. Cross-vCenter vMotion lifts this restriction and allows live migration between vCenter instances.
+
+**Same SSO domain (Enhanced Linked Mode)**: When two vCenter instances are linked in the same SSO domain, cross-vCenter vMotion appears in the vSphere Client as a standard migration. Both inventories are visible in a single session. The maximum supported round-trip latency between vCenter instances for live cross-vCenter vMotion is 100 ms.
+
+**Different SSO domains (Advanced Cross vCenter vMotion)**: From vSphere 7.0 onward, VMs can be migrated between vCenter instances that are in entirely separate SSO domains. The administrator must provide credentials for both the source and destination vCenters. This capability enables migration between completely isolated environments — different organisations, different cloud instances, or separated network segments — without establishing Enhanced Linked Mode.
+
+Cross-vCenter vMotion also transfers the VM's network configuration. The destination network must have a matching distributed port group or standard port group that the VM can connect to, or the migration will include a network selection step.
+
+## Summary
+
+vMotion and Storage vMotion are the mobility primitives that make the rest of vSphere's operational model work. Host maintenance, DRS load balancing, and storage lifecycle management all depend on the ability to move running workloads without service interruption. EVC removes the CPU compatibility barrier that would otherwise restrict which hosts a VM can migrate to within a cluster. Combined migration handles scenarios where both host and storage must change simultaneously. Cross-vCenter vMotion extends that mobility beyond the boundary of a single vCenter instance, enabling workload movement between datacentres, organisations, and cloud environments.

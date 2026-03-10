@@ -1,0 +1,85 @@
+---
+title: "vSphere Content Library — Templates, OVF Deployment, and Subscriptions"
+category: "vmware"
+topic: "vsphere-content-library"
+summary: "How vSphere Content Library provides a centralised repository for VM templates, OVF/OVA packages, ISO images, and scripts — and how subscribed libraries automatically synchronise content from a published library to remote sites, enabling consistent and controlled VM deployment across a datacenter."
+tags: ["vmware", "content-library", "ovf", "ova", "templates", "vcpdcv"]
+order: 15
+draft: false
+---
+
+## Overview
+
+Content Library is vCenter's centralised repository for VM templates, OVF/OVA packages, ISO images, and other deployment artefacts. Without it, VM templates are anchored to the vCenter where they were created and ISO files must be uploaded to every datastore that needs them. With Content Library, a single published repository can serve templates and ISOs across an entire multi-site vSphere environment, with subscribed libraries at remote sites automatically pulling content from the publisher on a schedule or on demand. This is the standard mechanism for maintaining consistent golden images across a distributed infrastructure.
+
+## Library Types
+
+vCenter supports three content library variants:
+
+**Local library** — A writable repository stored on a datastore in the local vCenter. Content is added, updated, and deleted through the vSphere Client. A local library exists independently and can be made available to subscribed libraries by being published.
+
+**Published library** — A local library that has been configured for external access. When a library is published, vCenter exposes its content catalogue over HTTPS using the VMware Content Subscription Protocol (VCSP). Remote vCenter instances configure subscribed libraries pointing to this URL to receive content. Publishing requires no additional infrastructure — the vCenter itself serves the catalogue.
+
+**Subscribed library** — A read-only library that receives its content from a published library. Administrators at the subscribing vCenter cannot add or modify content directly. Content arrives via synchronisation from the publisher. A subscribed library can be configured for either **immediate** synchronisation (all content is downloaded locally when published) or **on-demand** synchronisation (only the content catalogue is downloaded; individual items are pulled from the publisher at deployment time). On-demand saves datastore space at remote sites but requires WAN connectivity at deploy time.
+
+## Content Item Types
+
+A content library stores several types of items:
+
+- **OVF templates**: An OVF descriptor file bundled with one or more virtual disk files. The OVF format is an open standard — OVF templates exported from vSphere can be imported into other virtualisation platforms and vice versa.
+- **OVA files**: A single-file archive containing a complete OVF package. Easier to move between systems since it is a single file, but the OVF descriptor cannot be edited before deployment without unpacking the archive.
+- **VM templates (since vSphere 6.7 U1)**: A native vSphere VM template stored directly in the library. Unlike traditional vSphere templates, which are inventory objects tied to a specific vCenter, library VM templates are stored on a datastore and can be distributed across linked vCenter instances. They can also have guest OS customisation specifications applied at deploy time.
+- **ISO images**: CD/DVD images for operating system installation and other bootable media.
+- **Scripts and other files**: Any file type can be stored in a content library, though only OVF, OVA, and VM template types are deployable as VMs.
+
+## OVF vs OVA
+
+The difference between OVF and OVA matters in practice:
+
+**OVF** is a folder containing a `.ovf` descriptor file, one or more `-disk.vmdk` virtual disk files, and a `.mf` manifest file listing checksums. The descriptor is a human-readable XML file that describes the virtual machine's hardware — number of vCPUs, memory, network adapters, disk controllers. Because the descriptor is a separate file, it can be edited with a text editor before import to customise the VM configuration (adjusting memory, renaming networks, or changing the number of CPUs). This makes OVF the right choice when templates need to be parameterised before deployment.
+
+**OVA** is a `.tar` archive containing the complete OVF package in a single file. It is simpler to distribute — one file to copy or upload instead of several — but the descriptor cannot be easily edited without extracting the archive. For distributing ready-to-deploy appliances where no pre-import customisation is needed, OVA is the practical choice.
+
+vSphere can import and export both formats. Content Library stores both as deployable items.
+
+## Deploying from Content Library
+
+Deploying a VM from a content library item follows the same workflow as deploying from a local template or OVF, with the library as the source:
+
+1. In the vSphere Client, right-click a compute resource (host, cluster, or resource pool) and select **Deploy OVF Template** or **New Virtual Machine from Library**.
+2. Select the library item (OVF, OVA, or VM template type).
+3. Map the template's virtual networks to port groups in the destination environment.
+4. Select the target datastore and storage policy.
+5. For VM template items, optionally apply a guest OS customisation specification to configure hostname, IP address, and domain join settings at first boot.
+6. Review and deploy.
+
+For subscribed libraries in on-demand mode, vCenter downloads the item from the published library at deploy time. If the WAN link to the publisher is unavailable, on-demand deployments from that library fail. Immediate synchronisation avoids this at the cost of local storage.
+
+## ISO Images and Virtual Media
+
+Storing ISO images in a content library solves the traditional problem of managing ISO files: without a library, an ISO must be uploaded to every datastore on every cluster that might need it, resulting in multiple copies and no central management.
+
+With a content library, an ISO uploaded once to the published library propagates to all subscribed libraries. When creating or editing a VM, the virtual CD/DVD drive can be configured to mount an ISO directly from the content library — without requiring the ISO to be on the same datastore as the VM. The ISO is streamed to the VM from the library's backing datastore.
+
+## Synchronisation and Limits
+
+Subscribed libraries synchronise from their publisher on a configurable schedule. The default automatic synchronisation interval is every 24 hours, though this can be adjusted through the API. Synchronisation can also be triggered manually from the vSphere Client.
+
+vSphere 8.0 limits per vCenter:
+
+- 1,000 content libraries per vCenter Server
+- 1,000 items per library
+- 16 concurrent synchronisation operations per published library
+- 9 virtual disk files per OVA/OVF template item
+
+Authentication between subscribed and published libraries is via the subscription URL, with an optional password for access control. The connection uses HTTPS, and the published library certificate must be trusted by the subscribing vCenter.
+
+## Library Templates vs Traditional Templates
+
+Traditional vSphere templates (stored in the VM and Templates folder of the inventory) are vCenter-local. They cannot be directly shared with another vCenter instance — they must be exported to OVF and re-imported. They also require a network connection to vCenter to deploy from.
+
+Content library VM templates address both limitations: they are stored on a datastore (not in the vCenter inventory database), they can be synchronised to subscribed libraries at remote vCenters, and they support customisation specifications at deploy time. For organisations managing multiple vCenter instances or distributed sites, library templates are the correct template technology to adopt.
+
+## Summary
+
+Content Library provides the infrastructure for consistent, controlled VM deployment across a vSphere environment at any scale. Published libraries act as a single authoritative source for templates and ISOs; subscribed libraries at remote sites receive content automatically, with the choice between immediate local caching (fast deploy, more storage) and on-demand download (less storage, WAN dependency at deploy time). OVF and OVA templates offer hardware-independent portability, with OVF allowing pre-import descriptor editing and OVA offering single-file simplicity. Library VM templates extend this further by supporting guest OS customisation at deploy time and synchronisation across linked vCenter instances — making them the preferred template format for organisations operating multiple vCenter environments.

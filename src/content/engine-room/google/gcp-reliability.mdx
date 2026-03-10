@@ -1,0 +1,188 @@
+---
+title: "GCP — Reliability and Cost Optimisation"
+category: "google"
+topic: "reliability"
+summary: "Designing reliable GCP architectures — SRE principles, high availability patterns, DR planning, and cost optimisation strategies."
+tags: ["gcp", "google-cloud", "reliability", "sre", "high-availability", "cost-optimisation", "disaster-recovery"]
+order: 17
+draft: false
+---
+
+## Overview
+
+Reliability engineering on GCP operates at two levels. The first is architectural: which design choices make a system resilient to the failure modes that GCP's infrastructure actually exhibits — zone outages, regional degradation, service quota exhaustion, and dependency failures. The second is operational: how do teams measure, budget, and continuously improve reliability after deployment?
+
+Google pioneered **Site Reliability Engineering (SRE)** as a discipline and published its practices openly. The GCP platform is built with these practices in mind: its services offer granular SLAs, its monitoring stack surfaces the SLIs needed to track SLOs, and its cost tooling provides the visibility required to balance reliability investment against its price. This article covers both the architectural patterns and the operational practices, plus the cost optimisation levers that allow teams to run reliable systems without overspending.
+
+---
+
+## SRE Principles
+
+### SLI, SLO, SLA, and Error Budget
+
+These four terms define the reliability contract for any service:
+
+| Term | Definition | Example |
+|------|-----------|---------|
+| **SLI** (Service Level Indicator) | A quantitative measure of service behaviour | Percentage of HTTP requests completing in < 200ms |
+| **SLO** (Service Level Objective) | The internal target value for an SLI | 99.9% of requests complete in < 200ms per 30-day window |
+| **SLA** (Service Level Agreement) | The contractual commitment to customers; breach triggers penalties | 99.5% availability; below this, credits are issued |
+| **Error Budget** | `100% − SLO target`; the allowable unreliability per period | 0.1% of requests per 30 days may fail or be slow |
+
+The SLO is always stricter than the SLA. The gap between them is the safety margin — if the SLO is 99.9% but the SLA is 99.5%, the 0.4% buffer protects against SLA breach while the SLO is occasionally missed.
+
+**Error budgets** are the key operational mechanism. Every deployment, configuration change, or infrastructure modification consumes error budget (it introduces risk of failure). When the error budget is exhausted before the end of the measurement window, the SRE practice is to freeze new releases and focus exclusively on reliability work until the budget resets. This creates a natural forcing function for developers and reliability engineers to collaborate: developers want to ship features, but they also want to preserve error budget so they can keep shipping.
+
+### Overload Handling
+
+When a system receives more traffic than it can handle, three strategies exist:
+
+- **Load shedding** — reject lower-priority requests with HTTP 429 (Too Many Requests) or 503 (Service Unavailable), preserving capacity for high-priority requests
+- **Degraded service** — serve simplified or cached responses rather than full results, maintaining availability at reduced quality
+- **Back-pressure** — propagate overload signals upstream to callers so they slow their request rate
+
+### Cascading Failure Prevention
+
+One of the most dangerous reliability failure modes is a cascading failure: Service A depends on Service B, B becomes slow or unavailable, A's threads block waiting for B, A runs out of thread pool capacity, and A also becomes unavailable — propagating the outage upstream. Prevention mechanisms include:
+
+- **Circuit Breaker pattern** — when a downstream service fails above a threshold error rate, stop sending requests to it for a recovery period; return errors immediately rather than waiting for timeouts
+- **Bulkhead pattern** — isolate dependencies into separate thread pools or connection pools; a failure in one pool cannot exhaust resources for others
+- **Request timeouts** — never wait indefinitely; always set a timeout commensurate with user-facing latency requirements
+- **Exponential backoff with jitter** — when retrying failed requests, wait an exponentially increasing delay (2s, 4s, 8s...) plus a random jitter offset; this prevents retry storms where all clients retry simultaneously and re-overwhelm the recovering service
+
+---
+
+## Designing for Failure
+
+### Redundancy and Single Points of Failure
+
+The first rule of reliable architecture is to have no single point of failure. On GCP, redundancy has three main dimensions:
+
+**Zonal redundancy** deploys resources across multiple availability zones within a single region. A GCP region has at least three zones, each an independent failure domain with separate power, cooling, and networking. Zone failures happen rarely but do occur. Running workloads across multiple zones ensures that a zone failure takes out only a fraction of capacity rather than the entire service.
+
+**Regional redundancy** deploys resources across two or more GCP regions. This protects against region-level events (severe weather, major network incidents, or the unlikely but real possibility of a full-region outage). Regional redundancy adds latency and cost but is required for very high availability tiers.
+
+**Service redundancy** means not relying on a single instance of a dependency. Every critical database should have a replica. Every external API call should have a fallback. Every cache should have a read-through path to the backing store.
+
+### GCP HA Patterns
+
+**Managed Instance Groups (MIGs)** are the foundation of compute redundancy on GCP. A **regional MIG** distributes VM instances across all zones in a region. If one zone fails, the MIG's autoscaler detects the capacity loss and launches replacement instances in the remaining zones. Regional MIGs should always be preferred over zonal MIGs for production workloads.
+
+**Global External HTTP(S) Load Balancer** distributes traffic to backends in multiple regions using a single anycast IP address. Users are routed to the nearest healthy backend. If a region's backends fail their health checks, traffic is automatically redirected to the next nearest region. This is GCP's flagship HA pattern for internet-facing web applications.
+
+**Cloud SQL HA** provisions a standby replica in a different zone within the same region. Replication is synchronous — writes are not acknowledged until they land on both primary and standby. If the primary zone fails, Cloud SQL automatically promotes the standby replica. Failover typically completes in under 60 seconds, and the connection string remains the same.
+
+**Cloud Storage multi-region** buckets store data across at least two geographically separated GCP regions within a continent (e.g., US multi-region spans multiple US regions). Durability is 11 nines (99.999999999%). Data is accessible even if an entire region becomes unavailable.
+
+| Pattern | Protects Against | Cost Impact |
+|---------|-----------------|-------------|
+| Regional MIG (multi-zone) | Zone failure | Minimal (spread across zones in one region) |
+| Global HTTP(S) LB | Region failure | Moderate (cross-region egress costs) |
+| Cloud SQL HA | Zone failure | 2x instance cost |
+| Cloud SQL cross-region replica | Region failure | Additional replica + egress costs |
+| Cloud Spanner multi-region | Region failure | Higher per-node cost |
+| Cloud Storage multi-region | Region failure | Slightly higher storage per GB |
+
+---
+
+## Disaster Recovery
+
+### RPO and RTO
+
+Every DR plan is defined by two objectives:
+
+- **RTO (Recovery Time Objective)** — the maximum acceptable time from failure to restored service; "how fast must we recover?"
+- **RPO (Recovery Point Objective)** — the maximum acceptable data loss measured in time; "how much data can we afford to lose?"
+
+A system with an RTO of 1 hour and an RPO of 15 minutes must be able to recover to operation within 60 minutes of an outage, with no more than 15 minutes of transaction data missing. Meeting tighter objectives requires more infrastructure that must remain always-on or near-ready, which increases cost.
+
+### DR Strategies
+
+GCP architectures typically map to four DR strategy tiers:
+
+| Strategy | RTO | RPO | Cost | Description |
+|----------|-----|-----|------|-------------|
+| **Backup and Restore** | Hours to days | Hours | Low | Regular backups to Cloud Storage; restore from scratch on failure |
+| **Pilot Light** | Hours | Minutes | Medium | Core infrastructure (DNS, load balancer config, small DB replica) running; expand on failure |
+| **Warm Standby** | Minutes | Seconds | High | Scaled-down duplicate environment always running; scale up on failure |
+| **Multi-site Active/Active** | Near zero | Near zero | Very high | Full duplicate running in a second region; instant failover with live traffic split |
+
+The backup-and-restore strategy is appropriate for development environments, non-critical workloads, and systems where hours of downtime are acceptable. The multi-site active/active strategy is appropriate for globally critical services where even seconds of downtime translate to significant financial or reputational harm.
+
+**Pilot light** is the most common pattern for mid-tier production workloads. The DR region has a pre-configured VPC, a running Cloud SQL read replica (which can be promoted to primary), and a dormant MIG instance template ready to scale out. When disaster strikes, promotion of the Cloud SQL replica and scaling the MIG can restore service in 30–60 minutes.
+
+---
+
+## Cost Optimisation
+
+Reliability costs money — redundant infrastructure, cross-region replication, and always-on standby all carry price tags. Cost optimisation is not about cutting corners on reliability; it is about avoiding waste so that investment can be directed toward the reliability measures that actually matter.
+
+### Commitment Discounts
+
+GCP offers two types of discount for Compute Engine and Cloud SQL:
+
+**Sustained Use Discounts (SUDs)** are automatic. When a VM runs for more than 25% of a calendar month, GCP begins applying a discount that grows linearly up to 30% off on-demand pricing at 100% monthly usage. No action or commitment is required — the discount appears automatically on the billing invoice.
+
+**Committed Use Discounts (CUDs)** require a 1-year or 3-year purchase commitment for a specific resource type in a specific region. In exchange, GCP provides up to 57% off on-demand pricing for a 3-year commitment. CUDs apply at the project level. Critically, **if you delete the resource before the commitment period ends, you still pay for it** — the commitment is for the resource type and quantity, not for a specific VM instance.
+
+| Discount Type | Action Required | Discount Level | Flexibility |
+|--------------|-----------------|----------------|-------------|
+| Sustained Use | None (automatic) | Up to 30% | Full — no commitment |
+| Committed Use (1-year) | Purchase commitment | Up to 37% | Low — must use for 1 year |
+| Committed Use (3-year) | Purchase commitment | Up to 57% | Very low — must use for 3 years |
+| Preemptible / Spot VMs | Use fault-tolerant workloads | Up to 80–90% | Medium — workload must tolerate preemption |
+
+### Preemptible and Spot VMs
+
+For fault-tolerant batch workloads — data processing, rendering, ML training, load testing — **Spot VMs** (the successor to Preemptible VMs) provide up to 90% cost savings. GCP can reclaim Spot VMs with 30 seconds notice. Applications must checkpoint progress regularly and handle preemption gracefully. Spot VMs are inappropriate for databases, stateful services, or user-facing workloads with strict latency requirements.
+
+The recommended pattern for Dataproc batch jobs is to use 2 primary nodes (non-Spot) for the YARN resource manager and run the bulk of worker nodes as Spot, cutting cluster costs by 60–80% while retaining fault tolerance through Spark's built-in task retry logic.
+
+### Rightsizing
+
+Over-provisioned VMs are one of the most common sources of cloud waste. A VM running at 10% average CPU utilisation is likely a candidate for rightsizing to a smaller machine type. GCP provides two tools for this:
+
+**GCP Recommender** analyses Compute Engine VM metrics over a 30-day rolling window and produces rightsizing recommendations. Each recommendation includes projected savings, the suggested machine type, and confidence based on the consistency of the usage pattern. Recommender recommendations are available in the console, via the `gcloud recommender recommendations list` command, and through the Recommender API for programmatic integration.
+
+**GKE Autopilot** sidesteps the rightsizing problem for container workloads. Instead of billing per node VM, Autopilot bills per pod resource request (CPU and memory). GKE manages node provisioning automatically, and you are never paying for idle node capacity — you pay only for what your pods actually request.
+
+### Idle Resource Cleanup
+
+Resources that are stopped but still exist in GCP continue to incur storage charges (persistent disks) and sometimes IP address charges (reserved static external IPs with no attached resource). Cloud Monitoring and Active Assist surface idle resource recommendations:
+
+- **Idle VMs** — stopped for 14+ days with no recent activity
+- **Idle persistent disks** — unattached to any VM instance
+- **Idle load balancers** — forwarding rules with no associated healthy backends
+- **Idle IP addresses** — reserved external IPs not attached to resources
+
+### Budget Alerts and Billing Export
+
+**Cloud Billing Budgets** allow you to define a spending threshold for a project, folder, or billing account. When actual or forecasted spend reaches a configured percentage (commonly 50%, 75%, 90%, 100%), an alert is sent via email or Pub/Sub. Pub/Sub integration enables automated responses — for example, a Cloud Function that disables certain APIs or creates a ticket in a project management system when the budget threshold is exceeded.
+
+**Billing export to BigQuery** streams all billing data (line-item charges, credits, resource labels) into a BigQuery dataset. This enables SQL queries across the full cost history: which team's workloads are most expensive, which labels account for what spend, and which services are trending up faster than expected. Cost allocation by label allows chargebacks to business units without requiring separate GCP projects per team.
+
+### Active Assist
+
+Active Assist is GCP's umbrella for machine learning-powered operational recommendations. Beyond VM rightsizing, it covers:
+
+- **IAM recommender** — identify overly permissive role bindings where the granted permissions are never exercised; suggests downgrading to least-privilege roles
+- **Firewall Insights** — identify firewall rules that are shadowed by higher-priority rules or that have had no traffic in the past 30 days
+- **Disk Autoresize recommendations** — flag underutilised SSD persistent disks
+- **Cloud SQL idle instance recommendations** — flag Cloud SQL instances with low connection counts and query volume
+
+All Active Assist recommendations include an estimated monthly savings figure and a one-click apply option where the change can be safely automated.
+
+---
+
+## Reliability and Cost: The Trade-Off
+
+Reliability is not free. The following table illustrates how increasing the availability tier of a simple web application increases both complexity and cost:
+
+| Availability Target | Architecture | Relative Cost |
+|---------------------|-------------|--------------|
+| ~99.9% | Single-zone MIG + regional Cloud SQL | 1x |
+| ~99.99% | Regional MIG + Cloud SQL HA (multi-zone) | ~2x |
+| ~99.99% (global) | Global LB + multi-region MIGs + Cloud SQL with cross-region replica | ~3–4x |
+| 99.999% | Multi-region active/active + Cloud Spanner | 5x+ |
+
+The right answer depends on the business value of the service. A marketing website and a payment processing engine do not require the same availability tier. Applying SRE discipline — defining explicit SLOs and measuring actual SLIs — provides the data needed to make these trade-off decisions objectively rather than based on intuition.

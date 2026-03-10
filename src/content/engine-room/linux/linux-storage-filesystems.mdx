@@ -1,0 +1,320 @@
+---
+title: "Linux — Storage & Filesystems"
+category: "linux"
+topic: "storage"
+summary: "Block device management on RHEL 9 — partitioning with fdisk/parted, XFS and ext4 filesystems, mount, /etc/fstab, and LVM basics."
+tags: ["linux", "rhel", "storage", "lvm", "xfs", "filesystems", "partitioning"]
+order: 14
+draft: false
+---
+
+## Overview
+
+Storage in Linux is accessed through a unified filesystem hierarchy — there are no drive letters. Every storage device, whether a physical disk, a virtual disk, a network share, or a RAM-based filesystem, is attached to the hierarchy at a **mount point**: an ordinary directory that acts as the entry point to that device's contents. All paths on the system, from `/boot` to `/home` to `/var`, may reside on different physical or logical devices, transparently unified under the root `/`.
+
+Understanding storage in Linux requires working through several layers: identifying block devices, creating partition tables and partitions, formatting partitions with a filesystem, and mounting them — either temporarily for immediate access, or persistently through `/etc/fstab` so they re-attach on every boot. Above the raw partition layer, **LVM (Logical Volume Manager)** provides flexible allocation that allows resizing volumes without partition table manipulation.
+
+---
+
+## Block Device Naming
+
+Block devices appear under `/dev/` and are named according to the interface type and detection order:
+
+| Device Path | Type |
+|---|---|
+| `/dev/sda`, `/dev/sdb` | SCSI, SATA, or SAS disk |
+| `/dev/sda1`, `/dev/sda2` | Partitions on `/dev/sda` |
+| `/dev/nvme0n1` | First NVMe SSD (namespace 1) |
+| `/dev/nvme0n1p1`, `/dev/nvme0n1p2` | Partitions on the NVMe disk |
+| `/dev/vda`, `/dev/vdb` | Virtio virtual disks (KVM/QEMU) |
+| `/dev/mmcblk0` | SD/MMC card |
+| `/dev/mmcblk0p1` | Partition on SD card |
+
+Block device files have type `b` in `ls -l` output (e.g., `brw-rw----`). Logical volumes created by LVM appear as `/dev/vgname/lvname` (a symlink) or `/dev/mapper/vgname-lvname`.
+
+---
+
+## Inspecting Block Devices
+
+Two commands are essential for understanding what storage is attached and how it is currently partitioned:
+
+```bash
+lsblk                   # Tree view: device name, size, type, mountpoint
+lsblk -fp               # Full path + filesystem type + UUID
+lsblk -fs               # Filesystem and size detail
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,UUID   # Custom column selection
+```
+
+`blkid` reports the UUID and filesystem type for each block device that has a recognizable filesystem:
+
+```bash
+blkid                   # All block devices with UUID, label, and type
+blkid /dev/sda1         # Specific partition
+```
+
+UUIDs are written into the filesystem at creation time and are stable across reboots. Device names like `/dev/sdb1` are assigned by the kernel at boot in discovery order and can change if disks are added or removed. Always use UUIDs in `/etc/fstab` and any other persistent references.
+
+---
+
+## Partition Table Management
+
+Before creating a filesystem, a block device needs a **partition table** that defines how the disk is divided into partitions.
+
+**MBR (Master Boot Record)** — the legacy format: supports up to four primary partitions; maximum disk size of 2 TB; used with BIOS.
+
+**GPT (GUID Partition Table)** — the modern format: supports up to 128 partitions by default; supports disks larger than 2 TB; required for UEFI systems and recommended for all new disks.
+
+### fdisk — MBR and GPT Partitioning
+
+```bash
+fdisk /dev/sdb          # Open interactive menu-driven partitioner
+```
+
+Inside the `fdisk` interactive session:
+
+| Key | Action |
+|---|---|
+| `p` | Print the current partition table |
+| `n` | Create a new partition |
+| `d` | Delete a partition |
+| `t` | Change partition type (e.g., to Linux LVM: type `8e`) |
+| `g` | Create a new GPT partition table |
+| `o` | Create a new MBR partition table |
+| `w` | Write changes to disk and exit |
+| `q` | Quit without saving |
+
+After writing changes with `w`, run `partprobe /dev/sdb` to notify the kernel of the new partition table without a reboot.
+
+### parted — GPT-Focused Partitioner
+
+`parted` is a non-interactive and scriptable alternative that supports both MBR and GPT:
+
+```bash
+parted /dev/sdb print                    # Show current partition table
+parted /dev/sdb mklabel gpt             # Create a new GPT partition table
+parted /dev/sdb mkpart primary xfs 1MiB 10GiB   # Create a 10 GiB XFS partition
+parted /dev/sdb mkpart primary linux-swap 10GiB 12GiB  # Create a 2 GiB swap partition
+parted /dev/sdb rm 1                     # Delete partition 1
+```
+
+`parted` writes changes immediately without a confirmation step, unlike `fdisk` which requires a final `w` to commit.
+
+---
+
+## Creating Filesystems
+
+After partitioning, each partition must be **formatted** with a filesystem:
+
+```bash
+mkfs.xfs /dev/sdb1             # Create XFS filesystem (RHEL 9 default)
+mkfs.xfs -L "datavol" /dev/sdb1  # XFS with a label
+mkfs.ext4 /dev/sdb2            # Create ext4 filesystem
+mkfs.ext4 -L "backup" /dev/sdb2  # ext4 with a label
+mkfs.vfat /dev/sdb3            # FAT32 for cross-platform or EFI partitions
+```
+
+**XFS** is the default filesystem for RHEL 9. It supports online growth (can be extended while mounted), handles very large files and volumes efficiently, and uses journaling for crash recovery. XFS cannot be shrunk — plan capacity carefully.
+
+**ext4** supports both online growth and offline shrink, making it more flexible for environments where volume sizes may need to decrease. It uses a mature, well-understood tool ecosystem.
+
+### XFS Tools
+
+```bash
+xfs_info /mnt/data             # Show geometry and features of a mounted XFS filesystem
+xfs_repair /dev/sdb1           # Check and repair an unmounted XFS filesystem
+xfs_admin -L "newlabel" /dev/sdb1  # Change the filesystem label
+```
+
+---
+
+## Mounting Filesystems
+
+The `mount` command attaches a filesystem to the directory hierarchy:
+
+```bash
+mount /dev/sdb1 /mnt/data              # Mount by device path
+mount -t xfs /dev/sdb1 /mnt/data       # Explicitly specify filesystem type
+mount UUID="a1b2c3d4-..." /mnt/data    # Mount by UUID (preferred)
+mount -o ro /dev/sdb1 /mnt/data        # Mount read-only
+mount                                   # Show all currently mounted filesystems
+findmnt                                 # Show mounts in tree format with extra detail
+df -Th                                  # Show mounted filesystems with type and human-readable sizes
+```
+
+The mount point must be an existing directory. The contents of the directory are hidden while a filesystem is mounted on it and reappear when it is unmounted.
+
+`umount` detaches a mounted filesystem:
+
+```bash
+umount /mnt/data               # Unmount by mount point
+umount /dev/sdb1               # Unmount by device
+```
+
+If umount reports "target is busy," a process has an open file or its current directory is within the mount point:
+
+```bash
+lsof /mnt/data                 # List open files on the mount point
+fuser -mv /mnt/data            # List processes using the mount
+```
+
+Change directory away from the mount point, then retry.
+
+### tmpfs — RAM-Backed Filesystem
+
+`tmpfs` creates a filesystem backed entirely by RAM. Its contents are lost on reboot or umount, making it suitable for temporary high-speed storage:
+
+```bash
+mount -t tmpfs -o size=512m tmpfs /tmp/ramdisk
+```
+
+---
+
+## Persistent Mounts with /etc/fstab
+
+Mounts performed with `mount` do not survive reboots. `/etc/fstab` lists filesystems to mount automatically at boot. Each non-comment line has six space-separated fields:
+
+```
+<device>   <mount point>   <fs type>   <options>   <dump>   <pass>
+```
+
+Example entries:
+
+```
+UUID=a1b2c3d4-xxxx  /mnt/data   xfs    defaults   0  0
+UUID=e5f6g7h8-xxxx  /boot       xfs    defaults   0  2
+tmpfs               /tmp        tmpfs  defaults   0  0
+```
+
+### Field Reference
+
+| Field | Description |
+|---|---|
+| device | UUID (preferred), LABEL=, or `/dev/` path |
+| mount point | Directory to mount the filesystem at |
+| fs type | `xfs`, `ext4`, `vfat`, `tmpfs`, `swap`, `nfs`, etc. |
+| options | Mount options, comma-separated (see below) |
+| dump | `0` — skip legacy dump backup (almost always 0) |
+| pass | fsck order: `0` skip, `1` root filesystem, `2` other filesystems |
+
+### Common Mount Options
+
+| Option | Effect |
+|---|---|
+| `defaults` | Equivalent to `rw,suid,dev,exec,auto,nouser,async` |
+| `ro` | Mount read-only |
+| `noexec` | Disallow execution of binaries from this filesystem |
+| `nosuid` | Ignore SUID and SGID bits |
+| `nofail` | Boot normally even if this device is missing (useful for removable media) |
+| `noauto` | Do not mount automatically at boot; requires manual `mount` |
+| `user` | Allow non-root users to mount this filesystem |
+
+### Testing Without Rebooting
+
+After editing `/etc/fstab`, test immediately:
+
+```bash
+systemctl daemon-reload        # Notify systemd of fstab changes
+mount -a                       # Attempt to mount all unmounted fstab entries
+findmnt --verify               # Check /etc/fstab for syntax errors
+```
+
+An incorrect `/etc/fstab` entry can cause the boot process to drop to an emergency shell. Always test with `mount -a` before rebooting. Use `nofail` for non-critical mounts so that a missing device does not prevent boot.
+
+---
+
+## Swap Management
+
+Swap space extends available memory by using disk space for pages that don't fit in RAM. It can be a dedicated partition or a swap file.
+
+```bash
+mkswap /dev/sdb3               # Initialize a partition as swap
+swapon /dev/sdb3               # Activate the swap space
+swapoff /dev/sdb3              # Deactivate swap
+swapon --show                  # Show all active swap spaces
+free -h                        # Show RAM and swap usage
+```
+
+Persistent swap in `/etc/fstab`:
+
+```
+UUID=xxxx   swap   swap   defaults   0  0
+```
+
+---
+
+## LVM — Logical Volume Manager
+
+**LVM** adds a flexible abstraction layer between physical disks and filesystems. Instead of partitioning fixed-size slices, LVM pools storage from one or more physical disks into a volume group and carves logical volumes from that pool. Logical volumes can be resized dynamically, even while mounted (for XFS: grow only; for ext4: grow and shrink).
+
+### LVM Architecture
+
+```
+Physical Volumes (PVs)  →  Volume Group (VG)  →  Logical Volumes (LVs)
+  /dev/sdb1                  vg_data              /dev/vg_data/lv_home
+  /dev/sdc1                                       /dev/vg_data/lv_var
+```
+
+### Creating an LVM Stack
+
+```bash
+# Step 1: Create physical volumes from block devices or partitions
+pvcreate /dev/sdb1 /dev/sdc1
+pvs                                    # Display physical volumes
+
+# Step 2: Create a volume group from the physical volumes
+vgcreate vg_data /dev/sdb1 /dev/sdc1
+vgs                                    # Display volume groups
+
+# Step 3: Create logical volumes from the volume group
+lvcreate -L 20G -n lv_home vg_data    # 20 GiB logical volume
+lvcreate -L 10G -n lv_var vg_data     # 10 GiB logical volume
+lvcreate -l 100%FREE -n lv_data vg_data  # Use all remaining space
+lvs                                    # Display logical volumes
+
+# Step 4: Create filesystems on the logical volumes
+mkfs.xfs /dev/vg_data/lv_home
+mkfs.xfs /dev/vg_data/lv_var
+
+# Step 5: Mount
+mount /dev/vg_data/lv_home /home
+```
+
+### Extending a Logical Volume and its Filesystem
+
+```bash
+# Add a new disk to the volume group (expand the pool)
+pvcreate /dev/sdd1
+vgextend vg_data /dev/sdd1
+
+# Extend the logical volume
+lvextend -L +10G /dev/vg_data/lv_home   # Add 10 GiB
+lvextend -l +100%FREE /dev/vg_data/lv_home  # Use all remaining VG space
+
+# Grow the filesystem to fill the extended logical volume
+xfs_growfs /home                         # XFS: online growth (filesystem must be mounted)
+resize2fs /dev/vg_data/lv_var           # ext4: online growth
+```
+
+A common combined command for LVM with XFS:
+
+```bash
+lvextend -L +5G -r /dev/vg_data/lv_home   # -r: automatically resize the filesystem
+```
+
+### Other LVM Commands
+
+```bash
+pvdisplay /dev/sdb1              # Detailed PV information
+vgdisplay vg_data                # Detailed VG information including free space
+lvdisplay /dev/vg_data/lv_home   # Detailed LV information
+vgextend vg_data /dev/sdd1       # Add a PV to a VG
+lvremove /dev/vg_data/lv_home    # Remove a logical volume
+vgremove vg_data                 # Remove a volume group
+pvremove /dev/sdb1               # Remove a physical volume label
+```
+
+---
+
+## Summary
+
+RHEL 9 storage management starts with identifying block devices using `lsblk` and `blkid`. Partitions are created with `fdisk` (interactive, good for MBR and GPT) or `parted` (scriptable, writes immediately). Filesystems are created with `mkfs.xfs` (default, online-growable) or `mkfs.ext4` (grow and shrink supported). The `mount` command attaches filesystems; `/etc/fstab` makes mounts persistent across reboots — always use UUIDs as device identifiers and test changes with `mount -a` before rebooting. Swap space is managed with `mkswap`, `swapon`, and `/etc/fstab`. LVM provides the flexible storage pool model: physical volumes are combined into volume groups, and logical volumes are carved from the pool and formatted independently — `lvextend` combined with `xfs_growfs` enables online capacity growth without unmounting.

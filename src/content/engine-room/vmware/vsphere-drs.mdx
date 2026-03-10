@@ -1,0 +1,85 @@
+---
+title: "vSphere DRS — Distributed Resource Scheduler and Load Balancing"
+category: "vmware"
+topic: "vsphere-drs"
+summary: "How vSphere Distributed Resource Scheduler continuously monitors CPU and memory utilisation across a cluster and automatically migrates virtual machines via vMotion to balance load — and how DRS rules, automation levels, and DPM extend its behaviour for advanced workload placement and power efficiency."
+tags: ["vmware", "drs", "load-balancing", "vsphere", "vcpdcv"]
+order: 8
+draft: false
+---
+
+## Overview
+
+In a vSphere cluster without automated load balancing, resource distribution across hosts is determined by where VMs were powered on or manually placed. Over time — as workloads change throughout the day, as some hosts receive more VMs than others, as memory pressure builds on specific hosts — the cluster develops imbalances. Some hosts run hot while others sit underutilised. Without intervention, hotspots lead to resource contention, latency, and degraded VM performance.
+
+vSphere Distributed Resource Scheduler (DRS) addresses this by continuously evaluating CPU and memory utilisation across all hosts in the cluster and automatically moving VMs to maintain balance. Migrations are performed live using vMotion, meaning running VMs are relocated with no downtime. DRS also controls where new VMs are placed at power-on, ensuring they land on the host best positioned to serve them.
+
+DRS is a cluster-level feature configured in vCenter Server and operates invisibly to the guest operating systems. From a VM's perspective, a DRS migration looks identical to a brief network delay.
+
+## Automation Levels
+
+DRS behaviour is governed by its automation level, which determines whether it acts on its own or generates recommendations for an administrator to approve:
+
+| Automation Level | Initial Placement | Ongoing Balancing |
+|---|---|---|
+| **Manual** | Recommendation only | Recommendation only |
+| **Partially Automated** | Automatic | Recommendation only |
+| **Fully Automated** | Automatic | Automatic |
+
+In Manual mode, DRS analyses the cluster and presents migration recommendations with explanations, but no action is taken until an administrator approves each one. This is appropriate for environments where workload migrations require change management approval.
+
+Partially Automated automates the initial VM placement decision — a VM powering on is placed on the best available host automatically — but ongoing rebalancing still requires manual approval. Fully Automated allows DRS to migrate VMs at any time without administrator intervention, which is the mode used in most production environments.
+
+## Migration Threshold
+
+Within Fully Automated mode, the migration threshold controls how aggressively DRS acts on imbalances. The threshold is a five-level slider:
+
+| Level | Name | Behaviour |
+|---|---|---|
+| 1 | Conservative | Applies only mandatory actions (e.g., affinity/anti-affinity rule violations) |
+| 2 | — | Applies mandatory actions and highest-priority recommendations |
+| 3 | Moderate (default) | Applies priority 1–3 recommendations; balances resource contention |
+| 4 | — | Applies priority 1–4 recommendations |
+| 5 | Aggressive | Applies all recommendations; maximises VM performance scores |
+
+In vSphere 8, DRS introduced a VM-level DRS score (1–100, where 100 means the VM is fully satisfied and experiencing no resource contention). DRS calculates a cluster-wide score as the average across all VMs. At higher threshold levels, DRS acts to maximise the average VM score, migrating VMs even for small potential improvements in resource satisfaction.
+
+## DRS Rules
+
+Affinity and anti-affinity rules override DRS's automatic placement and migration decisions for specific VMs or VM-to-host relationships. Rules are either mandatory (must) or preferential (should):
+
+**VM-VM Affinity**: Keep specified VMs on the same host. Used when VMs communicate heavily and co-location reduces latency, or when a licence requires VM co-location.
+
+**VM-VM Anti-Affinity**: Keep specified VMs on different hosts. Used for high-availability purposes — if two replicas of the same service run on different hosts, a single host failure takes down only one replica. Mandatory anti-affinity rules are enforced even when they would prevent DRS from fully balancing the cluster.
+
+**VM-Host Affinity**: Require or prefer VMs to run on a specific group of hosts. Mandatory affinity locks VMs to a subset of hosts (useful for NUMA-aware placement, specific hardware requirements, or software licences tied to physical servers). Preferential affinity influences placement without enforcing it.
+
+**VM-Host Anti-Affinity**: Require or prefer VMs to avoid a specific group of hosts. Used to separate workloads from hosts reserved for other purposes.
+
+DRS will not violate mandatory rules, even if violating the rule would produce better balance. When a mandatory rule conflict is detected, DRS flags it in vCenter as a rule violation that requires administrator resolution.
+
+## Enhanced vMotion Compatibility (EVC)
+
+For DRS to freely migrate VMs between hosts in a cluster, those hosts must have compatible CPUs. If one host exposes a newer instruction set to a VM's guest OS that a second host does not support, vMotion between them will fail.
+
+EVC prevents this by establishing a cluster-wide CPU feature baseline. All hosts in the cluster mask their CPU feature sets to the configured baseline, ensuring any VM in the cluster can be migrated to any host. EVC baselines exist separately for Intel and AMD processor families — the two families cannot be mixed in the same EVC cluster.
+
+EVC is configured at the cluster level in vCenter. If VMs are already powered on when EVC is enabled, they must be migrated between hosts once to establish the masked CPU feature set. Once in the EVC cluster, VMs run with the masked feature set permanently until they are powered off and restarted.
+
+## Distributed Power Management (DPM)
+
+DPM is an extension of DRS that addresses the opposite problem: rather than distributing load to prevent hotspots, DPM consolidates load to enable idle hosts to be powered down.
+
+When cluster utilisation falls below DPM's configured threshold, DRS consolidates VMs onto fewer hosts through vMotion. Once a host is empty, DPM powers it down — placing it in standby mode. When demand rises again and the remaining hosts cannot satisfy admission control requirements, DPM wakes the standby hosts using IPMI, HPE iLO, or Wake-on-LAN.
+
+DPM operates independently of vSphere HA. Standby hosts are still counted towards HA's admission control calculations, so the cluster will not power down so many hosts that failover capacity is lost. The threshold for entering and leaving standby is configurable per host.
+
+## vSphere Cluster Services (vCLS)
+
+vCLS is a supporting mechanism that keeps DRS and HA functioning even when vCenter Server becomes unavailable. Three system VMs are automatically deployed per cluster by vCenter — they are visible in the inventory but cannot be managed, snapshotted, or deleted by administrators. These agent VMs maintain the cluster services plane independently of the vCenter management plane.
+
+If the datastore hosting a vCLS VM must be put into maintenance mode, the vCLS VM must first be migrated via Storage vMotion to another datastore, or the cluster must be placed into retreat mode. In retreat mode, DRS stops functioning and HA operates in a degraded state. Retreat mode is a temporary condition and should be cleared as soon as the maintenance operation is complete.
+
+## Summary
+
+DRS solves the chronic resource imbalance problem that affects any cluster where VM placement is not continuously optimised. Automation levels give administrators control over how autonomous DRS operates, from recommendation-only to fully hands-off. Affinity and anti-affinity rules encode workload placement requirements that override DRS's resource-based decisions. EVC ensures that CPU family differences between host generations do not prevent live migration. DPM extends DRS logic from load balancing into power efficiency. Together, these features mean the cluster continuously self-optimises without administrator intervention for the vast majority of operational scenarios.

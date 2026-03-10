@@ -1,0 +1,109 @@
+---
+title: "vSphere Networking — Standard Switches, Distributed Switches, and VMkernel Adapters"
+category: "vmware"
+topic: "vsphere-networking"
+summary: "How vSphere virtualises network connectivity — comparing vSphere Standard Switches and Distributed Switches, how VMkernel adapters carry management and storage traffic, VLAN tagging modes that connect VMs to physical networks, and NIC teaming policies that distribute load and provide redundancy."
+tags: ["vmware", "vsphere", "networking", "vds", "vmkernel", "vcpdcv"]
+order: 4
+draft: false
+---
+
+## Overview
+
+vSphere virtualises network connectivity at the host level by inserting software-defined switches between virtual machine vNICs and physical NICs. Every VM and every host service that needs network access goes through one of these virtual switches before reaching the wire. Understanding how these switches are created and managed, how VMkernel adapters carry host-specific traffic, how VLANs connect virtual networks to the physical fabric, and how NIC teaming provides redundancy and load distribution is fundamental to designing and troubleshooting vSphere environments.
+
+## Standard Switch vs Distributed Switch
+
+vSphere provides two virtual switch types that differ primarily in where their configuration lives and which advanced features they support.
+
+A **vSphere Standard Switch (vSS)** is configured per host. Each ESXi host gets its own vSS, and configuration changes made on one host are not automatically replicated to any other. In environments with many hosts, this means repeating the same configuration steps on every host individually — or scripting them. The vSS is included with all vSphere editions at no additional cost.
+
+A **vSphere Distributed Switch (vDS)** is configured centrally in vCenter. A single vDS object spans multiple ESXi hosts; each host runs a local proxy switch that implements the data plane, but all configuration is managed from vCenter and propagated automatically. The vDS is available with all editions since vSphere 7.0 (it was previously Enterprise Plus only).
+
+| Feature | vSS | vDS |
+|---|---|---|
+| Configuration scope | Per host | Centralised in vCenter |
+| Inbound traffic shaping | No | Yes |
+| Outbound traffic shaping | Yes | Yes |
+| LACP support | No | Yes |
+| NetFlow export | No | Yes |
+| Port mirroring | No | Yes |
+| Private VLANs (PVLANs) | No | Yes |
+| Network I/O Control (NIOC) | No | Yes |
+| LLDP | No | Yes |
+| CDP | Yes | Yes |
+| Health check | No | Yes |
+| Per-port policies | No | Yes |
+
+If a question involves LACP, NetFlow, port mirroring, NIOC, or private VLANs, the answer is always vDS. The vSS supports none of these.
+
+## VMkernel Adapters
+
+A VMkernel adapter (also called a VMkernel port or vmk) is a software network interface assigned to the ESXi host itself — not to any virtual machine. VMkernel adapters carry host-generated traffic: management communication to vCenter, vMotion live migration data, iSCSI or NFS storage traffic, vSAN inter-host traffic, and Fault Tolerance logging.
+
+Each VMkernel adapter is bound to a virtual switch (vSS or vDS) and assigned an IP address, subnet mask, default gateway, and a set of enabled services:
+
+| Service | Purpose |
+|---|---|
+| **Management** | ESXi-to-vCenter communication; at least one required per host |
+| **vMotion** | Live VM migration traffic between hosts |
+| **iSCSI** | Software iSCSI initiator traffic to iSCSI targets |
+| **NFS** | NFS datastore communication to NAS devices |
+| **vSAN** | vSAN inter-host storage traffic |
+| **FT Logging** | Fault Tolerance replication stream; requires dedicated 10 Gbps NIC |
+| **vSphere Replication** | VM replication traffic for SRM-based DR |
+
+Multiple VMkernel adapters are normal in production hosts. A well-designed host separates management, vMotion, and storage traffic onto different VMkernel adapters — ideally on different physical NICs or VLANs — to prevent any one traffic type from saturating the others.
+
+## VLAN Tagging Modes
+
+Three VLAN tagging modes control how VMs on a virtual switch interact with the physical network's VLAN fabric:
+
+| Mode | Port Group VLAN ID | Description |
+|---|---|---|
+| **EST — External Switch Tagging** | 0 (none) | The physical switch applies and removes VLAN tags; the virtual switch is VLAN-unaware |
+| **VST — Virtual Switch Tagging** | 1–4094 | The virtual switch applies and removes 802.1Q VLAN tags; the physical port must be a trunk |
+| **VGT — Virtual Guest Tagging** | 4095 | The guest OS applies its own 802.1Q tags; the virtual switch passes tagged frames through unchanged |
+
+VST is the most common production mode — the port group is assigned a VLAN ID, the physical uplink connects to a trunk port on the physical switch, and VMs in that port group automatically send and receive tagged frames for that VLAN without any configuration inside the guest. VGT is used for scenarios where a VM must itself participate in multiple VLANs — for example, a VM acting as a network appliance or a nested hypervisor.
+
+## NIC Teaming and Load Balancing
+
+NIC teaming connects multiple physical NICs (uplinks) to a virtual switch, providing both link redundancy and, with some policies, load distribution.
+
+**Load balancing policies:**
+
+| Policy | vSS | vDS | Notes |
+|---|---|---|---|
+| Route based on originating virtual port | Yes | Yes | Default; each VM's vNIC is assigned an uplink at connection time; no per-flow balancing |
+| Route based on source MAC hash | Yes | Yes | Uplink selected by hashing the VM's MAC address |
+| Route based on IP hash | Yes | Yes | Uplink selected by hashing source + destination IP; requires EtherChannel or LACP on the physical switch |
+| Route based on physical NIC load | No | Yes | Dynamically balances by actual NIC utilisation; vDS only |
+| Use explicit failover order | Yes | Yes | Always uses the first active uplink; no load balancing |
+
+The IP hash policy is the only one that achieves true per-flow load balancing across multiple uplinks, but it requires the physical switch to have a port-channel (EtherChannel or LACP) configured to match. All other policies select an uplink statically per VM and do not require special physical switch configuration.
+
+**Failover detection** determines how the virtual switch notices that an uplink has failed:
+
+- **Link Status Only**: detects physical link down events; does not detect upstream switch failures or misconfigured trunks
+- **Beacon Probing**: sends probe frames out each uplink and monitors for replies; detects failures beyond the immediate link such as an upstream switch failing; requires at least three uplinks to function reliably
+
+## Private VLANs (vDS Only)
+
+Private VLANs segment traffic within a single VLAN without consuming additional VLAN IDs. A primary PVLAN contains one or more secondary PVLANs, each of which falls into one of three port types:
+
+| Port Type | Can Communicate With |
+|---|---|
+| **Promiscuous** | All ports (primary VLAN) — acts as the gateway port |
+| **Community** | Other ports in the same community PVLAN + promiscuous ports |
+| **Isolated** | Promiscuous ports only; cannot reach other isolated or community ports |
+
+PVLANs are configured on the vDS at the switch level and are useful for hosting environments where multiple tenants share a single VLAN but must be isolated from each other.
+
+## Network I/O Control (NIOC)
+
+NIOC prevents one traffic type from starving others when a shared vDS uplink is congested. It assigns **shares**, **reservations** (minimum guaranteed Mbps), and **limits** (maximum Mbps) per traffic category — vMotion, management, FT logging, iSCSI, NFS, vSAN, VM traffic, and vSphere Replication are all independently configurable. When the uplink is not congested, NIOC has no effect. When congestion is detected, it enforces the share ratios to ensure vSAN or vMotion traffic is not overwhelmed by VM data traffic. NIOC requires a vDS and an Enterprise Plus licence.
+
+## Summary
+
+vSphere networking centres on virtual switches — the per-host vSS for simpler deployments and the centralised vDS for production environments requiring LACP, NIOC, NetFlow, port mirroring, or private VLANs. VMkernel adapters carry all host-generated traffic (management, vMotion, storage) and should be separated by service type for performance isolation. VLAN mode (EST, VST, VGT) determines whether the physical switch, the virtual switch, or the guest OS handles 802.1Q tagging. NIC teaming provides uplink redundancy and, with IP hash policy and an EtherChannel-enabled physical switch, genuine per-flow load balancing.

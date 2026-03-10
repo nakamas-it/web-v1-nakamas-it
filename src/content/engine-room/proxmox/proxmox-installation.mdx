@@ -1,0 +1,237 @@
+---
+title: "Proxmox VE — Installation and Initial Configuration"
+category: "proxmox"
+topic: "installation"
+summary: "Installing Proxmox VE — ISO installation, ZFS RAID options, post-install steps, repository configuration, and subscription management."
+tags: ["proxmox", "installation", "zfs", "debian", "repositories", "subscription"]
+order: 2
+draft: false
+---
+
+## Before You Start
+
+Proxmox VE installs from a dedicated ISO image, not on top of an existing Debian system (even though it is Debian underneath). The ISO includes a customised Debian base, the Proxmox kernel, all required packages, and a graphical installer. There is no separate "Proxmox add-on for Debian" — you use the Proxmox ISO.
+
+**Hardware requirements before starting:**
+- A 64-bit x86 CPU with Intel VT-x or AMD-V extensions enabled in BIOS/UEFI (required for KVM)
+- Minimum 2 GB RAM (8 GB+ recommended for any real workload)
+- At least one drive for the OS (SSD strongly recommended; NVMe ideal)
+- A network interface the installer can detect
+- A monitor or IPMI/iDRAC/iLO console connection for the installation
+
+Download the current ISO from `https://www.proxmox.com/downloads`. The file is named `proxmox-ve_<version>.iso`. Write it to a USB drive using any imaging tool (Rufus on Windows, `dd` on Linux). Standard ISO writing tools that create a bootable USB work correctly with the Proxmox ISO.
+
+## Running the Installer
+
+Boot from the USB drive. The GRUB menu presents two options: **Install Proxmox VE** (graphical) and a debug/safe-mode option.
+
+### UEFI and Display Troubleshooting
+
+On some hardware — particularly servers with certain GPU configurations — the graphical installer will hang or display a blank screen at boot. The fix is to add the `nomodeset` kernel parameter:
+
+1. At the GRUB menu, press `E` to edit the boot entry
+2. Find the line beginning with `linux` and add `nomodeset` before `quiet`:
+   ```
+   linux/boot/linux26 ro ramdisk_size=16777216 rw quiet nomodeset
+   ```
+3. Press `Ctrl+X` or `F10` to boot with the modified line
+
+This disables kernel mode-setting (the driver that configures the display at a low level) and allows the installer to fall back to a basic framebuffer, which works on virtually all hardware.
+
+### Installer Walkthrough
+
+The graphical installer walks through a short sequence of screens:
+
+**1. Target disk selection**
+
+This is the most important screen. Choose the drive(s) for the Proxmox OS. The installer supports **ZFS RAID configuration directly at install time** — you do not need to pre-configure anything.
+
+Under **Options**, you can select:
+- `zfs (RAID0)` — single drive, no redundancy (for single-disk installs)
+- `zfs (RAID1)` — mirror across two drives; recommended for any production node (the OS drive becoming the single point of failure defeats the purpose of a redundant VM cluster)
+- `zfs (RAID10)` — striped mirror; four drives minimum
+- `ext4` or `xfs` — traditional filesystems for single-disk installs
+
+ZFS RAID1 at install time is the recommended choice for any node you care about. Two identical SSDs in a mirror gives you OS-drive redundancy with no extra steps after installation.
+
+**2. Location and timezone**
+
+Select your country and timezone. This sets the system clock and locale.
+
+**3. Administrator password and email**
+
+Set the `root` password. The email address is used for system alert notifications (backup failures, S.M.A.R.T. disk errors).
+
+**4. Network configuration**
+
+The installer detects available network interfaces. Set:
+- Management interface (the NIC that will carry Proxmox GUI traffic and cluster communication)
+- Hostname (FQDN format, e.g., `pve01.lab.local`)
+- IP address, netmask, gateway, DNS server
+
+**5. Summary and install**
+
+Review the settings and click Install. The installer copies files, configures the base system, and reboots. Remove the USB drive when prompted (or after the reboot begins).
+
+## First Login
+
+After reboot, the console displays the management URL:
+
+```
+https://192.168.x.x:8006
+```
+
+Open this in a browser. Accept the self-signed TLS certificate warning (you can replace it with a trusted certificate later). Log in with username `root` and the password set during installation. The authentication realm should be **Linux PAM standard authentication** (not the Proxmox VE authentication server).
+
+## Post-Install: Repository Configuration
+
+The first task after any fresh Proxmox installation is fixing the package repositories.
+
+By default, the installer configures the **Enterprise repository**, which requires a paid subscription key. Without a key, running `apt update` returns a 401 Unauthorized error and the update process fails.
+
+### Disabling the Enterprise Repository
+
+Edit the Enterprise repo source file:
+
+```bash
+nano /etc/apt/sources.list.d/pve-enterprise.list
+```
+
+Comment out or delete the line:
+```
+# deb https://enterprise.proxmox.com/debian/pve bookworm pve-enterprise
+```
+
+### Enabling the No-Subscription Repository
+
+Add the No-Subscription repository. Create or edit `/etc/apt/sources.list.d/pve-no-subscription.list`:
+
+```bash
+echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > \
+  /etc/apt/sources.list.d/pve-no-subscription.list
+```
+
+The `bookworm` component matches Proxmox VE 8.x, which is based on Debian 12 (Bookworm). For older versions, the component name differs (`bullseye` for Proxmox 7.x).
+
+### Updating the System
+
+With the correct repository in place, update and upgrade:
+
+```bash
+apt update && apt dist-upgrade
+```
+
+Use `dist-upgrade` rather than `upgrade` — Proxmox kernel and package transitions sometimes require packages to be added or removed, and `dist-upgrade` handles those dependency changes while `upgrade` does not.
+
+A kernel update will be included in the first upgrade. After the upgrade completes, reboot to load the new kernel:
+
+```bash
+reboot
+```
+
+## Verifying the Proxmox GUI
+
+After reboot, log back into the web GUI at `https://<node_ip>:8006`. You will see a subscription notice popup — this is expected on No-Subscription installations. Dismiss it.
+
+Navigate to **Node → Summary** to see:
+- CPU usage and core count
+- Memory usage
+- Storage pool status
+- Network interface listing
+- RRD graphs showing resource utilisation over time
+
+The node is now fully operational.
+
+## Network Interface Review
+
+During installation the network was configured through the installer. After booting, review the actual configuration file at `/etc/network/interfaces`. This is the single authoritative source for all network configuration in Proxmox — the GUI reads from and writes to this file.
+
+A freshly installed single-node configuration typically looks like:
+
+```
+auto lo
+iface lo inet loopback
+
+iface ens18 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+        address 192.168.10.50/24
+        gateway 192.168.10.1
+        bridge-ports ens18
+        bridge-stp off
+        bridge-fd 0
+```
+
+`vmbr0` is the first Linux bridge. The physical NIC (`ens18` in this example) is attached to the bridge as a bridge port. VMs connect their virtual NICs to `vmbr0`, which connects them to the physical network.
+
+Changes made in the GUI under **Node → Network** write back to `/etc/network/interfaces` immediately but only take effect after applying with:
+
+```bash
+ifreload -a
+```
+
+The GUI provides an **Apply Configuration** button that runs this command for you without requiring a reboot.
+
+## Time Zone and NTP
+
+Proxmox uses `systemd-timesyncd` for NTP by default. Verify the time is correct:
+
+```bash
+timedatectl status
+```
+
+If the timezone was set incorrectly during install:
+
+```bash
+timedatectl set-timezone America/New_York
+```
+
+Time synchronisation matters for cluster operation — Corosync requires nodes to have closely synchronised clocks, and certificate validation fails if clocks drift significantly.
+
+## Hostname Configuration
+
+The hostname set during installation is written to `/etc/hosts` and `/etc/hostname`. In a cluster, each node must have a unique hostname that resolves to its management IP. Verify `/etc/hosts` contains an entry for the node's own IP address and FQDN:
+
+```
+192.168.10.50   pve01.lab.local pve01
+```
+
+Do not use `127.0.1.1` as the hostname IP — Proxmox explicitly requires the management IP address in `/etc/hosts` for cluster communication to work correctly.
+
+## Subscription Management
+
+If you have a subscription key, enter it at **Node → Subscription → Upload Subscription Key**. This activates the Enterprise repository and removes the nag popup. The subscription page shows:
+- Subscription key (masked)
+- Current status (Active / Invalid / None)
+- Server ID (hardware fingerprint)
+- Number of licensed sockets
+- Last checked and next due dates
+
+Subscription tiers are per-node, not per-cluster. Each physical node requires its own subscription key for Enterprise repository access.
+
+## Initial Security Hardening
+
+A few simple hardening steps before putting the node into service:
+
+**SSH key authentication.** Generate an SSH key pair if you do not already have one, and add your public key to `/root/.ssh/authorized_keys` on the Proxmox node. Then test that key-based login works before disabling password authentication.
+
+To disable password-based SSH login, edit `/etc/ssh/sshd_config`:
+```
+PasswordAuthentication no
+PermitRootLogin prohibit-password
+```
+
+Then restart SSH:
+```bash
+systemctl restart ssh
+```
+
+**Change the default root password.** If the password set during installation was weak or reused from another system, change it:
+```bash
+passwd root
+```
+
+**Firewall consideration.** The Proxmox built-in firewall is off by default. Before enabling it at the Datacenter level, create rules allowing TCP port 8006 (GUI) and TCP port 22 (SSH) to your management IPs. Enabling the firewall before creating allow rules will lock you out of the GUI and require console access to recover.
+
+The node is now installed, updated, and ready for clustering or standalone use.

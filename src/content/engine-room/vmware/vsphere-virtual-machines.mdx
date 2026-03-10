@@ -1,0 +1,120 @@
+---
+title: "vSphere Virtual Machines — Hardware Versions, Disk Types, and Snapshots"
+category: "vmware"
+topic: "vsphere-vms"
+summary: "How vSphere virtual machines are constructed — the hardware version that determines available virtual devices, the machine types and BIOS/UEFI options, the virtual disk formats and their performance implications, the files that make up a VM on disk, and how snapshots work as a chain of delta disks."
+tags: ["vmware", "virtual-machines", "vmdk", "snapshots", "vm-hardware", "vcpdcv"]
+order: 13
+draft: false
+---
+
+## Overview
+
+A vSphere virtual machine is a software-defined computer: a set of files on a datastore that together describe a complete x86 machine, combined with runtime state in the VMkernel while the VM is powered on. The choices made when creating a VM — hardware version, machine type, disk format, virtual device types — have lasting implications for performance, feature availability, and compatibility. Understanding what each choice means, what files accumulate on the datastore, and how snapshots operate is fundamental to managing virtual machines at any scale.
+
+## Hardware Versions
+
+Every vSphere VM has a **hardware version** that controls which virtual hardware features are available to it. Higher hardware versions unlock newer capabilities — more virtual CPUs, more memory, newer virtual device types — but a VM on a high hardware version cannot run on an older ESXi host that does not support it.
+
+| Hardware Version | vSphere Release |
+|---|---|
+| 21 | vSphere 8.0 |
+| 19 | vSphere 7.0 U2 |
+| 17 | vSphere 7.0 |
+| 15 | vSphere 6.7 U2 |
+| 14 | vSphere 6.7 |
+| 13 | vSphere 6.5 |
+
+Upgrading the hardware version requires the VM to be powered off. The upgrade is irreversible — there is no downgrade path. For VMs that may need to run on older hosts or be shared with environments running earlier vSphere versions, keeping the hardware version conservative is appropriate. For new VMs on a homogeneous vSphere 8.0 cluster, hardware version 21 offers the full feature set.
+
+## Machine Types — BIOS vs UEFI
+
+Within a hardware version, VMs choose between two machine types that determine the firmware and chipset model presented to the guest OS:
+
+- **i440fx**: A legacy chipset model that presents a traditional BIOS firmware interface. Compatible with virtually every guest OS. Required for VMs that need to boot in legacy BIOS mode.
+- **Q35**: A modern chipset model that supports UEFI firmware. Required for Secure Boot, required for vNVMe storage controllers, and required for guest OS features that depend on UEFI (such as Windows 11 with Secure Boot and vTPM). New VMs should use Q35 unless a specific compatibility reason requires the legacy chipset.
+
+The firmware setting — BIOS or UEFI — cannot be changed after VM creation without effectively reinstalling the guest OS. Choose the correct machine type at creation time.
+
+## Virtual Device Types
+
+The virtual devices attached to a VM determine performance and compatibility with the guest OS:
+
+**Network adapters:**
+
+| Adapter | Notes |
+|---|---|
+| VMXNET3 | Paravirtual; best performance; requires VMware Tools; recommended for all modern guest OS |
+| E1000E | Intel E1000E emulation; broadly compatible without extra drivers; 1 Gbps virtual link |
+| E1000 | Older Intel 82545EM emulation; legacy guest OS compatibility |
+
+**Storage controllers:**
+
+| Controller | Notes |
+|---|---|
+| VMware Paravirtual (PVSCSI) | Best storage performance for high-I/O workloads; requires VMware Tools |
+| LSI Logic SAS | Good default SCSI compatibility |
+| SATA | For legacy compatibility or boot disk scenarios where SCSI is unsuitable |
+| vNVMe | Lowest latency; requires Q35 machine type (hardware version 13+) |
+
+For production workloads, VMXNET3 and PVSCSI are the correct choices — they provide paravirtual performance without the emulation overhead of legacy adapters. E1000E and LSI Logic SAS exist for guest OS that cannot use paravirtual drivers.
+
+## VM Files on the Datastore
+
+A virtual machine exists on the datastore as a directory of files. Understanding what each file contains matters for backup, recovery, and troubleshooting:
+
+| File | Purpose |
+|---|---|
+| `.vmx` | VM configuration — all settings, virtual hardware definition |
+| `.vmdk` | Virtual disk descriptor — metadata only; points to the flat data file |
+| `-flat.vmdk` | Actual disk data; not shown in the vSphere Client datastore browser |
+| `.nvram` | BIOS or UEFI firmware settings for the VM |
+| `.log` (vmware.log) | VM activity log — guest events, errors, VMware Tools interactions |
+| `.vmsd` | Snapshot database — the snapshot tree structure |
+| `.vmsn` | Snapshot state file — memory contents captured at snapshot time |
+| `-delta.vmdk` | Delta disk created when a snapshot is taken |
+| `.vmss` | Suspend state — VM memory contents when the VM is suspended |
+| `.vmtx` | Replaces `.vmx` when a VM is converted to a template |
+
+The `-flat.vmdk` file is the actual storage for all VM disk data and is typically the largest file in the VM directory. The `.vmdk` descriptor file is tiny — it is metadata only. This distinction matters when performing datastore operations: a datastore browser shows the descriptor, not the flat file.
+
+## Snapshots
+
+A snapshot captures the state of a VM at a specific moment. Taking a snapshot makes the VM's current virtual disk read-only and creates a **delta disk** — a separate file that receives all subsequent writes. From that point forward, reads go to both the delta (for recently written data) and the original disk (for everything written before the snapshot).
+
+Snapshots can optionally capture VM memory state. A memory snapshot freezes the exact contents of the VM's RAM at the snapshot moment, enabling a full revert to the VM's running state. Without a memory snapshot, reverting to the snapshot restores the disk state but the VM powers off — there is no memory state to restore.
+
+**Snapshot operations:**
+
+- **Take snapshot**: Creates a delta disk; optionally captures memory
+- **Revert to snapshot**: Discards the delta disk; returns VM to the captured disk (and memory) state
+- **Delete snapshot**: Commits delta disk changes into the parent disk; removes the snapshot reference from the tree
+- **Delete all snapshots**: Commits all deltas in the entire tree back to the base disk; returns the VM to a single flat disk
+
+Multiple snapshots form a **snapshot tree**: each snapshot is a parent of the next, with a chain of delta disks. Reverting to any point in the tree discards all deltas after that point. Each branch can contain up to 32 snapshots.
+
+**Snapshot limitations** are important for production environments:
+
+- Performance degrades as delta disks grow large — reads must check the growing delta before falling through to the base disk
+- Large snapshots take significant time to delete (commit) and generate heavy I/O during consolidation
+- Snapshots are not backups — they share the same datastore and failure domain as the VM's base disk
+- VMs should not hold open snapshots for more than 24–72 hours in production environments
+
+## Cloning
+
+Cloning creates new VMs from an existing source:
+
+- **Full clone**: An independent copy of the VM, with its own complete copy of all disks. No ongoing dependency on the source.
+- **Linked clone**: Shares the source VM's base disk through a snapshot's delta. Requires a snapshot on the source VM. Storage-efficient but performance depends on the shared base disk; used primarily for VDI (Horizon).
+- **Instant clone**: Creates a running VM from another running VM's live memory state. Ultra-fast provisioning; used by VMware Horizon for desktop pools. Configured through the API, not the standard vSphere Client.
+
+**OVF/OVA** are the hardware-independent portable formats for distributing VM images:
+
+- **OVF**: A folder containing a `.ovf` descriptor, one or more `.vmdk` files, and a `.mf` manifest. The descriptor can be edited before import to customise the VM configuration.
+- **OVA**: A single `.tar` archive containing the complete OVF package. Simpler to transfer but the descriptor cannot be edited before deployment.
+
+Both formats can be exported from and imported into vSphere, and can be used to distribute VM templates through Content Library.
+
+## Summary
+
+A vSphere VM is defined by its hardware version (which controls available features and host compatibility), its machine type (BIOS/i440fx vs UEFI/Q35), and the virtual device choices made at creation time (paravirtual VMXNET3 and PVSCSI for performance, legacy adapters for compatibility). The VM exists as a directory of files on the datastore — the flat VMDK holds all disk data, the VMX holds configuration, and delta VMDKs accumulate from snapshots. Snapshots are a powerful operational tool for change management and testing, but they degrade performance at scale and are not a substitute for backup.

@@ -1,0 +1,288 @@
+---
+title: "GCP — Cloud Monitoring and Operations"
+category: "google"
+topic: "monitoring"
+summary: "Google Cloud's operations suite — Cloud Monitoring, Cloud Logging, Cloud Trace, Cloud Profiler, and Error Reporting for full observability."
+tags: ["gcp", "google-cloud", "monitoring", "logging", "observability", "stackdriver", "sre"]
+order: 14
+draft: false
+---
+
+## Overview
+
+Observability is the practice of understanding the internal state of a system by examining its external outputs — metrics, logs, and traces. GCP's operations suite (formerly Stackdriver) provides all three pillars plus profiling and error tracking, all integrated with GCP's managed services and accessible from a unified interface in the Google Cloud console.
+
+The operations suite consists of six primary services:
+
+- **Cloud Monitoring** — time-series metrics, alerting, dashboards, and uptime checks
+- **Cloud Logging** — structured log collection, routing, retention, and querying
+- **Cloud Trace** — distributed request tracing and latency analysis
+- **Cloud Profiler** — continuous CPU and memory profiling of production applications
+- **Error Reporting** — automatic grouping and alerting on application errors
+- **Cloud Debugger** — (deprecated) run-time debugging of production applications
+
+These services work together to answer the fundamental operational questions: is the system healthy, where is it slow, what errors are occurring, and what is the code doing when those errors occur.
+
+---
+
+## Cloud Monitoring
+
+Cloud Monitoring collects, stores, and analyses **time-series metrics** — numeric measurements recorded at regular intervals with associated metadata (resource labels, metric labels, timestamps). Every GCP managed service emits built-in metrics automatically; you can also emit custom metrics from applications.
+
+### Metrics Fundamentals
+
+A **time series** is a sequence of data points, each consisting of a value and a timestamp, associated with a specific resource and metric. For example: CPU utilisation on a specific Compute Engine VM, sampled every 60 seconds.
+
+**Metric types** define the semantic meaning of the values:
+
+| Metric Kind | Description | Example |
+|---|---|---|
+| **Gauge** | Value at a point in time; independent measurements | CPU utilisation (%), memory used (bytes) |
+| **Counter (Delta)** | Change in value since last sample | Requests received in the last minute |
+| **Cumulative** | Monotonically increasing total since a start time | Total bytes sent since VM boot |
+
+**Metric descriptors** define a metric's schema: its name (a URI like `compute.googleapis.com/instance/cpu/utilization`), value type (INT64, DOUBLE, BOOL), metric kind (gauge, delta, cumulative), unit, and the set of labels that can be attached to individual time series.
+
+### Metric Explorer
+
+Metric Explorer is the primary interface for ad-hoc metric analysis. You select a resource type (e.g., `gce_instance`), a metric (e.g., CPU utilisation), and optionally filter by label values (specific project, zone, or instance name). You can apply aggregation functions (mean, max, sum, count), align data to a consistent interval, and group time series by label values (e.g., chart average CPU per zone).
+
+Common built-in metrics for key services:
+
+| Service | Key Metrics |
+|---|---|
+| Compute Engine | `instance/cpu/utilization`, `instance/network/received_bytes_count`, `instance/disk/read_bytes_count` |
+| GKE | `container/cpu/request_utilization`, `container/memory/used_bytes`, `kubernetes.io/autoscaler/*` |
+| Cloud SQL | `database/cpu/utilization`, `database/replication/replica_lag`, `database/state` |
+| Cloud Storage | `storage/request_count`, `storage/sent_bytes_count`, `storage/api/request_count` |
+| Cloud Run | `run/request_count`, `run/request_latencies`, `run/container/instance_count` |
+
+### Custom Metrics
+
+When built-in metrics do not capture what your application needs to measure — request queue depth, business transaction counts, feature flag activation rates — you can define and emit **custom metrics** using the Cloud Monitoring API or a compatible client library (OpenTelemetry, Prometheus remote write, the Monitoring client libraries).
+
+Custom metrics follow the same descriptor model as built-in metrics. You define the metric descriptor (name, type, labels) and then emit time series data points. Custom metric names use the `custom.googleapis.com/` prefix.
+
+**Log-based metrics** are an alternative: instead of emitting metrics directly from application code, you extract metric values from log entries using a filter. For example, count the number of log entries matching `severity=ERROR` per minute. Log-based metrics are created in Cloud Logging and automatically appear in Cloud Monitoring for use in charts and alerts.
+
+### Alerting Policies
+
+An **alerting policy** defines conditions that, when met, trigger a notification. The policy monitors one or more time series and fires when the value crosses a threshold, maintains a rate of change, or is absent.
+
+**Policy components:**
+
+**Conditions** specify what triggers the alert:
+- **Threshold condition**: Alert when a metric exceeds (or falls below) a value for a sustained duration (e.g., CPU > 80% for 5 minutes).
+- **Rate-of-change condition**: Alert when a metric changes faster than a specified rate.
+- **Metric absence condition**: Alert when no data has been received for a metric for a specified duration — detects silent failures.
+
+**Notification channels** specify where alerts are sent when a condition fires. Supported channels: Email, SMS, PagerDuty, OpsGenie, Slack, Webhook (generic HTTPS POST), Pub/Sub (for custom routing logic).
+
+**Alert documentation**: Each policy can include documentation text in Markdown that appears in the alert notification. Use this to embed runbook links, escalation contacts, and initial troubleshooting steps so on-call engineers have context immediately.
+
+### Uptime Checks
+
+Uptime checks probe external endpoints (HTTP, HTTPS, TCP) from multiple geographic locations at configurable intervals (as frequently as every minute). They verify that the endpoint responds with an expected status code (default: any 2xx) and optionally that the response body contains a specific string.
+
+Failed uptime checks can trigger alerting policies. The check results are available as a metric (`monitoring.googleapis.com/uptime_check/check_passed`), allowing you to build dashboards tracking global availability from the perspective of multiple probe locations.
+
+### Dashboards
+
+Dashboards are collections of **charts** (time-series visualisations) and **scorecards** (single-value summaries). GCP provides pre-built dashboards for most managed services (automatically populated when the service is used), and you can create custom dashboards for application-specific views.
+
+Dashboard widgets support:
+- Line charts (time-series trends)
+- Stacked area charts (composition over time)
+- Heatmaps (distribution of values over time)
+- Scorecards (current value vs threshold)
+- Text panels (documentation, runbook links embedded in the dashboard)
+
+---
+
+## Cloud Logging
+
+Cloud Logging collects, indexes, and stores log entries from GCP services, user applications, and on-premises systems. Every GCP managed service emits logs automatically to Cloud Logging without any agent or configuration required.
+
+### Log Types
+
+| Log Type | Source | Default Enabled |
+|---|---|---|
+| **Platform logs** | GCP managed services | Yes |
+| **Admin Activity audit logs** | All admin operations | Always (cannot disable) |
+| **Data Access audit logs** | Data read/write operations | No (must enable per service) |
+| **System Event audit logs** | GCP system actions (live migration) | Always |
+| **Policy Denied audit logs** | Requests denied by Org Policy or VPC Service Controls | Always |
+| **User-written logs** | Application code via Logging API or agents | As emitted |
+
+**Data Access audit logs** are the most commonly misconfigured. They track who read or wrote data (e.g., which user viewed which BigQuery table). They are disabled by default because they can generate very high volumes and significant cost. Enable them selectively — per service, per project — based on compliance requirements.
+
+### Log Router and Sinks
+
+The **Log Router** receives every log entry and evaluates it against a set of **sinks**. A sink matches log entries based on a filter (resource type, severity, log name, or any field in the log payload) and routes matching entries to a destination.
+
+**Sink destinations:**
+
+| Destination | Use Case |
+|---|---|
+| **Cloud Storage bucket** | Long-term archival, compliance retention, cost-effective storage |
+| **BigQuery dataset** | SQL analysis over historical logs, integration with BI tools |
+| **Pub/Sub topic** | Real-time streaming to external SIEM, custom processing pipelines |
+| **Cloud Logging bucket** | Route to a different log bucket with custom retention or access controls |
+
+The `_Default` sink routes all logs to the `_Default` log bucket in the same project. You can create additional sinks to duplicate log streams to other destinations, or create **exclusion filters** to prevent specific log entries from being stored (reducing cost for high-volume, low-value logs).
+
+### Log Buckets and Retention
+
+Log buckets are storage containers within Cloud Logging. Every project has two built-in buckets:
+
+- **`_Default`**: Receives logs from the default sink. Default retention: 30 days.
+- **`_Required`**: Receives Admin Activity, System Event, and Data Access (if enabled) audit logs. Retention: 400 days. Cannot be modified.
+
+You can create custom log buckets with configurable retention (1 to 3650 days). Longer retention incurs storage costs. For compliance retention beyond 10 years, export to Cloud Storage (Coldline or Archive class) via a sink.
+
+**Exclusion filters** prevent specific log entries from being ingested into a bucket. Use exclusions to drop high-volume low-value logs (health check request logs, static asset CDN logs) before they consume storage quota.
+
+### Log Explorer and Querying
+
+Log Explorer uses **Logging Query Language (LQL)**, a structured query language for filtering and searching log entries. Queries filter on structured fields:
+
+```
+resource.type="gce_instance"
+severity>=ERROR
+timestamp>="2026-01-01T00:00:00Z"
+jsonPayload.message:"connection refused"
+```
+
+Logs can also be queried using **BigQuery SQL** by exporting to a BigQuery sink — this enables analytical queries like "how many errors per hour over the last 30 days" that are impractical in the Log Explorer interface.
+
+### Cloud Logging Agents
+
+For Compute Engine VMs (not managed services), installing the **Ops Agent** is required to collect application logs and VM-level system metrics (memory, disk utilisation) that are not available through the hypervisor layer alone.
+
+The Ops Agent replaces the older Logging Agent and Monitoring Agent, combining both functions in a single binary. It uses:
+- **Fluent Bit** for log collection (from files, syslog, journald)
+- **OpenTelemetry Collector** for metrics collection
+
+The agent can be configured to collect logs from specific files, parse custom log formats, and add structured labels to log entries.
+
+---
+
+## Cloud Trace
+
+**Cloud Trace** is GCP's distributed tracing service. In a microservices architecture, a single user request may invoke dozens of services. Without tracing, determining where latency originates — which service call is slow, which database query is taking too long — requires correlating logs across services manually. Cloud Trace makes this automatic by collecting timing data for each service call and assembling it into a **trace** — a complete picture of the request's journey.
+
+### How Tracing Works
+
+When a request enters the system, a **trace context** is created: a unique trace ID and a span ID. As the request passes through each service, the trace context is propagated in HTTP headers (`X-Cloud-Trace-Context` for GCP, or standard W3C `traceparent` headers). Each service creates a **span** — a record of the work it did, annotated with start time, end time, labels, and status.
+
+Cloud Trace aggregates all spans sharing the same trace ID into a single trace, displaying them as a waterfall chart showing which calls happened sequentially and which happened in parallel, and how long each took.
+
+**Automatic instrumentation** is available for App Engine, Cloud Run, and GKE workloads using supported language runtimes. For custom applications, you integrate the Cloud Trace client library or use an OpenTelemetry SDK configured to export to Cloud Trace.
+
+### Latency Analysis
+
+Cloud Trace's **latency analysis** aggregates trace data across thousands of requests to identify:
+- The p50, p95, and p99 latency percentiles for a given endpoint
+- Which RPC calls (to databases, downstream services, Cloud APIs) contribute most to tail latency
+- Latency regressions introduced by recent deployments (compare latency before and after a deploy)
+
+---
+
+## Cloud Profiler
+
+**Cloud Profiler** performs **continuous CPU and memory profiling** of production applications without requiring manual profiling sessions or significant performance overhead. It periodically samples the application's call stack and aggregates the samples into a flame graph — a visualisation showing which functions consume the most CPU time or allocate the most memory.
+
+### How Profiling Works
+
+The Profiler agent runs within the application process (via a language-specific library) and captures stack traces at a low frequency (typically 100 Hz for CPU, lower for heap profiling). These samples are sent to Cloud Profiler, which aggregates them over a collection interval (usually 10 seconds) and stores the result as a profile.
+
+Cloud Profiler maintains a history of profiles, allowing you to compare profiles across time periods — identifying when a CPU regression was introduced, or which code change caused memory growth.
+
+### Supported Environments and Profile Types
+
+| Profile Type | Description |
+|---|---|
+| **CPU time** | Time spent executing on CPU (excluding time waiting for I/O or locks) |
+| **Wall time** | Elapsed real time, including time waiting for I/O, locks, and network calls |
+| **Heap** | Memory allocated by live objects in the heap (snapshot of current allocations) |
+| **Allocated heap** | Total memory allocated over the profiling period (not just what is currently live) |
+| **Threads** | Number of threads and their states at sample time |
+| **Contention** | Time spent waiting for mutex/lock contention |
+
+Language support includes: Go, Java, Node.js, Python, Ruby. For Java and Go, CPU and heap profiling are available. Other profile types vary by language.
+
+Cloud Profiler is distinct from **uptime checks** and **alerting** — it is a tool for developers and SREs investigating performance bottlenecks, not for operational monitoring.
+
+---
+
+## Error Reporting
+
+**Error Reporting** automatically groups application errors from logs and sends alerts when new error types appear. It aggregates stack traces from Cloud Logging, groups identical errors together regardless of when they occurred, and tracks error rates over time.
+
+### How Error Reporting Works
+
+Error Reporting reads application error logs (either from direct API writes using the Error Reporting client library, or by parsing `severity=ERROR` log entries that contain stack traces). It uses heuristics to group errors that have the same root cause (same exception type, same stack trace signature) into a single error group.
+
+For each error group, Error Reporting shows:
+- Error count and rate (errors per hour/day)
+- First seen and last seen timestamps
+- Affected users (if user context is provided)
+- Representative sample stack traces
+- Linked source code (if Cloud Source Repositories integration is configured)
+
+### Alerting on New Errors
+
+Error Reporting can send notifications when a **new error group** appears — an exception type that has never been seen before in the application. This is a leading indicator: catching a new error type before it accumulates into a high-volume incident. Notifications go via email or PagerDuty.
+
+---
+
+## SLO Monitoring
+
+Cloud Monitoring supports **SLO (Service Level Objective) tracking** natively. You define an SLO based on a **request-based** or **window-based** approach:
+
+- **Request-based SLO**: The ratio of good requests to total requests. For example: "99.9% of HTTP requests must return a 2xx status code within 1000ms." Each request is counted as good or bad.
+- **Window-based SLO**: The fraction of time windows where performance was good. For example: "CPU utilisation must be below 80% for 99% of 5-minute windows."
+
+Cloud Monitoring calculates the **error budget** — how much unreliability remains before the SLO is violated — and tracks consumption over the SLO period. **Error budget alerts** fire when:
+- The burn rate is too high (the budget will be exhausted before the period ends at the current rate)
+- The budget has been partially or fully consumed
+
+SLO monitoring integrates with the broader SRE practice: when the error budget is exhausted, the team freezes new feature work and focuses on reliability. When the budget is healthy, the team can accept more deployment risk.
+
+---
+
+## Cross-Project Monitoring
+
+Cloud Monitoring supports a **workspace model** for cross-project visibility. A monitoring workspace is associated with a **scoping project** and can include metrics from multiple **monitored projects**. Dashboards, alerting policies, and uptime checks defined in the workspace scope see data from all monitored projects.
+
+This is the standard approach for organisations running multiple GCP projects (dev, staging, prod; or per-team projects): create a dedicated monitoring project, add all other projects as monitored projects, and manage all dashboards and alerts from the central monitoring project. Billing for monitoring data ingestion is charged to the scoping project.
+
+---
+
+## Audit Logs (Security Context)
+
+Cloud Audit Logs are part of Cloud Logging but are classified separately because of their security and compliance significance. They record what operations were performed by whom across all GCP services.
+
+| Log Type | What It Records | Retention in `_Required` |
+|---|---|---|
+| **Admin Activity** | Create, update, delete operations on resources | 400 days (always enabled) |
+| **Data Access** | Read operations on data; data creation/modification with content | 400 days (if enabled) |
+| **System Event** | GCP system actions (live migration, preemption, auto-scale events) | 400 days (always enabled) |
+| **Policy Denied** | Requests denied by Org Policy or VPC Service Controls | 400 days (always enabled) |
+
+Audit logs include: the **principal identity** (who made the request), the **method name** (what API was called), the **resource** (which object was acted on), the **request status** (success or error), the **source IP**, and the **timestamp**.
+
+For compliance, export audit logs to Cloud Storage (for long-term retention beyond 400 days) or BigQuery (for SQL-based compliance reporting). SIEM integration is achieved by routing audit logs through Pub/Sub to the external SIEM system.
+
+---
+
+## References
+
+- [Google Cloud — Cloud Monitoring Overview](https://cloud.google.com/monitoring/docs/monitoring-overview)
+- [Google Cloud — Cloud Logging Overview](https://cloud.google.com/logging/docs/overview)
+- [Google Cloud — Cloud Trace Overview](https://cloud.google.com/trace/docs/overview)
+- [Google Cloud — Cloud Profiler Overview](https://cloud.google.com/profiler/docs/about-profiler)
+- [Google Cloud — Error Reporting Overview](https://cloud.google.com/error-reporting/docs/overview)
+- [Google Cloud — Audit Logging Overview](https://cloud.google.com/logging/docs/audit)
+- [Google Cloud — SLO Monitoring](https://cloud.google.com/monitoring/service-monitoring)
+- [Google SRE Book — Service Level Objectives](https://sre.google/sre-book/service-level-objectives/)

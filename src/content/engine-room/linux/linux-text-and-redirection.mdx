@@ -1,0 +1,208 @@
+---
+title: "Linux Text Processing — I/O Redirection, Pipes, Vim, and Shell Variables"
+category: "linux"
+topic: "linux-text-processing"
+summary: "How Linux connects programs together and processes text — using I/O redirection to send output to files and capture errors separately, piping the output of one command as input to another, editing files with Vim's modal interface, and controlling shell behaviour through environment variables and startup files."
+tags: ["linux", "vim", "redirection", "pipes", "shell-variables", "rh124"]
+order: 4
+draft: false
+---
+
+## Overview
+
+The Linux command line's power comes not from individual commands but from the ability to compose them. Programs that each do one thing well can be connected through pipes so that the output of one becomes the input of the next, forming a processing pipeline without writing a single temporary file. Redirection extends this further, sending output to files, capturing errors separately, and feeding files as input. Alongside pipeline composition, administrators spend significant time reading and editing text files — configuration, logs, scripts — where Vim's modal editor is the universal tool. Understanding how shell variables and startup files shape the shell environment ties all of this together.
+
+---
+
+## File Descriptors
+
+Every process on Linux inherits three standard I/O streams, each identified by a file descriptor number:
+
+| Stream | Descriptor | Default Connection |
+|---|---|---|
+| stdin | 0 | Keyboard input |
+| stdout | 1 | Terminal output |
+| stderr | 2 | Terminal output (separate from stdout) |
+
+stderr is separate from stdout so that error messages can be captured or suppressed independently of normal program output. A command that produces a thousand lines of stdout and one error line can have its error isolated without filtering the entire stream.
+
+---
+
+## I/O Redirection
+
+The shell interprets redirection operators and rewires file descriptors before the command runs. The command itself sees stdin, stdout, and stderr as normal — it does not know the shell has connected them to files.
+
+| Operator | Effect |
+|---|---|
+| `> file` | Redirect stdout to file, overwriting it |
+| `>> file` | Redirect stdout to file, appending |
+| `2> file` | Redirect stderr to file, overwriting it |
+| `2>> file` | Redirect stderr to file, appending |
+| `&> file` | Redirect both stdout and stderr to the same file |
+| `2>&1` | Redirect stderr to the same destination as stdout |
+| `< file` | Use file contents as stdin for the command |
+| `2> /dev/null` | Discard stderr completely |
+
+The ordering of `>` and `2>&1` matters. `command > file 2>&1` first redirects stdout to `file`, then redirects stderr to the same place stdout now goes (the file). Reversing the order (`command 2>&1 > file`) redirects stderr to the current stdout (the terminal), then redirects stdout to the file — leaving stderr going to the terminal, which is usually not the intended behaviour.
+
+---
+
+## Pipes and the tee Command
+
+The pipe operator `|` connects the stdout of one command directly to the stdin of the next. Both processes run concurrently in subshells — the output is not buffered to disk between them. This makes pipelines efficient for processing large streams.
+
+```
+ps aux | grep nginx
+ls -lS /var/log | head -20
+cat /etc/passwd | sort -t: -k3 -n | head -5
+```
+
+The `tee` command is a T-junction in a pipeline: it reads from stdin and writes simultaneously to a file and to stdout. This allows a pipeline to both save intermediate output and continue processing it.
+
+```
+ls -lh /var/log | tee listing.txt | wc -l
+```
+
+This command lists `/var/log`, saves the listing to `listing.txt`, and also counts the number of lines — all in one pipeline without running `ls` twice.
+
+---
+
+## Text Viewing Commands
+
+| Command | Effect |
+|---|---|
+| `cat file` | Print entire file contents to stdout |
+| `less file` | Page through a file interactively; `q` quits, `/pattern` searches, `n` next match, `G` last line, `g` first line |
+| `head -n 20 file` | Print the first 20 lines (default 10 if `-n` is omitted) |
+| `tail -n 20 file` | Print the last 20 lines (default 10 if `-n` is omitted) |
+| `tail -f file` | Follow a file in real time — new lines appended to the file appear on screen immediately; essential for watching log files |
+
+`tail -f` combined with grep is a practical pattern for monitoring a specific service's log entries as they arrive:
+
+```
+tail -f /var/log/messages | grep sshd
+```
+
+---
+
+## Vim Modal Editor
+
+Vim is installed on virtually every Linux system and is the editor you can rely on being present. Its modal design distinguishes it from most editors: the same keys serve different purposes depending on the current mode. This is unfamiliar at first but allows navigation and editing without taking your hands off the home row.
+
+### Vim Modes
+
+| Mode | How to Enter | Purpose |
+|---|---|---|
+| Normal | `Esc` (always returns to Normal) | Navigate, issue commands, delete/yank/paste |
+| Insert | `i`, `a`, `o`, `O`, `A`, `I` | Type and edit text |
+| Visual | `v` (character), `V` (line), `Ctrl+V` (block) | Select a region of text for operations |
+| Command | `:` from Normal mode | Save, quit, search-and-replace, set options |
+
+If you are unsure what mode Vim is in, press `Esc` once or twice to return to Normal mode — it is always safe to press `Esc`.
+
+### Navigation and Editing Commands
+
+| Key | Action |
+|---|---|
+| `i` | Insert before the cursor |
+| `a` | Insert after the cursor |
+| `o` | Open a new line below and enter Insert mode |
+| `O` | Open a new line above and enter Insert mode |
+| `A` | Insert at the end of the current line |
+| `Esc` | Return to Normal mode from any other mode |
+| `h j k l` | Move left / down / up / right in Normal mode |
+| `0` | Move to the beginning of the line |
+| `$` | Move to the end of the line |
+| `gg` | Jump to the first line of the file |
+| `G` | Jump to the last line of the file |
+| `:N` | Jump to line number N |
+| `w` | Move forward one word |
+| `b` | Move backward one word |
+| `dd` | Delete the current line (and copy it to the unnamed register) |
+| `yy` | Yank (copy) the current line |
+| `p` | Paste after the cursor / below the current line |
+| `P` | Paste before the cursor / above the current line |
+| `u` | Undo the last change |
+| `Ctrl+R` | Redo the last undone change |
+| `x` | Delete the character under the cursor |
+| `/pattern` | Search forward for `pattern`; `n` next match, `N` previous match |
+| `:%s/old/new/g` | Replace all occurrences of `old` with `new` in the entire file |
+| `:N,Ms/old/new/g` | Replace within a line range (N to M) |
+| `:w` | Write (save) the file |
+| `:q` | Quit (fails if there are unsaved changes) |
+| `:wq` | Save and quit |
+| `:q!` | Quit without saving, discarding all changes |
+| `ZZ` | Save and quit shortcut (Normal mode, no colon needed) |
+
+---
+
+## Shell Variables and Environment Variables
+
+Bash distinguishes two kinds of variables:
+
+**Shell variables** are local to the current shell process. They are not inherited by child processes (commands you run, subshells, scripts). Assign with `name=value` — no spaces around the `=`:
+
+```
+MYVAR=hello
+echo $MYVAR
+```
+
+**Environment variables** are exported to child processes. Use `export` to promote a shell variable to an environment variable, or combine assignment and export:
+
+```
+export MYVAR=hello
+export PATH="$PATH:/opt/myapp/bin"
+```
+
+`env` lists all current environment variables. `unset VARNAME` removes a variable from both the shell and the environment.
+
+### Key Environment Variables
+
+| Variable | Purpose |
+|---|---|
+| `PATH` | Colon-separated list of directories Bash searches for external commands |
+| `HOME` | Absolute path to the current user's home directory |
+| `USER` | Current logged-in username |
+| `SHELL` | Path to the current shell (`/bin/bash`) |
+| `LANG` | System locale — affects character encoding and date/number formatting |
+| `PS1` | Primary prompt string — controls what the shell prompt looks like |
+| `HISTSIZE` | Number of history entries to keep in memory |
+| `HISTFILESIZE` | Number of history entries to write to `~/.bash_history` |
+| `EDITOR` | Default text editor invoked by tools that need to open an editor |
+
+Modifying `PATH` incorrectly — for example, accidentally clearing it with `PATH=newdir` instead of `PATH="$PATH:newdir"` — will cause commands like `ls` and `cat` to stop working because Bash can no longer find their executables. If this happens in the current session, you can still run commands using their full absolute path (`/usr/bin/ls`) while you fix `PATH`.
+
+---
+
+## Bash Startup Files
+
+Bash reads different configuration files depending on how the shell session is started:
+
+| File | When Read | Purpose |
+|---|---|---|
+| `/etc/profile` | Login shell | System-wide PATH, umask, and environment setup |
+| `/etc/profile.d/*.sh` | Login shell | Modular system-wide configuration (applications drop files here) |
+| `~/.bash_profile` | Login shell | Per-user PATH, exports, and sourcing of `~/.bashrc` |
+| `~/.bashrc` | Interactive non-login shell | Per-user aliases, functions, prompt customisation |
+| `/etc/bashrc` | Interactive non-login shell | System-wide shell functions and aliases |
+| `~/.bash_logout` | Login shell exit | Cleanup tasks on logout |
+
+A **login shell** is one that authenticates you — an SSH connection, a console login, or `su -`. A **non-login interactive shell** is one opened within an already-authenticated session — a new terminal tab, a terminal emulator in GNOME.
+
+The practical rule for customisation: put aliases and functions in `~/.bashrc`; put environment variable exports in `~/.bash_profile`. Ensure `~/.bash_profile` sources `~/.bashrc` so that aliases defined in `~/.bashrc` are available in login shells too. Changes take effect in new shells; apply them to the current shell with:
+
+```
+source ~/.bashrc
+```
+
+or the equivalent shorthand:
+
+```
+. ~/.bashrc
+```
+
+---
+
+## Summary
+
+I/O redirection rewires file descriptors before a command runs, allowing stdout and stderr to be independently captured, appended, or discarded. Pipes connect commands into processing pipelines without temporary files, and `tee` enables branching a pipeline to both save output and continue processing it. Vim's modal design — Normal for navigation, Insert for editing, Command for file operations — rewards a small investment in learning with a highly efficient text editing workflow available on any Linux system. Shell variables are local to the current process; exported environment variables propagate to children. Bash startup files separate login shell configuration from interactive shell configuration, with `~/.bash_profile` and `~/.bashrc` as the primary per-user customisation points.

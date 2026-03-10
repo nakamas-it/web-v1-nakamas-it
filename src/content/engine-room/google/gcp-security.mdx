@@ -1,0 +1,277 @@
+---
+title: "GCP — Security and Compliance"
+category: "google"
+topic: "security"
+summary: "GCP's security services — KMS, Secret Manager, Security Command Center, VPC Service Controls, DLP, and compliance frameworks."
+tags: ["gcp", "google-cloud", "security", "kms", "secret-manager", "dlp", "compliance"]
+order: 13
+draft: false
+---
+
+## Overview
+
+Security in GCP is a shared responsibility. Google manages the physical security of data centres, the hardware, the hypervisor layer, and the managed services it operates. You are responsible for what runs on top: the configuration of IAM policies, the handling of encryption keys, the secrets your applications use, and the controls that prevent data from leaving the boundary you intend. GCP provides a comprehensive set of security services that, taken together, implement defence in depth — multiple layers of controls so that no single misconfiguration creates a catastrophic exposure.
+
+This article covers GCP's security tooling across five areas: encryption, secrets management, threat detection, network-level controls, and data protection.
+
+---
+
+## Encryption at Rest
+
+By default, **every piece of data stored in GCP is encrypted at rest** using AES-256, with no action required from the customer. This applies to Cloud Storage, Persistent Disks, Cloud SQL, BigQuery, and all other managed storage services. The encryption happens automatically at the storage layer before data is written to disk.
+
+GCP uses a two-tier key hierarchy for managed encryption:
+
+- **Data Encryption Key (DEK)**: Encrypts the actual data. Generated per storage chunk.
+- **Key Encryption Key (KEK)**: Encrypts the DEK. Managed by Google's internal key management service.
+
+This means the DEKs that protect your data are themselves encrypted, and neither is stored alongside the data in plaintext.
+
+### Customer-Managed Encryption Keys (CMEK)
+
+With CMEK, you control the KEK using **Cloud KMS** rather than letting Google manage it. When a service needs to encrypt or decrypt data, it calls Cloud KMS with a request to use your key. Google never has access to the raw key material — only the ability to call your KMS key for specific cryptographic operations, and only if that key is enabled.
+
+The critical operational implication: **if you delete or disable a CMEK key, GCP cannot decrypt the data protected by it**. This capability satisfies compliance scenarios where the customer must be able to cryptographically destroy data by destroying the key — for example, meeting GDPR right-to-erasure requirements without physically deleting every storage object.
+
+CMEK is supported across most GCP storage and data services: Cloud Storage, BigQuery, Cloud SQL, Compute Engine persistent disks, GKE, Pub/Sub, and more.
+
+### Customer-Supplied Encryption Keys (CSEK)
+
+With CSEK, you provide the raw encryption key material with **every API request** that reads or writes data. GCP uses the key for that operation and never stores it. The key must be a 256-bit AES key, base64-encoded.
+
+CSEK provides maximum control — Google cannot access your data even in the event of a Google-side compromise — but maximum operational burden. You must supply the key on every operation, store it securely yourself, and handle key rotation manually. CSEK is supported for Cloud Storage objects and Compute Engine persistent disks.
+
+### Encryption Key Comparison
+
+| Model | Who Manages Keys | GCP Stores Key? | Can GCP Decrypt Your Data? | Complexity |
+|---|---|---|---|---|
+| Google-managed (default) | Google | Yes | Yes (but subject to ToS and audit logs) | None |
+| CMEK (Cloud KMS) | Customer, via Cloud KMS | No (KMS stores key in HSM or software) | Only via KMS API calls, with audit trail | Medium |
+| CSEK | Customer | Never | No | High |
+| Cloud EKM | Customer (your hardware) | No (GCP holds a reference only) | Only via call to your external KMS | Very High |
+
+### Cloud KMS
+
+**Cloud KMS** is GCP's managed key management service. It stores and manages cryptographic keys, performs encryption and decryption operations, and provides audit-logged access to all key operations.
+
+Keys in Cloud KMS are organised into **key rings** — a logical grouping tied to a specific location (region, multi-region, or global). Key rings cannot be deleted once created; individual key versions can be disabled and destroyed.
+
+**Key backends** determine where the actual key material is stored and how cryptographic operations are performed:
+
+- **Software backend**: Key material stored in Google's software-based KMS. FIPS 140-2 Level 1 validated.
+- **Cloud HSM**: Key material stored in **FIPS 140-2 Level 3** Hardware Security Modules. The key never leaves the HSM. Satisfies compliance requirements mandating HSM-protected keys.
+- **Cloud External Key Manager (EKM)**: Key material stored in **your** hardware outside GCP. GCP calls your external KMS for each operation via a supported key management protocol. GCP never has access to the raw key — only the ability to invoke operations on it.
+
+Key rotation can be configured automatically (by setting a rotation period on a key) or performed manually. Cloud KMS generates a new key version on rotation and sets it as the primary; older versions remain active to decrypt data encrypted with them until you explicitly disable and destroy them.
+
+---
+
+## Secret Manager
+
+**Secret Manager** stores application secrets — API keys, database passwords, TLS private keys, OAuth tokens, and any other sensitive string or binary blob that an application needs at runtime. It is not an encryption service; it is a secure, versioned, access-controlled store for secrets.
+
+### Core Features
+
+**Versioning**: Every secret has one or more versions. When you update a secret (rotate a password, renew a certificate), you create a new version. Applications can reference the latest version or pin to a specific version. Old versions can be disabled or destroyed once all applications have migrated to the new version.
+
+**IAM access control**: Access to individual secrets (or all secrets in a project) is governed by IAM. The `secretmanager.secretAccessor` role grants the ability to read a secret's value. Applications running on Compute Engine, Cloud Run, GKE, or Cloud Functions retrieve secrets by calling the Secret Manager API using the service account attached to the runtime — no credentials file required.
+
+**Audit logging**: Every access to a secret's value is logged in Cloud Audit Logs (Data Access logs). This provides a full access trail: who accessed which secret, when, from what IP, via which service.
+
+**Automatic rotation**: Secret Manager integrates with Cloud Functions and Pub/Sub to support automatic rotation workflows. When a rotation trigger fires, a Cloud Function can generate a new secret value, update the secret in Secret Manager, and notify dependent services. Google provides rotation function templates for common secrets like Cloud SQL passwords.
+
+**Regional replication**: By default, secret data is replicated automatically across Google-managed regions. You can restrict replication to specific user-managed regions for data residency compliance.
+
+### Secret Manager vs Cloud KMS
+
+A common question is when to use Secret Manager and when to use Cloud KMS. They solve different problems:
+
+| Concern | Use Secret Manager | Use Cloud KMS |
+|---|---|---|
+| Store a database password | Yes | No |
+| Encrypt a file at rest | No | Yes |
+| Store a TLS private key for application use | Yes | Yes (via asymmetric key) |
+| Generate and rotate data encryption keys | No | Yes |
+| Application credential management | Yes | No |
+
+---
+
+## Security Command Center
+
+**Security Command Center (SCC)** is GCP's centralised security and risk management platform. It aggregates findings from Google's built-in security services and third-party tools, providing a unified view of vulnerabilities, misconfigurations, and active threats across all GCP resources in an organisation.
+
+### Standard vs Premium Tier
+
+| Capability | Standard | Premium |
+|---|---|---|
+| Security Health Analytics | Basic checks | Comprehensive managed vulnerability checks |
+| Web Security Scanner | Manual scans | Managed, scheduled scans |
+| Cloud Armor findings | Yes | Yes |
+| Container Threat Detection | No | Yes |
+| Event Threat Detection | No | Yes |
+| VM Threat Detection | No | Yes |
+| Compliance reports | No | Yes (PCI DSS, HIPAA, CIS benchmarks) |
+
+**Security Health Analytics** checks GCP resource configurations against security best practices: public Cloud Storage buckets, overly permissive IAM bindings (roles with `allUsers`), disabled audit logging, SQL instances without SSL, open firewall rules, and more. Standard tier performs a subset of these checks; Premium tier performs a comprehensive audit across all supported services.
+
+**Event Threat Detection** analyses Cloud Logging streams in real time for indicators of compromise: brute force attacks, credential theft, Bitcoin mining on Compute Engine, anomalous API calls, and IAM privilege escalation patterns.
+
+**VM Threat Detection** scans running VM memory for malware signatures and cryptomining activity without requiring an agent inside the VM — detection happens at the hypervisor layer.
+
+**Container Threat Detection** monitors GKE container runtime for suspicious process executions, unexpected system calls, and known attack patterns within running containers.
+
+SCC findings can be exported to Cloud Logging, Pub/Sub (for SIEM integration), or BigQuery for long-term analysis. SCC integrates with Jira, PagerDuty, and Slack via Pub/Sub-based connectors.
+
+---
+
+## VPC Service Controls
+
+**VPC Service Controls** create security perimeters around GCP services and the APIs that access them. The problem they solve: even with correct IAM policies, a user or service account with access to Cloud Storage, BigQuery, or other services could potentially exfiltrate data by copying it to a different GCP project or to an external destination. IAM controls who can perform operations; VPC Service Controls control *from where* those operations can be performed.
+
+### Access Perimeters
+
+A **service perimeter** defines a boundary around a set of GCP projects and the services within them. Operations on the specified services are only permitted if:
+- The request originates from within the perimeter, OR
+- The request originates from an **access level** that has been explicitly granted permission to reach into the perimeter.
+
+An **access level** is a condition — an IP address range, a device policy, or a combination. For example: "allow access from IP range 203.0.113.0/24" or "allow access from corporate-managed devices that meet the endpoint verification policy."
+
+### Preventing Data Exfiltration
+
+Consider a scenario where a rogue insider has `storage.objectViewer` on a sensitive Cloud Storage bucket. Without VPC Service Controls, they could copy that data to a bucket in a personal GCP account using `gsutil cp`. With VPC Service Controls, the copy operation fails because the destination project is outside the perimeter — even though the IAM permissions would normally allow it.
+
+This is the fundamental capability VPC Service Controls adds on top of IAM: it restricts access based on the context of the request (network location, device state) in addition to the identity of the requester.
+
+### Dry Run Mode
+
+VPC Service Controls supports a **dry run mode** where the perimeter is configured but violations are only logged, not enforced. This allows you to validate the perimeter configuration without breaking existing workflows before switching to enforcement mode.
+
+---
+
+## Cloud Armor
+
+**Cloud Armor** is GCP's DDoS protection and Web Application Firewall (WAF) service. It integrates with the Global External HTTP(S) Load Balancer and protects backends from network and application-layer attacks.
+
+### DDoS Protection
+
+GCP's network absorbs **volumetric DDoS attacks** at the edge of Google's network before traffic reaches the load balancer or backends. This protection is always-on for resources using the Global External HTTP(S) Load Balancer, at no additional cost, up to Google's ability to absorb the attack at the network level.
+
+Cloud Armor adds an additional layer of **application-layer DDoS mitigation** — distinguishing legitimate traffic from bot or attack traffic using adaptive algorithms.
+
+### Security Policies
+
+Cloud Armor **security policies** are sets of rules attached to a backend service. Each rule specifies:
+
+- **Priority**: Rules are evaluated in ascending priority order (lower number = evaluated first).
+- **Match condition**: IP ranges, geographic origin, or request attributes.
+- **Action**: Allow or Deny.
+
+**Pre-configured WAF rules** provide out-of-the-box protection against OWASP Top 10 vulnerabilities: SQL injection, cross-site scripting (XSS), local and remote file inclusion, and more. These rules are based on Google's curated ModSecurity rule set and can be applied in detection-only or enforcement mode.
+
+**Rate limiting** rules enforce request-per-minute caps based on IP address or on a custom key (a header value, cookie, or other request attribute). When the limit is exceeded, Cloud Armor can deny the request or redirect it to a CAPTCHA page.
+
+**Geographic filtering** allows denying or allowing traffic based on the country of the source IP address — useful for compliance requirements restricting service to specific countries, or for blocking known high-risk source regions.
+
+---
+
+## Binary Authorization and Container Analysis
+
+**Binary Authorization** enforces a policy that only container images which have been explicitly **attested** (cryptographically signed by a trusted party) can be deployed to GKE clusters. This creates a chain of custody from image build to deployment.
+
+The workflow: a CI/CD pipeline builds a container image, pushes it to Artifact Registry, and an attestation service (e.g., Cloud Build itself, or a custom vulnerability scanner) signs the image if it passes all required checks. When GKE attempts to run the image, Binary Authorization verifies the signature. Images without a valid attestation are rejected.
+
+This prevents deployment of:
+- Images from untrusted registries
+- Images built outside the approved CI/CD pipeline
+- Images that failed security scans
+
+**Container Analysis** (formerly Container Registry vulnerability scanning) scans container images stored in Artifact Registry for known CVEs in OS packages and application dependencies. Findings are surfaced in SCC and can serve as attestation gates in a Binary Authorization policy.
+
+---
+
+## Cloud Data Loss Prevention (DLP)
+
+**Cloud DLP** is GCP's managed service for discovering, classifying, and de-identifying sensitive data. It can scan data at rest (Cloud Storage objects, BigQuery tables, Datastore entities) or data in transit (inspection of strings passed directly to the API).
+
+### Detection and Classification
+
+Cloud DLP uses **info type detectors** — patterns and machine learning models — to identify sensitive data:
+
+| Info Type | Examples |
+|---|---|
+| `CREDIT_CARD_NUMBER` | 16-digit PAN numbers matching Luhn algorithm |
+| `EMAIL_ADDRESS` | RFC 5321 email addresses |
+| `PHONE_NUMBER` | Phone number formats by region |
+| `US_SOCIAL_SECURITY_NUMBER` | SSN format and context |
+| `PERSON_NAME` | Named entity recognition for personal names |
+| Custom regex / dictionary | Organisation-specific identifiers |
+
+Detectors return **likelihood scores** (Very Unlikely to Very Likely) rather than binary matches, allowing you to configure sensitivity thresholds.
+
+### De-identification
+
+Cloud DLP provides several **transformation** options for de-identifying detected sensitive data:
+
+| Transformation | How It Works | Reversible? |
+|---|---|---|
+| **Redaction** | Replace matched value with a placeholder (`[REDACTED]`) | No |
+| **Masking** | Replace characters with a fixed character (`XXX-XX-6789`) | No |
+| **Tokenisation** | Replace value with a surrogate token using format-preserving encryption | Yes (with the key) |
+| **Bucketing** | Replace numeric values with a range bucket (age 34 → `30-39`) | No |
+| **Date shifting** | Shift dates by a random offset to preserve time relationships without revealing real dates | Partially |
+
+**Format-preserving encryption (FPE)** tokenisation is particularly useful for databases — the token is the same format and length as the original (a 16-digit credit card number is replaced with a 16-digit token), so the database schema does not need to change.
+
+### Inspection vs De-identification
+
+Cloud DLP can be used in two distinct modes:
+- **Inspection**: Scan data and return a findings report — which sensitive items were found, where, and at what likelihood. Use this to understand data inventory and risk posture.
+- **De-identification**: Transform data by applying the configured transformations to remove or obscure sensitive fields. Use this when sharing data with third parties, loading data into analytics systems, or building training datasets.
+
+---
+
+## Cloud Identity-Aware Proxy (IAP)
+
+**Cloud IAP** implements Zero Trust access control for internal web applications. Instead of requiring users to be on a corporate VPN to access internal apps, IAP intercepts every request at the application level and verifies both **identity** (the user's Google account) and **authorisation** (an IAM policy check) before forwarding the request to the backend.
+
+The user experience: navigate to the app's URL, authenticate with your Google account if not already signed in, and if the IAM policy grants access, the request proceeds. No VPN client required.
+
+IAP protects applications on:
+- **App Engine** — intercepts at the App Engine frontend.
+- **Cloud Run** — via IAP connector configuration.
+- **Compute Engine** — intercepts via the Global External HTTP(S) Load Balancer.
+- **On-premises apps** — via IAP Connector (a proxy deployed in your environment that registers with IAP).
+
+IAP does not replace authentication within the application — it adds an outer access control layer. The application still receives the user's identity (via `X-Goog-Authenticated-User-Email` headers) and can perform its own authorisation logic.
+
+---
+
+## Compliance Frameworks
+
+GCP maintains compliance certifications and third-party audit reports for a broad set of regulatory frameworks. Google signs Business Associate Agreements (BAAs) for HIPAA compliance, making it legally permissible to process Protected Health Information (PHI) on GCP.
+
+| Regulation | Domain | Key GCP Feature |
+|---|---|---|
+| **HIPAA/HITECH** | Healthcare (US) | BAA with Google, encryption at rest/transit, audit logging, CMEK |
+| **GDPR** | Personal data (EU) | Data residency via org policy, right to erasure via CMEK key deletion, DLP |
+| **PCI DSS** | Payment card data | VPC Service Controls (isolation), Cloud Armor (WAF), encryption, audit logs |
+| **FedRAMP** | US federal agencies | Assured Workloads, dedicated infrastructure options |
+| **ISO 27001 / 27017 / 27018** | International security standards | Google infrastructure certifications |
+| **SOC 1/2/3** | Reporting controls | Third-party audit reports available in the Google Cloud console |
+
+**Assured Workloads** is GCP's solution for regulated industries and government customers. It enforces additional controls — data residency restrictions, personnel access controls, and operational requirements — that go beyond standard GCP compliance. It is the path to FedRAMP High, DoD Impact Levels, and ITAR compliance on GCP.
+
+**Organisation Policy constraints** complement compliance by preventing policy drift — configurations that would violate compliance requirements can be blocked at the organisation or folder level, ensuring no project can deviate from the required baseline regardless of individual project administrators' IAM permissions.
+
+---
+
+## References
+
+- [Google Cloud — Encryption at Rest](https://cloud.google.com/docs/security/encryption/default-encryption)
+- [Google Cloud — Cloud KMS Overview](https://cloud.google.com/kms/docs/overview)
+- [Google Cloud — Secret Manager Overview](https://cloud.google.com/secret-manager/docs/overview)
+- [Google Cloud — Security Command Center](https://cloud.google.com/security-command-center/docs/overview)
+- [Google Cloud — VPC Service Controls](https://cloud.google.com/vpc-service-controls/docs/overview)
+- [Google Cloud — Cloud Armor Overview](https://cloud.google.com/armor/docs/cloud-armor-overview)
+- [Google Cloud — Cloud DLP Overview](https://cloud.google.com/dlp/docs/overview)
+- [Google Cloud — Cloud IAP Overview](https://cloud.google.com/iap/docs/concepts-overview)

@@ -1,0 +1,272 @@
+---
+title: "Linux — SSH & Secure Remote Access"
+category: "linux"
+topic: "ssh"
+summary: "OpenSSH client and server on RHEL 9 — key-based authentication, sshd_config hardening, ssh-keygen, scp, and sftp."
+tags: ["linux", "rhel", "ssh", "openssh", "remote-access", "security"]
+order: 9
+draft: false
+---
+
+## Overview
+
+**SSH** (Secure Shell) is the standard protocol for encrypted remote access to Linux systems. It replaces the older plaintext protocols — Telnet, rsh, and rlogin — that transmitted usernames, passwords, and all data in cleartext, making them trivially interceptable on any shared network. On RHEL 9, OpenSSH provides both a client (`ssh`) and a daemon (`sshd`) that listens for incoming connections on TCP port 22 by default.
+
+Every byte crossing an SSH connection is encrypted using symmetric encryption negotiated at session start, with keys derived using Diffie-Hellman key exchange. Authentication occurs before any shell access is granted. SSH also provides more than just a remote shell: `scp` and `sftp` enable secure file transfer, and port forwarding lets you tunnel other protocols through the encrypted channel.
+
+---
+
+## Connecting to a Remote Host
+
+The basic SSH client syntax is:
+
+```bash
+ssh remotehost                        # Log in as the current local username
+ssh remoteuser@remotehost             # Log in as a specific user
+ssh -p 2222 user@host                 # Connect to a non-default port
+ssh user@host command                 # Run a single command on the remote host and exit
+ssh -X user@host                      # Enable X11 forwarding for graphical applications
+ssh -i ~/.ssh/mykey user@host         # Specify a private key file explicitly
+ssh -v user@host                      # Verbose — shows each step of the handshake (debugging)
+```
+
+To gracefully end a session, type `exit` or press Ctrl+D. If the session is frozen and the terminal is unresponsive, press Enter, then type `~.` (tilde, period) — this is the SSH escape sequence that forcibly closes the connection regardless of network state.
+
+---
+
+## Host Key Verification
+
+The first time you connect to a new host, SSH cannot verify its identity and presents a warning:
+
+```
+The authenticity of host 'server1 (192.168.1.10)' can't be established.
+ED25519 key fingerprint is SHA256:AbCdEfGhIjKl...
+Are you sure you want to continue connecting (yes/no/[fingerprint])?
+```
+
+Typing `yes` stores the server's public host key fingerprint in `~/.ssh/known_hosts`. On every subsequent connection, SSH checks the presented key against the stored fingerprint. If the key matches, the connection proceeds. If the key has changed — for example, because the server was reinstalled or because an attacker is intercepting traffic — SSH refuses to connect and displays a prominent warning.
+
+The system-wide known hosts file is `/etc/ssh/ssh_known_hosts`, maintained by administrators for all users. Per-user known hosts are in `~/.ssh/known_hosts`.
+
+To remove a stale entry after a legitimate server reinstall:
+
+```bash
+ssh-keygen -R hostname         # Remove all keys for this hostname
+ssh-keygen -R 192.168.1.10     # Remove by IP address
+```
+
+The `StrictHostKeyChecking yes` default in OpenSSH means connections to unknown hosts are refused rather than prompted, depending on how the system is configured. In automation environments where unknown hosts are expected, `StrictHostKeyChecking accept-new` accepts new keys but rejects changed ones.
+
+---
+
+## SSH Key Pairs and Authentication
+
+Password authentication requires sending a secret over the network on every login (in encrypted form). Key-based authentication is stronger: you prove your identity by possessing a private key that mathematically corresponds to a public key stored on the server. The private key never leaves your machine.
+
+### Generating a Key Pair
+
+```bash
+ssh-keygen                              # Interactive — defaults to RSA 3072-bit
+ssh-keygen -t ed25519                   # Ed25519 (modern, compact, recommended)
+ssh-keygen -t rsa -b 4096              # RSA 4096-bit (compatible with older systems)
+ssh-keygen -t ecdsa -b 521             # ECDSA 521-bit
+ssh-keygen -f ~/.ssh/mykey             # Specify output filename
+ssh-keygen -t ed25519 -C "alice@workstation"  # Add a comment (appears in authorized_keys)
+```
+
+`ssh-keygen` generates two files:
+- **Private key** (e.g., `~/.ssh/id_ed25519`) — never share this
+- **Public key** (e.g., `~/.ssh/id_ed25519.pub`) — safe to distribute freely
+
+SSH enforces strict permissions on these files:
+
+| Path | Required Permissions |
+|---|---|
+| `~/.ssh/` directory | `700` (drwx------) |
+| Private key file | `600` (-rw-------) |
+| Public key file | `644` (-rw-r--r--) |
+| `~/.ssh/authorized_keys` | `600` (-rw-------) |
+
+If permissions are wider than these values, SSH silently ignores key-based authentication.
+
+An optional **passphrase** encrypts the private key file at rest. Without a passphrase, anyone who obtains the file can use it immediately. With a passphrase, they also need to know the passphrase to decrypt it. For interactive use, a passphrase is strongly recommended.
+
+### Deploying the Public Key to a Server
+
+```bash
+ssh-copy-id user@remotehost                        # Deploy ~/.ssh/id_rsa.pub automatically
+ssh-copy-id -i ~/.ssh/mykey.pub user@remotehost    # Deploy a specific public key
+```
+
+`ssh-copy-id` appends the public key to `~/.ssh/authorized_keys` on the remote host, creating the directory and setting permissions if necessary. Without the tool:
+
+```bash
+cat ~/.ssh/id_ed25519.pub | ssh user@host \
+  "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
+   cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+### SSH Agent — Avoiding Repeated Passphrase Entry
+
+```bash
+eval $(ssh-agent)           # Start agent and export environment variables
+ssh-add ~/.ssh/mykey        # Add private key to agent (prompts for passphrase once)
+ssh-add -l                  # List keys currently held by the agent
+ssh-add -D                  # Remove all keys from the agent
+```
+
+Once a key is added to `ssh-agent`, subsequent `ssh` and `scp` commands use the decrypted key from memory without prompting again for the passphrase.
+
+---
+
+## SSH Client Configuration
+
+The file `~/.ssh/config` allows per-host settings and connection aliases. This eliminates repetitive typing of ports, usernames, identity files, and jump hosts:
+
+```
+Host bastion
+    HostName bastion.example.com
+    User ops
+    IdentityFile ~/.ssh/mykey
+    Port 2222
+
+Host prod-web
+    HostName 10.0.1.50
+    User deploy
+    IdentityFile ~/.ssh/mykey
+    ProxyJump bastion
+```
+
+With this configuration:
+- `ssh bastion` expands to the full command with all options applied
+- `ssh prod-web` connects to `10.0.1.50` via `bastion.example.com` in a single step
+
+The `ProxyJump` directive (available since OpenSSH 7.3) replaces the older and more complex `ProxyCommand` approach. It transparently establishes a TCP tunnel through the bastion host before initiating the real SSH handshake.
+
+---
+
+## Secure File Transfer
+
+### scp — Secure Copy
+
+`scp` transfers files over an SSH connection using the same authentication as `ssh`:
+
+```bash
+scp file.txt user@server:/tmp/             # Upload to remote
+scp user@server:/var/log/app.log .         # Download to current directory
+scp -r /local/dir user@server:/remote/     # Recursive directory copy
+scp -P 2222 file.txt user@server:/tmp/    # Non-default port (capital P)
+```
+
+### sftp — Interactive Transfer Session
+
+`sftp` provides an interactive file transfer session with FTP-like commands:
+
+```bash
+sftp user@remotehost          # Connect and open interactive session
+sftp -i ~/.ssh/key user@host  # Specify identity file
+```
+
+| sftp Command | Purpose |
+|---|---|
+| `ls` / `lls` | List remote / local directory |
+| `pwd` / `lpwd` | Show remote / local working directory |
+| `cd` / `lcd` | Change remote / local directory |
+| `get remotefile` | Download file to local machine |
+| `put localfile` | Upload file to remote machine |
+| `mkdir dirname` | Create remote directory |
+| `rm filename` | Delete remote file |
+| `bye` | Close the connection |
+
+For bulk or incremental transfers, `rsync` over SSH is preferred (`rsync -avz -e ssh source/ user@host:dest/`) because it transfers only changed blocks rather than whole files.
+
+---
+
+## sshd Server Configuration
+
+The SSH daemon is configured in `/etc/ssh/sshd_config`. Drop-in configuration fragments can be placed in `/etc/ssh/sshd_config.d/*.conf` and are included automatically.
+
+### Key sshd_config Directives
+
+| Directive | Default | Purpose |
+|---|---|---|
+| `Port` | `22` | TCP port sshd listens on |
+| `ListenAddress` | `0.0.0.0` | IP address to listen on (restrict to specific interface) |
+| `PermitRootLogin` | `prohibit-password` | Allow root login: `yes`, `no`, or `prohibit-password` |
+| `PasswordAuthentication` | `yes` | Allow password authentication |
+| `PubkeyAuthentication` | `yes` | Allow public key authentication |
+| `AllowUsers` | (none) | Whitelist of users permitted to log in |
+| `DenyUsers` | (none) | Blacklist of users never permitted to log in |
+| `MaxAuthTries` | `6` | Maximum authentication attempts per connection |
+| `ClientAliveInterval` | `0` | Seconds between keepalive probes to idle clients |
+| `X11Forwarding` | `no` | Whether to permit X11 forwarding |
+
+### Hardening Steps
+
+The most impactful hardening settings are:
+
+```
+PermitRootLogin no
+PasswordAuthentication no
+AllowUsers alice bob ops
+Port 2222
+MaxAuthTries 3
+ClientAliveInterval 300
+ClientAliveCountMax 2
+```
+
+Disabling `PasswordAuthentication` eliminates brute-force password attacks entirely — an attacker without the private key cannot authenticate regardless of how many attempts they make. Always verify that key-based login works for at least one account with sudo access before disabling password authentication.
+
+`PermitRootLogin no` forces administrators to log in as a named user and escalate with `sudo`, leaving an audit trail of who performed which privileged action.
+
+### Enabling and Managing sshd
+
+```bash
+systemctl enable --now sshd           # Enable at boot and start immediately
+systemctl restart sshd                # Apply after changes to sshd_config
+systemctl reload sshd                 # Reload config without dropping active sessions
+sshd -t                               # Test sshd_config for syntax errors before restart
+```
+
+### Firewall Configuration for SSH
+
+If `firewalld` is active, ensure SSH traffic is permitted:
+
+```bash
+firewall-cmd --list-services                       # Check if ssh is listed
+firewall-cmd --add-service=ssh --permanent         # Allow SSH (port 22)
+firewall-cmd --add-port=2222/tcp --permanent       # If using a non-standard port
+firewall-cmd --reload                              # Apply permanent rules
+```
+
+When changing the SSH port, update the firewall rule for the new port before restarting `sshd`. Use `semanage port -a -t ssh_port_t -p tcp 2222` to inform SELinux of the non-standard port if SELinux is enforcing.
+
+---
+
+## Debugging SSH Connections
+
+```bash
+ssh -v user@host      # Verbose: shows each phase of the handshake
+ssh -vv user@host     # More verbose
+ssh -vvv user@host    # Maximum verbosity
+```
+
+Verbose output shows:
+- Which key files are being tried
+- Whether host key verification succeeded
+- Which authentication methods were offered and attempted
+- The exact failure point if the connection is rejected
+
+On the server side, check the authentication log:
+
+```bash
+journalctl -u sshd -f                      # Follow sshd log in real time
+journalctl -u sshd --since "1 hour ago"    # Recent sshd entries
+grep "sshd" /var/log/secure | tail -20     # SSH auth events from rsyslog
+```
+
+---
+
+## Summary
+
+OpenSSH is the secure remote access standard on RHEL 9. Host key verification prevents man-in-the-middle attacks by fingerprinting servers on first connection and detecting changes. Key-based authentication — `ssh-keygen` to create an Ed25519 key pair, `ssh-copy-id` to deploy the public key — eliminates the brute-force attack surface of password authentication. The `~/.ssh/config` file reduces operational friction by defining aliases, identity files, and jump host chains. The `sshd_config` file controls the server: `PermitRootLogin no` forces named-user logins for auditability, `PasswordAuthentication no` enforces key-only access, and `AllowUsers` restricts which accounts can connect at all. Always validate `sshd_config` with `sshd -t` and test in a second terminal session before closing the first.

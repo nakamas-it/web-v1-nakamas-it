@@ -1,0 +1,157 @@
+---
+title: "Linux File Permissions — chmod, SUID, SGID, and umask"
+category: "linux"
+topic: "linux-permissions"
+summary: "How Linux controls access to files and directories through a nine-bit permission model — reading permission strings from ls -l output, changing permissions with chmod in symbolic or octal notation, setting ownership with chown, applying special bits like SUID and sticky bit, and controlling default permissions with umask."
+tags: ["linux", "permissions", "chmod", "umask", "rh124"]
+order: 6
+draft: false
+---
+
+## Overview
+
+Every file and directory on a Linux system has an associated owner, an owning group, and a set of permission bits that determine what different classes of users are allowed to do with it. This model has been part of Unix since its earliest days and remains the primary access control mechanism on RHEL 9. Understanding it is foundational to administering any Linux system — misconfigured permissions are one of the most common sources of both access failures and security vulnerabilities.
+
+The permission model divides the world into three identity classes. The **owner** (also called user) is the account that owns the file, typically the account that created it. The **owning group** is a group associated with the file — members of that group get a separate set of permissions. **Others** covers everyone else: any user who is neither the owner nor a member of the owning group. For each of these three classes, three permission bits are defined: **read** (`r`), **write** (`w`), and **execute** (`x`). That gives nine bits in total.
+
+---
+
+## Reading Permissions from ls -l
+
+The `ls -l` command displays permissions in a ten-character string at the start of each line. For example:
+
+```
+-rwxr-xr-- 1 alice devs 1024 Jan 1 file.sh
+```
+
+The first character is the file type: `-` for a regular file, `d` for a directory, `l` for a symbolic link, `b` for a block device, `c` for a character device, `p` for a named pipe, and `s` for a socket. The remaining nine characters are the permission bits in three groups of three: owner permissions, group permissions, and others permissions. A letter means the permission is granted; a dash means it is not.
+
+In the example above, `rwx` means the owner (alice) can read, write, and execute. `r-x` means members of the group (devs) can read and execute but not write. `r--` means all others can only read.
+
+Execute permission has a different meaning depending on whether it is applied to a file or a directory. On a regular file, execute means the file can be run as a program. On a directory, execute means the directory can be traversed — that is, a user can `cd` into it and access files within it. A directory without execute permission cannot be entered even if read permission is granted.
+
+---
+
+## Octal Notation
+
+Each permission bit has a numeric value: read = 4, write = 2, execute = 1. The values for each class are added together to produce a single digit, and the three digits are combined into a three-digit octal number.
+
+| Octal | Binary | Permissions |
+|---|---|---|
+| 7 | 111 | rwx |
+| 6 | 110 | rw- |
+| 5 | 101 | r-x |
+| 4 | 100 | r-- |
+| 0 | 000 | --- |
+
+Common permission sets: `755` = `rwxr-xr-x` (typical executable or directory); `644` = `rw-r--r--` (typical regular file); `700` = `rwx------` (private executable); `600` = `rw-------` (private file); `777` = `rwxrwxrwx` (fully open — avoid on production); `000` = no permissions for anyone.
+
+---
+
+## chmod — Changing Permissions
+
+The `chmod` command changes the permission bits on a file or directory. It accepts two notations: symbolic and octal.
+
+**Symbolic notation** uses letters and operators to express changes relative to the current state:
+
+```bash
+chmod u+x file          # Add execute for owner
+chmod g-w file          # Remove write for group
+chmod o=r file          # Set others to read only (replace, not add)
+chmod a+r file          # Add read for all (a = u+g+o)
+chmod u+x,g+r file      # Multiple changes in one command
+chmod -R 755 /var/www   # Apply recursively to a directory tree
+```
+
+The class letters are `u` (user/owner), `g` (group), `o` (others), `a` (all three). Operators are `+` (add), `-` (remove), `=` (set exactly, replacing current bits).
+
+**Octal notation** sets all nine bits at once, which is faster for well-known permission sets:
+
+```bash
+chmod 755 script.sh
+chmod 644 config.conf
+chmod 600 ~/.ssh/id_rsa
+```
+
+---
+
+## chown and chgrp — Changing Ownership
+
+The `chown` command changes the owner and optionally the owning group of a file:
+
+```bash
+chown alice file            # Change owner to alice
+chown alice:devs file       # Change owner and group
+chown :devs file            # Change group only (owner unchanged)
+chgrp devs file             # Change group (equivalent to chown :devs)
+chown -R alice:devs /srv/project   # Recursive ownership change
+```
+
+Only root can change the owner of a file. Regular users can change the group of a file they own, but only to a group they belong to.
+
+---
+
+## umask — Default Permissions for New Files
+
+When a new file or directory is created, the kernel applies a permission mask called the **umask** to strip certain bits from the default starting permissions. Files start with a base of `666` (no execute by default — the kernel does not grant execute on newly created files). Directories start with a base of `777` (execute is needed to traverse directories).
+
+The umask value is subtracted from the base to produce the actual permissions:
+
+| umask | New files | New directories |
+|---|---|---|
+| 022 | 644 (rw-r--r--) | 755 (rwxr-xr-x) |
+| 027 | 640 (rw-r-----) | 750 (rwxr-x---) |
+| 077 | 600 (rw-------) | 700 (rwx------) |
+
+The default umask on RHEL 9 for regular users is `0022`. For the root account it is also `0022` by default, though some configurations use `0027` for tighter control.
+
+```bash
+umask              # Display current umask
+umask 027          # Set umask for current session
+```
+
+To make the umask persistent, add the `umask` line to `~/.bashrc` for a specific user, or to a file in `/etc/profile.d/` for system-wide effect.
+
+---
+
+## Special Permission Bits
+
+Beyond the standard nine permission bits, Linux supports three special bits that change how executables run and how directories behave.
+
+**SUID (Set User ID, octal 4)** — when set on an executable file, the process runs with the permissions of the file's owner rather than the permissions of the user who launched it. The classic example is `/usr/bin/passwd`: the file is owned by root with SUID set, which allows any ordinary user to run it and modify `/etc/shadow` (which is root-readable only). In `ls -l` output, SUID appears as `s` in the owner execute position: `rwsr-xr-x`. If the underlying execute bit is not set, it shows as `S` (uppercase), which indicates the SUID bit is set but the file is not actually executable — a configuration error.
+
+**SGID (Set Group ID, octet 2)** — on an executable, the process runs as the file's owning group rather than the user's primary group. On a directory, SGID has a more commonly used effect: files and subdirectories created inside the directory inherit the directory's owning group instead of the creator's primary group. This makes SGID directories the standard approach for shared project directories — all files created within inherit the project group regardless of which team member creates them. SGID appears as `s` in the group execute position: `rwxr-sr-x`.
+
+**Sticky bit (octal 1)** — when set on a directory, only the file's owner, the directory's owner, or root can delete or rename files within that directory, even if other users have write permission on the directory itself. The `/tmp` directory has the sticky bit set to prevent users from deleting each other's temporary files. The sticky bit appears as `t` in the others execute position: `rwxrwxrwt`.
+
+Special bits are set and removed with `chmod` using either symbolic notation or a four-digit octal:
+
+```bash
+chmod u+s /usr/local/bin/mytool    # Set SUID
+chmod g+s /srv/project             # Set SGID on directory
+chmod +t /srv/shared               # Set sticky bit
+chmod 4755 /usr/local/bin/mytool   # SUID + 755 in octal
+chmod 2775 /srv/project            # SGID + 775 in octal
+chmod 1777 /tmp                    # Sticky + 777 in octal
+```
+
+---
+
+## Finding Files by Permission
+
+The `find` command can locate files with specific permission patterns, which is useful for auditing:
+
+```bash
+find /usr -perm -4000        # Find all SUID files under /usr
+find /usr -perm -2000        # Find all SGID files under /usr
+find / -perm /o+w            # Find all world-writable files
+find / -perm -4000 -user root 2>/dev/null   # SUID root executables
+```
+
+SUID root executables are high-value targets in privilege escalation scenarios — any unnecessary ones should be removed.
+
+---
+
+## Summary
+
+Linux file permissions use a nine-bit model divided across owner, group, and others, each with read, write, and execute bits. The `ls -l` command decodes these into a human-readable string; `chmod` changes them using symbolic or octal notation; `chown` and `chgrp` adjust ownership. The `umask` defines which bits are stripped from the kernel defaults when new files and directories are created. The three special bits — SUID, SGID, and sticky — modify how executables run and how directories handle ownership and deletion. Correct permission configuration is a prerequisite for a secure and functional Linux system.

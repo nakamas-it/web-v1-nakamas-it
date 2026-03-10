@@ -1,0 +1,288 @@
+---
+title: "GCP — Serverless Compute"
+category: "google"
+topic: "serverless"
+summary: "GCP's serverless spectrum — Cloud Run, Cloud Functions, and App Engine — including when to use each and how they handle scale-to-zero."
+tags: ["gcp", "google-cloud", "cloud-run", "cloud-functions", "app-engine", "serverless"]
+order: 5
+draft: false
+---
+
+## Overview
+
+Serverless compute means you deploy code or containers without managing servers, operating systems, or runtime environments. The platform provisions capacity on demand, scales automatically with traffic — including down to zero when there is no traffic — and charges only for actual usage.
+
+GCP offers three serverless compute platforms that span different levels of abstraction:
+
+- **App Engine** — the original GCP serverless platform; for web applications and APIs
+- **Cloud Functions** — event-driven, single-function execution
+- **Cloud Run** — container-based, fully managed; the most flexible of the three
+
+Understanding the differences between these services and the trade-offs involved in choosing among them is central to GCP architecture decisions.
+
+---
+
+## The Compute Spectrum
+
+It is useful to place serverless in context alongside GCP's full compute spectrum:
+
+| Service | Abstraction Level | You Manage | GCP Manages |
+|---------|------------------|-----------|------------|
+| Compute Engine | IaaS | OS, runtime, app, scaling | Hardware, hypervisor |
+| GKE Standard | CaaS | Nodes, node pools, containers | Control plane |
+| GKE Autopilot | Managed CaaS | Containers only | Nodes + control plane |
+| App Engine Flexible | PaaS (container) | Dockerfile, app | Nodes, scaling |
+| Cloud Run | Serverless containers | Container image | Instances, scaling, OS |
+| App Engine Standard | PaaS | App code only | Runtime, scaling, OS |
+| Cloud Functions | FaaS | Function code only | Runtime, scaling, packaging |
+
+Moving down the table, you give up control in exchange for reduced operational burden. Serverless services abstract away infrastructure management entirely — you write code or build a container, and the platform handles the rest.
+
+---
+
+## App Engine
+
+App Engine is GCP's Platform-as-a-Service offering and the oldest serverless service on GCP. It is designed for web applications and HTTP APIs. An App Engine application has a specific structure: it is divided into **services** (previously called modules), each service runs a deployable unit (e.g., a frontend, an API backend, a worker service), and each service can have multiple deployed **versions** running simultaneously.
+
+### Standard vs Flexible Environments
+
+| Feature | Standard Environment | Flexible Environment |
+|---------|---------------------|---------------------|
+| Runtime | Specific versions only: Python 2.7/3.x, Java 8/11/17, Go, PHP, Ruby, Node.js | Any language via custom Dockerfile |
+| Container model | Google-managed sandbox | Docker container on Compute Engine VMs |
+| Scaling | Scales to zero (no cost when idle) | Minimum 1 instance always running |
+| Startup time | Milliseconds (pre-warmed) | Minutes (Docker container start) |
+| Pricing | Per instance-hour; free tier available | Per vCPU-hour and GB memory-hour |
+| SSH access | No | Yes |
+| Local disk writes | Restricted (temp only) | Full disk access |
+| Background threads | Restricted | Full support |
+| Best for | Spiky, unpredictable traffic; cost-sensitive; standard runtimes | Consistent traffic; custom dependencies; background processing |
+
+**Standard** is the right choice for most web workloads: it starts fast, scales to zero, and has a free tier. When traffic is zero, you pay nothing. When a request arrives, an instance starts in milliseconds.
+
+**Flexible** uses Compute Engine VMs under the hood. It is better when you need a custom runtime (a language GCP's Standard sandbox does not support), access to native OS libraries, or long-running background threads. The trade-off is that Flexible always keeps at least one instance running — you cannot scale to zero.
+
+### App Engine Features
+
+**Traffic splitting** allows routing a percentage of requests to different deployed versions. This enables:
+
+- **Canary deployments** — send 5% of traffic to a new version, monitor for errors, then increase gradually
+- **A/B testing** — split traffic between two versions to compare user behaviour
+
+```bash
+# Split traffic: 90% to v1, 10% to v2
+gcloud app services set-traffic default \
+  --splits=v1=0.9,v2=0.1
+
+# Deploy a new version without shifting traffic
+gcloud app deploy --no-promote
+```
+
+**Version management** allows multiple versions of each service to be deployed simultaneously. You can shift traffic to any deployed version instantly — rollback is as simple as pointing traffic back to the previous version.
+
+---
+
+## Cloud Functions
+
+Cloud Functions is GCP's Function-as-a-Service (FaaS) offering. You write a single function in a supported language, deploy it, and the platform handles everything else: packaging, deployment, execution, and scaling. Functions execute in response to events or HTTP requests.
+
+### Trigger Types
+
+| Trigger | Description |
+|---------|-------------|
+| **HTTP** | Function exposes an HTTPS endpoint; called by direct HTTP requests |
+| **Cloud Pub/Sub** | Function invoked when a message is published to a Pub/Sub topic |
+| **Cloud Storage** | Function invoked on object create, delete, archive, or metadata update |
+| **Cloud Firestore** | Function invoked on document create, update, or delete |
+| **Firebase events** | Auth, Realtime Database, Remote Config, Analytics events |
+| **Eventarc** | Unified event routing from 90+ GCP services and custom sources |
+
+### Gen 1 vs Gen 2
+
+| Feature | Gen 1 | Gen 2 |
+|---------|-------|-------|
+| Underlying infrastructure | Custom FaaS runtime | Cloud Run |
+| Maximum timeout | 9 minutes | 60 minutes |
+| Maximum instance size | 8 GB RAM | 16 GB RAM, 4 vCPUs |
+| Concurrency | 1 request per instance | Multiple concurrent requests per instance |
+| Minimum instances | Not supported | Supported (avoid cold starts) |
+| Traffic splitting | No | Yes (via Cloud Run revisions) |
+
+Cloud Functions Gen 2 is built on top of Cloud Run. This means every Gen 2 function is actually a Cloud Run service under the hood, giving it Cloud Run's concurrency model, longer timeouts, and more powerful instance sizes. For new function deployments, Gen 2 is preferred.
+
+### Runtimes
+
+Cloud Functions supports: Node.js (18, 20), Python (3.10, 3.11, 3.12), Go (1.20, 1.21), Java (11, 17, 21), .NET (6, 8), Ruby (3.2), PHP (8.2).
+
+```python
+# Example Cloud Functions Gen 2 HTTP function
+import functions_framework
+
+@functions_framework.http
+def hello_http(request):
+    """HTTP Cloud Function."""
+    request_json = request.get_json(silent=True)
+    name = request_json.get('name', 'World') if request_json else 'World'
+    return f'Hello, {name}!'
+```
+
+```bash
+# Deploy a Python HTTP function (Gen 2)
+gcloud functions deploy hello-function \
+  --gen2 \
+  --runtime=python312 \
+  --region=us-central1 \
+  --source=. \
+  --entry-point=hello_http \
+  --trigger-http \
+  --allow-unauthenticated
+```
+
+---
+
+## Cloud Run
+
+Cloud Run is GCP's container-based serverless platform. You provide a container image (any language, any framework, as long as it listens on an HTTP port), and Cloud Run handles deployment, scaling, TLS termination, and infrastructure. It is the most flexible of the three serverless options because it places no constraints on language, runtime version, or dependencies — if it runs in a container, it runs on Cloud Run.
+
+### Core Concepts
+
+**Requests and concurrency**: Cloud Run is fundamentally HTTP-request-driven. Instances receive requests and the platform scales the number of instances based on concurrent requests. The default concurrency is 80 requests per instance; the maximum is 1,000. Higher concurrency means fewer instances and lower cost, but requires the application to be thread-safe and handle concurrent requests correctly.
+
+**Minimum and maximum instances**:
+
+- `--min-instances=0` (default) — scale to zero when idle; no cost between requests; cold starts possible
+- `--min-instances=N` — keep N instances always warm; eliminates cold starts; you pay for idle instance time
+- `--max-instances=N` — cap the number of instances; prevents runaway scaling and cost
+
+**Request timeout**: HTTP requests can run for up to 3,600 seconds (1 hour). This is far longer than typical HTTP responses, accommodating long-running stream processing or data export operations.
+
+### Cloud Run vs Cloud Functions Decision
+
+| Criterion | Use Cloud Functions | Use Cloud Run |
+|-----------|--------------------|-|
+| Code structure | Single function | Full application or multiple endpoints |
+| Container control | Not needed | Required (custom base image, dependencies) |
+| Language | Supported runtimes only | Any language |
+| Concurrency handling | Simple (per-invocation) | Required (multiple concurrent requests) |
+| Long timeouts (> 9 min) | Gen 2 only | Yes |
+| Simplest deployment | Yes | Slightly more setup (Dockerfile needed) |
+| Traffic splitting | Gen 2 only | Yes (revisions) |
+
+The simplest heuristic: if your workload is a single function triggered by an event and fits a supported runtime, Cloud Functions (Gen 2) is the easier path. For anything requiring a custom container image, a full web framework, or more complex routing, Cloud Run is more appropriate.
+
+### Revisions and Traffic Splitting
+
+Every Cloud Run deployment creates a new **revision** — an immutable snapshot of the container image and configuration. Traffic can be split between revisions, enabling canary deployments and rollbacks:
+
+```bash
+# Deploy a new revision sending only 10% of traffic
+gcloud run deploy my-service \
+  --image=gcr.io/my-project/my-app:v2 \
+  --no-traffic
+
+# Split traffic: 90% to previous revision, 10% to new
+gcloud run services update-traffic my-service \
+  --to-revisions=my-service-00001-abc=90,my-service-00002-def=10
+
+# Roll back instantly by routing all traffic to a specific revision
+gcloud run services update-traffic my-service \
+  --to-revisions=my-service-00001-abc=100
+```
+
+### Cloud Run Jobs
+
+Cloud Run Jobs run containers to **completion** rather than serving HTTP requests. A Job defines a container task, and it runs the task a specified number of times (with parallelism). Jobs are ideal for:
+
+- Batch data processing
+- Database migrations
+- Scheduled report generation
+- One-off administrative tasks
+
+```bash
+# Create and execute a Cloud Run Job
+gcloud run jobs create my-job \
+  --image=gcr.io/my-project/batch-processor:latest \
+  --tasks=10 \
+  --parallelism=5 \
+  --region=us-central1
+
+gcloud run jobs execute my-job --region=us-central1
+```
+
+Job execution timeout is up to 24 hours. Individual tasks can run for up to 24 hours. Failed tasks are automatically retried (configurable).
+
+### Private Networking with VPC Connector
+
+By default, Cloud Run services can only reach public internet endpoints. To access resources in a VPC (Cloud SQL via private IP, Redis on Memorystore, internal services), you need a **Serverless VPC Access connector**.
+
+A VPC connector is a managed proxy that forwards traffic from Cloud Run into a specified VPC subnet using a small pool of VMs. It adds a small amount of latency (typically < 1ms within a region).
+
+```bash
+# Create a VPC connector
+gcloud compute networks vpc-access connectors create my-connector \
+  --region=us-central1 \
+  --subnet=my-subnet \
+  --subnet-project=my-project
+
+# Deploy a Cloud Run service using the connector
+gcloud run deploy my-service \
+  --image=gcr.io/my-project/my-app \
+  --vpc-connector=my-connector \
+  --vpc-egress=private-ranges-only
+```
+
+`--vpc-egress=private-ranges-only` sends only RFC 1918 traffic through the connector; internet traffic goes directly. `--vpc-egress=all-traffic` routes all outbound traffic through the VPC, which is required when accessing the internet via a NAT gateway for a static outbound IP.
+
+---
+
+## Cold Starts
+
+A cold start occurs when a serverless platform must start a new instance to handle a request. During a cold start, the platform must:
+
+1. Allocate a container (or function runtime)
+2. Pull the container image (Cloud Run) or package the function (Cloud Functions)
+3. Start the application process
+4. Initialise the application code (database connections, config loading, etc.)
+5. Handle the request
+
+Cold start duration depends on container image size, runtime, and application initialisation time. Typical cold start latency:
+
+- Cloud Functions (Python/Node.js): 100–500 ms
+- Cloud Run (lightweight Go/Node.js): 200ms–1s
+- Cloud Run (Java/heavy frameworks): 2–10s
+- App Engine Standard: milliseconds (pre-warmed)
+
+### Mitigating Cold Starts
+
+1. **Minimum instances** — keep at least one instance always warm (`--min-instances=1`). Adds cost but eliminates cold starts for user-facing services.
+
+2. **CPU always allocated** (Cloud Run) — by default, Cloud Run only allocates CPU during request processing. With `--cpu-always-allocated`, CPU is always allocated, allowing background tasks and faster warm-up.
+
+3. **Lean container images** — use minimal base images (distroless, Alpine). Smaller images are pulled faster on cold start.
+
+4. **Lazy initialisation** — defer expensive initialisation (database connection pools, heavy config parsing) until the first request, or do it in a goroutine/thread after the process is already listening.
+
+5. **Concurrency** — higher concurrency per instance means fewer cold starts under load, since each existing instance absorbs more requests.
+
+---
+
+## Event-Driven Architecture with Eventarc
+
+Eventarc is GCP's unified eventing platform that routes events from GCP services, custom applications, and third-party sources to serverless destinations (Cloud Run, Cloud Functions Gen 2, Cloud Workflows).
+
+Eventarc supports two event formats:
+
+- **Direct events** — triggered by actions in GCP services (e.g., Cloud Storage object created, BigQuery job completed, Pub/Sub message published)
+- **Audit log events** — triggered by any Cloud Audit Log entry, providing coverage of virtually every GCP API call
+
+```bash
+# Create an Eventarc trigger to invoke Cloud Run on Cloud Storage events
+gcloud eventarc triggers create my-trigger \
+  --destination-run-service=my-service \
+  --destination-run-region=us-central1 \
+  --event-filters="type=google.cloud.storage.object.v1.finalized" \
+  --event-filters="bucket=my-bucket" \
+  --service-account=my-trigger-sa@my-project.iam.gserviceaccount.com
+```
+
+For simpler scenarios, Cloud Functions can be triggered directly by Pub/Sub, Cloud Storage, or Firestore without configuring Eventarc explicitly. Eventarc becomes the right tool when you need centralised event routing, audit-log-based triggers, or routing to multiple destinations.
