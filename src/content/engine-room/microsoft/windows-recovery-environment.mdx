@@ -1,0 +1,122 @@
+---
+title: "Windows Recovery Environment — WinRE, Reset, and Startup Repair"
+category: "microsoft"
+topic: "windows-recovery"
+summary: "How Windows Recovery Environment provides a rescue toolkit when Windows won't boot — automatic startup repair, system restore, system image recovery, and a command prompt for manual recovery — plus the Reset this PC feature that reinstalls Windows without requiring external media."
+tags: ["windows", "winre", "recovery", "bcdedit", "system-restore", "md-100"]
+order: 88
+draft: false
+---
+
+## Overview
+
+Windows Recovery Environment (WinRE) is a lightweight recovery operating system stored on a hidden partition separate from the main Windows installation. When Windows cannot boot normally — whether due to a corrupted boot configuration, missing system files, or a failed driver — WinRE provides the tools to diagnose and repair the damage without requiring external installation media.
+
+WinRE launches automatically after two or more consecutive failed boot attempts. It can also be reached intentionally: hold Shift while clicking Restart from the Start menu, navigate to Settings > Update & Security > Recovery > Advanced startup, or boot from a Windows installation USB and choose "Repair your computer." The `reagentc /boottore` command forces WinRE to load on the very next boot regardless of whether Windows would have started successfully.
+
+The recovery partition status can be checked and managed with `reagentc /info`, `reagentc /enable`, and `reagentc /disable`.
+
+---
+
+## WinRE Tools
+
+WinRE presents five recovery tools under Troubleshoot > Advanced options:
+
+| Tool | Purpose | Limitations |
+|------|---------|-------------|
+| Startup Repair | Automatically diagnoses and fixes boot problems | Cannot repair hardware failures or general Windows file corruption beyond boot files |
+| System Restore | Rolls back system files, registry, and drivers to a restore point | Does not affect user data; restore point must exist and System Protection must be enabled |
+| System Image Recovery | Restores the entire system volume from a previously created image | Overwrites all content on the system drive |
+| Command Prompt | Full command-line access inside WinRE | Manual; operator must know which commands to run |
+| Startup Settings | Changes boot-time behaviour for the next boot | Requires a restart to take effect |
+
+**Startup Repair** is the first tool to try when Windows fails to start. It examines the Master Boot Record, Boot Configuration Data, boot sector, and critical boot files, and attempts to repair or rebuild whatever is damaged. It cannot help if the Windows installation itself is corrupted beyond the boot layer, or if the failure is caused by hardware.
+
+**System Restore** uses Volume Shadow Copy Service (VSS) snapshots called restore points. Restore points are created automatically before Windows Updates, before application installs, and on a schedule. They can also be created manually via Control Panel > System > System Protection. The `vssadmin list shadows` command lists existing restore points from a command prompt; `rstrui.exe` opens the System Restore UI. System Protection must be enabled per drive — it is not active by default on secondary volumes.
+
+---
+
+## Startup Settings — Safe Mode Options
+
+Startup Settings (accessible from WinRE > Troubleshoot > Advanced options > Startup Settings > Restart) presents a numbered menu of alternate boot modes:
+
+| Option | Key | Description |
+|--------|-----|-------------|
+| Safe Mode | F4 | Loads minimal drivers and services; generic VGA display |
+| Safe Mode with Networking | F5 | Adds network stack to Safe Mode — access network shares and internet |
+| Safe Mode with Command Prompt | F6 | Replaces Explorer.exe with cmd.exe as the shell |
+| Enable Boot Logging | F2 | Creates `ntbtlog.txt` in `C:\Windows` listing every driver loaded or not loaded |
+| Enable Low-Resolution Video | F3 | Forces 640×480 resolution using a basic display driver |
+| Disable Driver Signature Enforcement | F7 | Allows unsigned drivers for this boot only |
+| Disable Early Launch Antimalware | F8 | Skips ELAM protection; use when ELAM is falsely blocking a driver |
+| Debugging Mode | F9 | Enables kernel debugger connection to a debug host |
+
+Safe Mode is the correct environment for troubleshooting software and driver issues that occur after the OS loads. Startup Repair is the correct tool for problems that prevent the OS from loading at all — the distinction matters for the MD-100 exam.
+
+The "Last Known Good Configuration" option from Windows XP and Windows 7 no longer exists in Windows 10 and 11. System Restore serves that function.
+
+---
+
+## BCD and bootrec — Manual Boot Repair
+
+When Startup Repair cannot fix a boot problem automatically, the WinRE Command Prompt provides two tools for manual intervention.
+
+**bootrec** repairs the low-level boot structures:
+
+| Command | Effect |
+|---------|--------|
+| `bootrec /fixmbr` | Writes a new Master Boot Record to the system disk |
+| `bootrec /fixboot` | Writes a new boot sector to the active partition |
+| `bootrec /scanos` | Scans all disks for Windows installations without modifying anything |
+| `bootrec /rebuildbcd` | Scans for Windows installations and rebuilds the BCD store |
+
+Run these in order when the BCD is missing or corrupt: `/fixmbr`, then `/fixboot`, then `/rebuildbcd`.
+
+**bcdedit** manages the Boot Configuration Data store directly — the structured database that replaced the old `boot.ini` file:
+
+| Command | Effect |
+|---------|--------|
+| `bcdedit /enum all` | List all entries in the BCD store |
+| `bcdedit /set {current} safeboot minimal` | Force the current boot entry to load Safe Mode on next boot |
+| `bcdedit /deletevalue {current} safeboot` | Remove the safeboot flag — essential if the machine is stuck in Safe Mode |
+| `bcdedit /set {bootmgr} timeout 30` | Set the boot menu display timeout in seconds |
+| `bcdedit /export C:\bcd-backup` | Export the BCD to a file for backup |
+| `bcdedit /import C:\bcd-backup` | Restore BCD from a backup file |
+
+A common trap: if `bcdedit /set {current} safeboot minimal` is run and the safeboot flag is never removed, the machine will boot into Safe Mode every time. Remove it with `bcdedit /deletevalue {current} safeboot` from an elevated command prompt.
+
+---
+
+## Reset This PC
+
+Reset this PC reinstalls Windows without requiring a USB drive or ISO. It is available from Settings > System > Recovery > Reset this PC and from the WinRE troubleshooter menu.
+
+Two modes control what happens to data:
+
+| Mode | What is Removed | What is Kept |
+|------|----------------|-------------|
+| Keep my files | Apps, settings, and system files | Personal files in `C:\Users` |
+| Remove everything | Apps, settings, personal files, and system files | Nothing |
+
+Each mode offers a choice of source:
+
+- **Local reinstall**: Uses Windows installation files already on the recovery partition. No internet required; faster, but may propagate existing corruption if the source is damaged.
+- **Cloud download**: Downloads a fresh Windows image directly from Microsoft. Requires internet access; slower, but guarantees a clean, current image regardless of the local recovery partition's state.
+
+For device disposal or repurposing, "Remove everything" with the "Clean the drive" option performs an additional wipe pass to make personal data harder to recover.
+
+---
+
+## System Restore Details
+
+System Restore is the safest recovery step when Windows has become unstable after a recent change — a driver update, a software install, or a Windows Update — because it rolls back system state without touching user documents or data files.
+
+Restore points are stored in the System Volume Information folder on each protected drive. Storage is capped as a percentage of disk space; when the cap is reached, old restore points are deleted to make room for new ones. The cap is configured per drive via Control Panel > System > System Protection > Configure.
+
+After a restore, Windows can undo the restore if the result is worse than the starting state — System Restore keeps track and offers an "Undo System Restore" option at the next successful boot.
+
+---
+
+## Summary
+
+WinRE is the safety net under Windows — a separate, bootable recovery OS that provides Startup Repair, System Restore, system image recovery, and a manual command prompt. Safe Mode is for diagnosing issues after the OS loads; Startup Repair is for fixing issues that prevent the OS from loading. `bootrec` rebuilds broken MBR and BCD structures; `bcdedit` provides fine-grained control over boot entries. Reset this PC reinstalls Windows cleanly from either the local recovery partition or a cloud download, with the choice of preserving or removing user files.

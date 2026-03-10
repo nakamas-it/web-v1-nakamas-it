@@ -1,0 +1,142 @@
+---
+title: "NTFS and Share Permissions — Controlling File System Access"
+category: "microsoft"
+topic: "ntfs-permissions"
+summary: "How Windows controls access to files and folders through NTFS permissions applied directly to the file system — covering the six standard permissions, inheritance and propagation, effective permissions calculation, and how NTFS and network share permissions combine when accessing files over the network."
+tags: ["windows", "ntfs", "permissions", "file-system", "share-permissions", "md-100"]
+order: 81
+draft: false
+---
+
+## Overview
+
+Every file and folder on an NTFS volume carries an Access Control List (ACL) — a set of rules that determine who can do what with that object. When a user opens a file, executes a program, or tries to delete a folder, the Windows security subsystem evaluates the ACL against the user's access token (which contains the user's SID and all group SIDs) and either permits or denies the operation. This evaluation happens whether the access is local or over the network, and it is the primary mechanism by which Windows enforces file-level security.
+
+---
+
+## NTFS Standard Permissions
+
+The six standard permissions are the permissions visible in the Security tab of any file or folder's Properties dialog. Each is actually a pre-defined combination of more granular special permissions — they exist to make common permission assignments straightforward without requiring knowledge of all 13 underlying special permissions.
+
+| Permission | On Files | On Folders |
+|-----------|---------|-----------|
+| Full Control | Read, write, modify, delete the file; change permissions; take ownership | All file permissions plus delete subfolders and files within; change permissions on subfolders; take ownership of subfolders |
+| Modify | Read and write the file, delete it | Create, delete, and modify files and subfolders; does NOT include changing permissions or taking ownership |
+| Read & Execute | Open and read the file; execute if it is an executable | List folder contents, traverse into subfolders, execute files within |
+| List Folder Contents | Not applicable to files | List the names of files and subfolders; does not grant access to the file contents themselves |
+| Read | Open and read the file contents and attributes | List contents and read files within; equivalent to Read & Execute for folders |
+| Write | Write to the file or append to it; create new files in the containing folder | Create new files and subfolders; write to files |
+
+The distinction between Modify and Full Control is significant: Modify does not include the ability to change permissions or take ownership. A user with Modify on a folder can read, write, and delete its contents but cannot reassign who else has access to it. Full Control allows the holder to rewrite the ACL entirely.
+
+---
+
+## NTFS Special Permissions
+
+Behind the standard permissions are 13 special (advanced) permissions that provide precise control when the standard set is not granular enough.
+
+| Special Permission | Applies To | Effect |
+|-------------------|-----------|--------|
+| Traverse Folder / Execute File | Folders / Files | Pass through a folder to reach objects below it; run an executable |
+| List Folder / Read Data | Folders / Files | See file and subfolder names; open and read file data |
+| Read Attributes | Both | See basic attributes (read-only, hidden, system, archive) |
+| Read Extended Attributes | Both | See vendor-defined extended attributes |
+| Create Files / Write Data | Folders / Files | Create new files in the folder; overwrite file contents |
+| Create Folders / Append Data | Folders / Files | Create new subfolders; append to a file without overwriting existing content |
+| Write Attributes | Both | Change basic attributes |
+| Write Extended Attributes | Both | Change extended attributes |
+| Delete Subfolders and Files | Folders | Delete contents of a folder even without Delete permission on individual items |
+| Delete | Both | Delete the specific file or folder |
+| Read Permissions | Both | View the ACL of the object |
+| Change Permissions | Both | Modify the ACL of the object |
+| Take Ownership | Both | Take ownership of the object (owner can always reset permissions) |
+
+The Traverse Folder permission deserves special attention. By default, Windows applies "bypass traverse checking" to all users — a user can navigate through a folder they do not have List permission on, as long as they know the path of the object they want to reach. This default behaviour means that denying List Folder Contents on a parent folder does not prevent access to explicitly permitted child objects if the user knows the path.
+
+---
+
+## Inheritance and Propagation
+
+By default, every new file and folder inside an NTFS directory inherits the permissions of its parent. This inheritance chain flows downward from the root of the volume. The Security tab shows inherited permissions in grey (they cannot be edited at the child object without breaking inheritance).
+
+**Breaking inheritance**: Right-clicking a folder, opening Properties > Security > Advanced > Disable Inheritance presents two choices:
+- **Convert inherited permissions into explicit permissions on this object** — the current effective permissions are preserved but detached from the parent. Future changes to the parent will not propagate.
+- **Remove all inherited permissions from this object** — the ACL starts empty. The administrator must add explicit permissions from scratch.
+
+**Propagation scope**: When adding permissions, the "Applies to" dropdown controls which objects within the folder hierarchy the permission affects.
+
+| Applies to setting | Effect |
+|-------------------|--------|
+| This folder only | The permission applies only to this folder object, not its contents |
+| This folder, subfolders and files | Inherits down the full tree — the most common setting |
+| This folder and subfolders | Applies to folders only, not files within them |
+| This folder and files | Applies to the folder and its immediate files, not subfolders |
+| Subfolders and files only | Does not apply to the folder itself |
+| Subfolders only / Files only | Precise targeting for unusual access requirements |
+
+---
+
+## Effective Permissions
+
+The effective permission a user has on an object is the cumulative result of all explicit and inherited permissions across every group the user belongs to. Windows reads the user's access token (SID plus all group SIDs) and evaluates the ACL against every entry.
+
+**Allow entries accumulate**: If the user is in GroupA (which has Read) and GroupB (which has Write), the effective permission is Read + Write.
+
+**Deny overrides Allow**: If any applicable ACE is a Deny, it overrides any Allow for the same permission. This applies even across groups: a user in GroupA (Allow Read) and GroupB (Deny Read) has an effective permission of Deny Read.
+
+**Precedence order** when there is a conflict:
+
+1. Explicit Deny (highest priority)
+2. Explicit Allow
+3. Inherited Deny
+4. Inherited Allow (lowest priority)
+
+An explicit Allow at the child level can override an inherited Deny from the parent. This is the mechanism used when a folder denies access to a group but a specific subfolder needs to allow that group in. The administrator places an explicit Allow on the subfolder — the explicit Allow takes precedence over the inherited Deny.
+
+The Advanced Security Settings dialog includes an Effective Access tab. Entering a user or group name there shows the calculated effective permissions Windows would grant that identity to the selected object, taking all group memberships and inheritance into account.
+
+---
+
+## Share Permissions
+
+Share permissions are a separate, simpler access control mechanism that applies only when a resource is accessed over the network via SMB. They are not NTFS permissions — they exist at the share level, not the file system level.
+
+| Share Permission | Access Granted |
+|-----------------|---------------|
+| Read | View file names, folder names, and file contents; run programs |
+| Change | Read plus create, modify, and delete files and subfolders |
+| Full Control | Change plus change permissions on the share (not on the NTFS objects) |
+
+Share permissions apply only to network access. A user sitting at the console and opening a file directly never encounters share permissions — only NTFS permissions apply for local access.
+
+---
+
+## The Combination Rule: Most Restrictive Wins
+
+When a user accesses a file over the network, Windows evaluates both the share permissions and the NTFS permissions independently, then applies the more restrictive result.
+
+**Example**: A user has Change permission on the share and Read & Execute permission on the NTFS ACL. The effective network access is Read & Execute — the NTFS permission is more restrictive, so it wins.
+
+**Example**: A user has Full Control on the share and Full Control on the NTFS ACL. The effective access is Full Control — both agree.
+
+**Best practice**: Grant Everyone (or Authenticated Users) Full Control at the share permission level and manage all access control exclusively through NTFS permissions. This simplifies troubleshooting — there is only one place to look when access problems arise. Share permissions are a coarse-grained gate; NTFS is where precise access control belongs.
+
+---
+
+## Ownership and the Owner Advantage
+
+Every file and folder has an owner. By default, the owner is the account that created the object. The owner of an object always retains the ability to change the permissions on that object, even if they have been explicitly denied all access. This is a deliberate safeguard: it prevents an administrator from being permanently locked out of an object by a misconfigured ACL.
+
+Ownership cannot be given — it can only be taken. An administrator can take ownership of any file or folder on the system via Properties > Security > Advanced > Owner > Change. This is the recovery path when an administrator needs to regain access to a file where the ACL has been set to deny all access. The `icacls` utility and the `takeown` command perform ownership operations from the command line.
+
+---
+
+## EFS Interaction with NTFS Permissions
+
+The Encrypting File System (EFS) adds a second layer of access control that operates independently of NTFS permissions. An EFS-encrypted file is protected by the user's EFS certificate in addition to the NTFS ACL. Even if a user has Full Control NTFS permission on an encrypted file, they cannot read the file contents without the EFS private key.
+
+Key behavioural points:
+- Copying an EFS file to a FAT or exFAT volume removes the encryption — the file system does not support EFS attributes.
+- Compressed files and EFS-encrypted files are mutually exclusive on NTFS — an object cannot be both compressed and encrypted.
+- The domain's Data Recovery Agent (DRA) can decrypt any EFS file in the domain using a special DRA certificate, independent of the encrypting user's certificate.
+- EFS does not protect data from local administrators — an administrator can take ownership of a file and reset NTFS permissions, then use the DRA (if configured) or the shadow copy to recover the unencrypted data.

@@ -1,0 +1,118 @@
+---
+title: "EFS — Encrypting File System for Per-File Data Protection"
+category: "microsoft"
+topic: "efs"
+summary: "How the Encrypting File System provides transparent per-file encryption on NTFS volumes — using public-key certificates to encrypt the file encryption key, enabling individual users to protect sensitive files without full-disk encryption, and how recovery agents and certificate backup ensure data is never permanently lost."
+tags: ["windows", "efs", "encryption", "certificates", "md-100"]
+order: 82
+draft: false
+---
+
+## Overview
+
+The Encrypting File System (EFS) is a file-level encryption feature built directly into NTFS. Unlike BitLocker, which encrypts an entire volume, EFS operates on individual files and folders. Encryption and decryption are transparent to the user who owns the certificate — the file appears as a normal file when the owning user opens it, and Windows handles the cryptographic operations automatically in the background.
+
+EFS addresses a different threat model than BitLocker. Where BitLocker protects against physical drive theft, EFS protects against other users on the same machine. If a file is EFS-encrypted by one user, another local user — even one with administrative privileges — cannot read the plaintext contents of that file without the encryption certificate. The administrator can take ownership of the file, but taking ownership grants permission access, not cryptographic access. The data remains unreadable without the certificate.
+
+EFS is available on Windows 10 and 11 Pro, Enterprise, and Education editions. It is not available on Windows Home. It is also limited to NTFS volumes — EFS cannot operate on FAT, exFAT, or ReFS partitions.
+
+---
+
+## How EFS Works
+
+EFS uses a hybrid cryptographic scheme that combines symmetric and asymmetric encryption.
+
+When a file is encrypted, Windows generates a random 256-bit **File Encryption Key (FEK)** unique to that file. The file's contents are encrypted using the FEK via a symmetric cipher (AES-256 in modern Windows versions). The FEK itself is then encrypted with the user's **EFS public key**, which comes from their EFS certificate. This encrypted FEK is stored in the file's **Data Decryption Field (DDF)**, an attribute embedded in the file's NTFS metadata.
+
+When the owning user opens the file, Windows retrieves the encrypted FEK from the DDF, uses the user's **EFS private key** (stored in their personal certificate store) to decrypt the FEK, and then uses the FEK to decrypt the file contents on the fly. The user sees the plaintext data; the file remains encrypted on disk.
+
+If a **Data Recovery Agent (DRA)** has been configured, the FEK is additionally encrypted with the DRA's public key and stored in the file's **Data Recovery Field (DRF)**. This is a parallel encryption — both the original user and the DRA can decrypt the FEK independently, meaning both can decrypt the file.
+
+---
+
+## EFS Certificates
+
+The EFS certificate is the linchpin of the entire system. Without the certificate's private key, no one — including the owning user — can decrypt the FEK, and the file data is permanently inaccessible.
+
+On a standalone machine with no enterprise PKI, Windows generates a **self-signed EFS certificate** automatically on the first attempt to encrypt a file. This certificate is stored in the user's personal certificate store, visible in `certmgr.msc` under Personal > Certificates with "Encrypting File System" listed in the Intended Purposes column.
+
+The critical operational requirement is that this certificate must be exported and backed up. If the user profile is deleted, the machine is reimaged, or the certificate store is corrupted, the private key is gone and any EFS-encrypted files become permanently unreadable. This is the most common EFS failure scenario in practice.
+
+In a domain environment, EFS certificates can be issued by an enterprise Certificate Authority and stored in AD DS, providing automatic backup and recovery — but this requires deliberate PKI configuration.
+
+---
+
+## Enabling EFS Encryption
+
+EFS encryption can be applied to individual files or entire folders:
+
+- **GUI**: Right-click a file or folder, select Properties, click Advanced, and check "Encrypt contents to secure data." Applying encryption to a folder causes all files created inside it to be automatically encrypted going forward. Existing files in a folder can optionally be encrypted at the same time.
+- **Command line**: `cipher /e filename` encrypts a file; `cipher /e /s:folder` encrypts a folder and its contents.
+
+When a file is encrypted, Windows displays its name in green in File Explorer to indicate EFS protection is active.
+
+Encryption and compression are mutually exclusive in NTFS. A file that is compressed cannot be encrypted, and encrypting a compressed file removes the compression.
+
+---
+
+## EFS and User Accounts
+
+EFS encryption is tied to the user's certificate, not their Windows password. This distinction matters in several practical scenarios:
+
+- Logging in as a different user and attempting to open an EFS-encrypted file results in "Access Denied," even if that user has full NTFS permissions to the file. The NTFS permissions control whether the user can see and attempt to open the file; the EFS certificate controls whether they can decrypt it.
+- Moving an EFS-encrypted file between two NTFS volumes preserves the encryption. The file remains encrypted and the same DDF metadata travels with it.
+- Copying an encrypted file to a FAT or exFAT volume silently removes the encryption. FAT-based filesystems have no concept of EFS attributes, so Windows strips the encryption when writing to those volumes. Using `xcopy` with the `/G` flag or `robocopy` can preserve the ciphertext, but the file will be unreadable on the destination.
+- If a user's Windows password is reset by an administrator (rather than changed by the user), the user's protected private keys remain accessible on Windows 10 and 11 because EFS private keys are not tied to the logon password in the same way as older Windows versions. However, in edge cases with legacy configurations, a forced password reset could break access to private keys.
+
+---
+
+## Data Recovery Agents
+
+A **Data Recovery Agent (DRA)** is an account that has been granted the ability to decrypt any EFS file in the environment, regardless of which user encrypted it. The DRA's public key is included in the DRF of every encrypted file.
+
+In an Active Directory domain, the domain administrator account is automatically configured as the default DRA. This means every EFS-encrypted file in the domain includes a copy of the FEK encrypted with the domain admin's EFS recovery certificate, allowing recovery of any file without the original user's certificate.
+
+DRA configuration is managed via Group Policy: **Computer Configuration > Windows Settings > Security Settings > Public Key Policies > Encrypting File System**. Right-clicking that node allows administrators to add DRA certificates. This policy is applied domain-wide or at the OU level.
+
+On standalone machines with no domain and no DRA configured, there is no recovery path. If the user's certificate is lost, the data is gone.
+
+To create a DRA certificate manually: `cipher /r:filename` generates a self-signed DRA certificate and private key. The .cer file is imported into GPO; the .pfx file (containing the private key) must be stored securely offline.
+
+---
+
+## `cipher` Command Reference
+
+| Command | Action |
+|---|---|
+| `cipher /c filename` | Display encryption status of a file |
+| `cipher /e filename` | Encrypt a file |
+| `cipher /d filename` | Decrypt a file |
+| `cipher /e /s:folder` | Encrypt a folder and its contents recursively |
+| `cipher /k` | Generate a new EFS key pair for the current user |
+| `cipher /r:filename` | Create a DRA certificate and private key |
+| `cipher /w:folder` | Overwrite deleted EFS data in free space (secure wipe) |
+| `cipher /u` | Update encrypted files with the current user's certificate (after key renewal) |
+
+---
+
+## EFS vs BitLocker
+
+EFS and BitLocker address complementary but distinct threats and can be deployed together for layered protection.
+
+| Aspect | EFS | BitLocker |
+|---|---|---|
+| Granularity | Per-file, per-folder | Entire volume |
+| Threat model | Other local users on the same running machine | Physical drive theft or offline access |
+| Authentication | User's EFS certificate (private key) | TPM + optional PIN or startup key |
+| System volume | Cannot encrypt the OS volume | Can encrypt the OS volume |
+| Filesystem requirement | NTFS only | Any volume (including OS drive) |
+| Transparency | Automatic for the owning user | Completely transparent when TPM-unlocked |
+| Recovery | EFS certificate backup or DRA | 48-digit recovery key |
+
+The recommended enterprise posture for high-sensitivity endpoints is to use both: BitLocker protects the full volume from drive theft, while EFS provides additional per-file protection against other authenticated users on the same machine.
+
+---
+
+## Summary
+
+EFS provides transparent per-file encryption using a hybrid scheme: a per-file symmetric FEK encrypted with the user's public key. The critical operational requirements are exporting and backing up the EFS certificate private key, and configuring a Data Recovery Agent so that files remain recoverable if the user's certificate is lost. EFS complements rather than replaces BitLocker — both mechanisms serve different threat models and both can be active simultaneously on the same volume.

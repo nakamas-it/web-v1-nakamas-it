@@ -1,0 +1,132 @@
+---
+title: "Windows Device Join — Workgroup, Domain, Entra ID, and Hybrid"
+category: "microsoft"
+topic: "windows-device-join"
+summary: "How Windows devices connect to identity infrastructure — comparing workgroup, on-premises AD domain join, Entra ID join for cloud-native scenarios, and Hybrid Entra ID join for enterprises that need both on-premises Kerberos and cloud identity in the same device registration."
+tags: ["windows", "entra-id-join", "hybrid-join", "domain-join", "md-100"]
+order: 80
+draft: false
+---
+
+## Overview
+
+A Windows device does not exist in isolation. It connects to an identity infrastructure that determines how users authenticate, which policies apply, which resources are accessible, and how the device is managed. The choice of join type is one of the most consequential architectural decisions for an IT environment — it governs whether the device can use Kerberos to access file shares, whether Intune can push configuration profiles, and whether a user's cloud SSO session will work transparently across applications. Four models exist, and modern enterprises often operate more than one simultaneously.
+
+---
+
+## Workgroup
+
+A workgroup is the default state for a Windows device that has not been connected to any identity infrastructure. Each machine maintains its own local Security Account Manager (SAM) database. There is no centralised authentication, no Group Policy from a domain controller, and no Kerberos.
+
+| Characteristic | Detail |
+|----------------|--------|
+| Identity source | Local SAM database on each machine |
+| Authentication | NTLM only — no Kerberos |
+| Policy management | Local Group Policy only (`gpedit.msc`) |
+| Resource sharing | Peer-to-peer — each machine manages its own ACLs |
+| Practical scale | 10–20 machines before management overhead becomes unacceptable |
+| Roaming profiles | Not available |
+
+Workgroups are appropriate for home environments and very small offices where the overhead of AD or Entra ID cannot be justified. At any meaningful organisational scale, the inability to centralise user account management or enforce policy consistently makes workgroups impractical.
+
+---
+
+## On-Premises Active Directory Domain Join
+
+Joining an AD DS domain gives the machine a computer account in the domain, enables Kerberos authentication, and makes the machine a subject of Group Policy. This has been the enterprise standard for three decades.
+
+To join a domain: Settings > Accounts > Access Work or School > Join this device to a local Active Directory domain. Alternatively, `netdom join <computername> /domain:<domain>`. A domain admin credential (or a credential delegated the right to join machines) is required. The machine must be able to resolve the domain name via DNS and reach a domain controller.
+
+After joining, the machine gets a computer object in AD. At logon, the user's credentials are validated by a domain controller via Kerberos. The DC issues a Ticket-Granting Ticket (TGT) that the client uses to request service tickets for specific resources — file shares, printers, web applications protected by Kerberos constrained delegation. Group Policy applies at the site, domain, and OU level, delivering security settings, software installation, drive mapping, and hundreds of other configuration items.
+
+**Limitation**: Domain-joined devices require line-of-sight to a domain controller at logon. A laptop that has never cached credentials for a user will not allow that user to log in if no DC is reachable. Cached credentials (configurable in policy — default 10 cached logons) mitigate this for users who have previously logged in on that machine.
+
+---
+
+## Entra ID Join (Azure AD Join)
+
+Entra ID join replaces the on-premises domain as the identity anchor. The device's identity is registered entirely in Entra ID — there is no on-premises AD involvement, no Kerberos domain, and no requirement for on-premises infrastructure.
+
+To join during setup: at the OOBE sign-in screen, choose "Set up for an organisation" and enter Entra ID credentials. Post-setup: Settings > Accounts > Access Work or School > Join this device to Azure Active Directory.
+
+| Characteristic | Detail |
+|----------------|--------|
+| Identity source | Entra ID (cloud) |
+| Authentication | OAuth 2.0 / OpenID Connect for cloud apps |
+| Kerberos | Not available by default (Entra ID Kerberos required for Azure Files hybrid scenarios) |
+| Policy management | Intune MDM profiles, no traditional Group Policy |
+| SSO mechanism | Primary Refresh Token (PRT) — cloud-equivalent of a Kerberos TGT |
+| On-premises resource access | Limited without additional configuration |
+| Internet dependency | Required for initial join; PRT renewal needs periodic cloud contact |
+
+The Primary Refresh Token is the key artefact of Entra ID join. After logon, Windows obtains a PRT from the Microsoft identity platform. This token enables single sign-on to any application that trusts Entra ID — Microsoft 365, Azure resources, and third-party SaaS applications that use Entra ID as their identity provider — without the user being prompted for credentials again.
+
+Entra ID join is the right choice for cloud-first organisations, new device deployments where there is no on-premises infrastructure, and remote workers who will never need to access on-premises file shares or printers over Kerberos.
+
+---
+
+## Hybrid Entra ID Join
+
+Hybrid join is the bridge for enterprises that have both an established on-premises AD DS domain and a growing cloud presence. The device is simultaneously a member of the on-premises AD domain AND registered in Entra ID.
+
+At logon, a Hybrid Entra ID joined device has access to both:
+- A Kerberos TGT from the on-premises domain controller — grants access to on-premises file shares, printers, and any resource that accepts Kerberos authentication.
+- A Primary Refresh Token from Entra ID — grants SSO to cloud applications.
+
+This dual-token state is what makes Hybrid join uniquely powerful for transition environments. Users do not have to choose between their on-premises resources and their cloud applications.
+
+### How Hybrid Join Is Configured
+
+Hybrid join requires Microsoft Entra Connect (formerly Azure AD Connect). During Entra Connect setup, the "Configure Hybrid Azure AD join" option is enabled. Entra Connect creates a Service Connection Point (SCP) in on-premises AD that tells domain-joined devices where their Entra ID tenant is. When a domain-joined machine processes Group Policy or reads the SCP, it contacts Entra ID to register itself. The device then appears in both the on-premises AD computer container and the Entra ID device list.
+
+The registration process can be driven by Group Policy for existing domain-joined machines, or configured during imaging for new machines. The device must be able to reach both the on-premises domain and Entra ID endpoints during registration.
+
+---
+
+## Entra ID Registered (Workplace Join)
+
+A fourth state exists for personal devices that need access to organisational resources without full management: Entra ID Registered, also called Workplace Join or BYOD registration.
+
+| Characteristic | Detail |
+|----------------|--------|
+| How it works | User adds a work or school account via Settings > Accounts > Access Work or School |
+| Device management | MAM (app-level) rather than full MDM; the organisation does not manage the device |
+| Conditional Access | Device appears as registered; Conditional Access can require compliance |
+| Kerberos | No |
+| Suitable for | Personal laptops and phones accessing M365 apps |
+
+Registration does not give the organisation control over the device. Intune can enforce policies on the apps (MAM — Mobile Application Management) without controlling the device itself. Conditional Access can check whether the device is registered and optionally whether it is compliant with basic security requirements before granting access to cloud resources.
+
+---
+
+## Join Type Comparison
+
+| Feature | Workgroup | AD Domain Join | Entra ID Join | Hybrid Entra ID Join | Entra ID Registered |
+|---------|-----------|---------------|--------------|---------------------|---------------------|
+| Identity source | Local SAM | On-prem AD | Entra ID | On-prem AD + Entra ID | Entra ID (partial) |
+| Kerberos | No | Yes | No (by default) | Yes | No |
+| Cloud SSO (PRT) | No | No | Yes | Yes | Yes (limited) |
+| Group Policy | Local only | Full AD GPO | No (Intune only) | Full AD GPO + Intune | No |
+| Managed by | — | GPO / SCCM | Intune | GPO + Intune (co-management) | MAM only |
+| On-prem domain required | No | Yes | No | Yes | No |
+| Best for | Home / micro-SMB | On-prem enterprise | Cloud-first | Hybrid enterprise | BYOD |
+
+---
+
+## MDM Enrollment and Device Registration Commands
+
+Enrollment into Intune MDM happens automatically when a device is Entra ID joined and the tenant has MDM auto-enrollment configured. For domain-joined machines, a Group Policy setting can trigger automatic enrollment into Intune — the basis of co-management (SCCM + Intune simultaneously).
+
+The `dsregcmd /status` command reveals the device's current join state, PRT status, and MDM enrollment:
+
+```
+dsregcmd /status
+```
+
+Key output fields:
+- `AzureAdJoined: YES` — device is Entra ID joined
+- `DomainJoined: YES` — device is on-premises domain joined
+- `AzureAdPrt: YES` — a valid Primary Refresh Token is present
+- `MdmEnrolled: YES` — device is enrolled in MDM (Intune)
+
+Both `AzureAdJoined: YES` and `DomainJoined: YES` simultaneously indicates a Hybrid Entra ID joined device — the configuration that provides Kerberos access to on-premises resources and PRT-based SSO to cloud applications from a single device registration.

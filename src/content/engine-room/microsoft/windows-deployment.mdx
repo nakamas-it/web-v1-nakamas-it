@@ -1,0 +1,101 @@
+---
+title: "Windows Deployment — Installation Methods and Activation"
+category: "microsoft"
+topic: "windows-deployment"
+summary: "How Windows 10 and 11 get onto devices — covering clean install, in-place upgrade, and wipe-and-load deployment methods, the Windows Assessment and Deployment Kit tools, and the four activation methods that organisations use to license Windows at scale."
+tags: ["windows", "deployment", "activation", "kms", "adba", "md-100"]
+order: 77
+draft: false
+---
+
+## Overview
+
+Every Windows device starts with a decision: how does the operating system get there? For a single machine a technician can sit at the keyboard and walk through setup. For a fleet of 500 or 5,000 machines the answer has to be systematic, automated, and auditable. Windows deployment is the discipline that covers installation methods, hardware requirements, edition selection, and activation — the four decisions that govern how Windows reaches a device and stays licenced.
+
+---
+
+## Installation Methods
+
+Three deployment models cover virtually every scenario an IT team encounters.
+
+**Clean Install** wipes the target partition and installs Windows from scratch. The technician boots from USB or network media, selects the destination drive, formats it, and lets setup run. Every pre-existing application and user setting is erased. This is the right approach when the previous OS state is unknown, corrupted, or needs to be discarded entirely — malware remediation, hardware repurposing, initial provisioning of new machines. At scale it is paired with an answer file to automate the setup choices.
+
+**In-Place Upgrade** runs `setup.exe` from within an existing Windows installation. Setup preserves installed applications, user profiles, and most settings while replacing the OS binaries and updating the version. An upgrade from Windows 10 to Windows 11 is the canonical example. The key constraint is architecture: you cannot upgrade a 32-bit installation to 64-bit — a clean install is required. Sufficient free disk space is also mandatory; setup estimates the requirement before committing. Skipping editions is not supported — upgrading Home directly to Enterprise requires a clean install with an Enterprise key, or a Pro key first followed by a separate upgrade.
+
+**Wipe-and-Load** is the traditional enterprise approach that combines the benefits of both. The user's data and profile settings are captured with USMT before the machine is wiped, then a clean OS is deployed, and the data is restored from the migration store. This produces a clean OS baseline with no accumulated cruft while preserving what the user cares about. USMT's ScanState tool captures data to a network share or a local hard-link store; LoadState applies it after the new OS is running.
+
+---
+
+## Windows 11 Hardware Requirements
+
+Windows 11 introduced hardware requirements that have no equivalent in Windows 10. These are the most frequent exam-trap distinctions.
+
+| Requirement | Windows 10 | Windows 11 |
+|-------------|-----------|-----------|
+| CPU | 1 GHz, any x86/x64 | 1 GHz dual-core 64-bit on approved list (8th gen Intel / Zen 2 AMD+) |
+| RAM | 1 GB (32-bit) / 2 GB (64-bit) | 4 GB minimum |
+| Storage | 16 GB (32-bit) / 20 GB (64-bit) | 64 GB minimum |
+| Firmware | BIOS or UEFI | UEFI with Secure Boot enabled |
+| TPM | Not required | TPM 2.0 required |
+| Architecture | 32-bit and 64-bit | 64-bit only — no 32-bit Windows 11 |
+
+The TPM 2.0 and Secure Boot requirements are the practical gatekeepers. Many machines from 2016 and earlier lack TPM 2.0 or have it disabled in firmware. Windows 11 setup checks these at installation time and blocks the install if the requirements are not met (though registry bypasses exist for lab use).
+
+---
+
+## Edition Comparison
+
+| Edition | Domain Join | BitLocker | Hyper-V | RSAT | Notable Enterprise Features |
+|---------|-------------|-----------|---------|------|----------------------------|
+| Home | No | No (Device Encryption only) | No | No | Consumer only |
+| Pro | Yes | Yes | Yes | Yes | WUfB, BitLocker, Hyper-V |
+| Enterprise | Yes | Yes | Yes | Yes | AppLocker, DirectAccess, BranchCache, LTSC, Credential Guard |
+| Education | Yes | Yes | Yes | Yes | Enterprise feature set for educational institutions |
+| Pro for Workstations | Yes | Yes | Yes | Yes | ReFS, NVDIMM support, Ultimate Performance plan |
+
+Enterprise is available only through volume licensing — it cannot be purchased retail. The upgrade path from Pro to Enterprise is via a volume licence key swap or Subscription Activation tied to an M365 E3/E5 licence, not a clean install.
+
+---
+
+## Activation Methods
+
+Windows must activate to verify the licence is legitimate. At consumer scale a per-device retail key works fine. Enterprise environments need mechanisms that do not require entering individual keys on thousands of machines.
+
+| Method | How It Works | Best For |
+|--------|-------------|---------|
+| Retail / OEM | Single product key, one machine. OEM keys are embedded in UEFI firmware and activate automatically | Individual purchases |
+| MAK (Multiple Activation Key) | One key activates a fixed quota of machines against Microsoft's servers. Each activation decrements the counter | Isolated networks with occasional internet access |
+| KMS (Key Management Service) | On-premises KMS host activates clients every 180 days. Clients use generic KMS client setup keys | Large domain-joined fleets |
+| ADBA (Active Directory-Based Activation) | Activation stored as an object in AD DS — no KMS host required. Activates automatically when domain-joined | Domain environments on Server 2012+ |
+| Subscription Activation | Windows 10/11 Enterprise delivered via M365 E3/E5 licence assigned to a user. Activates via Entra ID identity | Cloud-first or hybrid Entra ID environments |
+
+### KMS in Detail
+
+KMS is the classic volume activation mechanism. A Windows Server running the KMS host role listens on **TCP port 1688**. Client machines must contact the KMS host at least once every 180 days to renew their activation lease — the client probes every 7 days once within range. A **minimum of 25 client requests** must be pending before the KMS host begins issuing activations for Windows clients (5 for Windows Server). Clients discover the KMS host automatically via a DNS SRV record: `_vlmcs._tcp.<domain>`. This record is registered by the KMS host during setup; in environments without dynamic DNS registration it must be created manually.
+
+### ADBA in Detail
+
+Active Directory-Based Activation removes the KMS host entirely. The activation object is published to the domain's configuration partition. Any domain-joined machine running Windows 8 / Windows Server 2012 or later activates automatically at domain join — no client-side configuration, no minimum machine count, no periodic renewal requirement. The machine must be able to reach a domain controller at join time, but no ongoing connectivity to a specific activation server is needed.
+
+---
+
+## Windows ADK Components
+
+The Windows Assessment and Deployment Kit is a separate download from Microsoft that provides the tools required to build, service, and deploy Windows images.
+
+| Component | Tool | Purpose |
+|-----------|------|---------|
+| DISM | `dism.exe` | Mount, capture, apply, and service WIM/FFU images offline — add drivers, updates, and features |
+| Windows PE | WinPE boot image | Minimal bootable environment for deployment and recovery |
+| SIM (System Image Manager) | `wsim.exe` | Create and validate `unattend.xml` answer files against a WIM catalog |
+| USMT (User State Migration Tool) | `scanstate.exe` / `loadstate.exe` | Capture and restore user profiles, data, and application settings |
+| WCD (Windows Configuration Designer) | `icd.exe` | Create provisioning packages (`.ppkg`) for zero-touch configuration |
+| Sysprep | `sysprep.exe` | Generalise a reference installation — remove SID, computer name, hardware specifics — before WIM capture |
+
+The ADK version must match the Windows version being deployed. Mismatched ADK versions can cause SIM catalog generation failures or DISM compatibility warnings. WinPE is included as an optional ADK add-on and is not installed as part of the standard Windows operating system.
+
+---
+
+## Choosing an Activation Strategy
+
+The choice between KMS, ADBA, and Subscription Activation follows from the environment's identity and network architecture. A fully on-premises AD DS domain with no cloud presence uses KMS or ADBA — ADBA is simpler to operate since it eliminates a dedicated KMS server. An organisation transitioning to Entra ID or already running M365 E3/E5 should prefer Subscription Activation, which eliminates activation infrastructure entirely and ties the licence to the user identity. MAK is a fallback for devices in isolated networks — classified environments, air-gapped labs — that cannot reach a KMS host or domain controller, where a fixed activation quota is acceptable.

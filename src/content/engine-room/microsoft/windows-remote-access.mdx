@@ -1,0 +1,118 @@
+---
+title: "Windows Remote Access — RDP, VPN Protocols, and Remote Assistance"
+category: "microsoft"
+topic: "windows-remote-access"
+summary: "How Windows enables remote access — through Remote Desktop Protocol for full graphical sessions, Quick Assist and Remote Assistance for helpdesk support, and the VPN protocols Windows supports natively for secure tunnelled connectivity back to corporate networks."
+tags: ["windows", "rdp", "vpn", "remote-assistance", "md-100"]
+order: 85
+draft: false
+---
+
+## Overview
+
+Remote access in Windows covers three distinct use cases. **Remote Desktop Protocol** provides a full interactive graphical session to a remote machine, allowing a user or administrator to operate that machine as if sitting in front of it. **Remote Assistance** and its modern replacement **Quick Assist** allow a helper to view and optionally control the screen of a user who is already logged in, used primarily for helpdesk support. **VPN** creates an encrypted tunnel from a Windows client to a corporate gateway, extending the corporate network to the remote device.
+
+Each of these mechanisms operates over different ports, requires different infrastructure, and has different edition requirements in Windows. Understanding which mechanism applies to which scenario and how each is configured is central to both the MD-100 exam and practical Windows administration.
+
+---
+
+## Remote Desktop Protocol
+
+**RDP** operates on **TCP port 3389** and provides a full graphical session to the remote machine. The client application on Windows is `mstsc.exe` (Microsoft Terminal Services Client).
+
+### Edition Requirements
+
+RDP hosting is available on Windows 10 and 11 **Pro, Enterprise, and Education** editions. **Windows Home cannot host an inbound RDP session** — it can only act as a client connecting to another machine. This is a common exam-trap distinction: any machine on Windows Home that needs to be accessed remotely must either be upgraded to Pro or use an alternative tool such as Quick Assist.
+
+### Enabling RDP
+
+RDP hosting is disabled by default. It is enabled through **Settings > System > Remote Desktop > Enable Remote Desktop**, or through **SystemPropertiesRemote.exe** which opens directly to the Remote tab of System Properties. Enabling RDP automatically creates a Windows Defender Firewall rule permitting inbound TCP 3389.
+
+The user account being used for remote connection must be a member of the **Remote Desktop Users** group or the local **Administrators** group. Standard users must be explicitly added to Remote Desktop Users.
+
+### Network Level Authentication
+
+**NLA (Network Level Authentication)** is enabled by default on Windows 10 and 11. With NLA, the user must authenticate — providing credentials — before the full RDP session is established and the Windows logon screen is rendered. This prevents unauthenticated connections from consuming server resources and protects against denial-of-service attacks targeting the RDP logon screen. Without NLA, any machine that can reach TCP 3389 can cause a full session setup before being prompted for credentials.
+
+Older clients that do not support NLA (such as Windows XP without the relevant update) cannot connect to machines that require NLA. This is rarely a concern in modern environments but appears in exam scenarios.
+
+### Remote Desktop Gateway
+
+Exposing TCP 3389 directly to the internet is poor security practice. **Remote Desktop Gateway (RD Gateway)** is a Windows Server role that tunnels RDP traffic inside **HTTPS (TCP port 443)**. Clients connect to the RD Gateway using a standard HTTPS connection, and the gateway forwards the RDP session to the target machine on the internal network. From the firewall's perspective, only TCP 443 is exposed externally. The internal target machine does not need a firewall exception facing the internet — only the gateway does.
+
+### `mstsc.exe` Common Flags
+
+| Flag | Effect |
+|---|---|
+| `/v:server` | Specify the target host or IP address |
+| `/f` | Connect in full-screen mode |
+| `/multimon` | Span the session across all local monitors |
+| `/admin` | Connect to the administrative session (session 0) on servers |
+| `/w:width /h:height` | Specify session resolution |
+
+---
+
+## Remote Assistance and Quick Assist
+
+Remote Assistance and Quick Assist address the helpdesk support scenario: a user is experiencing a problem on their machine and needs a support technician to see the screen and potentially take control to resolve it.
+
+### Windows Remote Assistance
+
+**Windows Remote Assistance** (`msra.exe`) allows a user to invite a helper to view and control their session. The invitation is sent as a file or via email. The session is encrypted. The helper can observe the user's screen and, with the user's permission, take keyboard and mouse control.
+
+Traditional Remote Assistance uses TCP port 135 for the initial connection and dynamic RPC ports for the session itself, which can be blocked by firewalls. The Easy Connect variant uses a Microsoft relay server over HTTPS, making it more firewall-friendly but requiring both parties to have internet access.
+
+### Quick Assist
+
+**Quick Assist** is the modern replacement for Remote Assistance and is available on **all Windows 10 and 11 editions**, including Home — unlike RDP. The helper opens the Quick Assist app (built into Windows 10 and 11) or navigates to `aka.ms/quickassist`, signs in with a Microsoft account, and receives a **6-digit code**. The user needing assistance enters this code in their Quick Assist app. The helper can then view the screen in a read-only mode or request full control.
+
+Quick Assist communicates over HTTPS and works through NAT and most corporate firewalls without additional configuration. No pre-installed software beyond the built-in app is required, and no domain membership is needed, making it the preferred tool for supporting consumer devices or remote employees.
+
+---
+
+## VPN Client Protocols
+
+Windows supports four VPN protocols natively through the built-in VPN client, each with different port requirements, security characteristics, and suitability for different network environments:
+
+| Protocol | Ports | Security | Best Used For |
+|---|---|---|---|
+| PPTP | TCP 1723 + GRE (Protocol 47) | Weak — MS-CHAPv2 is broken | Legacy only; avoid in any new deployment |
+| L2TP/IPsec | UDP 1701 + UDP 500 and 4500 (IPsec) | Strong | Standard corporate VPN; can be blocked by strict firewalls that drop non-HTTP UDP |
+| SSTP | TCP 443 (HTTPS) | Strong (SSL/TLS) | Environments behind web proxies or firewalls that only allow HTTP/HTTPS |
+| IKEv2 | UDP 500 and 4500 | Strong; supports MOBIKE | Mobile workers who switch networks (Wi-Fi to cellular); preferred modern choice |
+
+**IKEv2** is the recommended protocol for modern deployments. Its key advantage is **MOBIKE (Mobility and Multihoming Protocol)**, which allows an IKEv2 VPN connection to survive an IP address change — for example, when a laptop switches from a Wi-Fi connection to a mobile data connection. The VPN automatically reconnects at the new address without the user needing to manually reconnect.
+
+**SSTP** is the fallback for environments where UDP traffic is blocked by a firewall or web proxy. Because SSTP uses TCP 443 — the same port as HTTPS — it is effectively invisible to firewalls that only allow web traffic. The trade-off is that TCP-over-TCP (tunnelling TCP inside TCP) can perform poorly under lossy network conditions.
+
+**L2TP/IPsec** requires a pre-shared key or a certificate for the IPsec layer, in addition to the user's VPN credentials. If the device is behind a NAT, L2TP/IPsec uses UDP 4500 for NAT traversal (NAT-T). Some consumer routers and strict firewalls block the ESP protocol (Protocol 50) used by IPsec, which can prevent L2TP/IPsec from working in certain environments.
+
+### Configuring the Built-in VPN Client
+
+**Settings > Network and Internet > VPN > Add a VPN connection** opens the built-in VPN client configuration. The settings include VPN provider (Windows built-in), connection name, server address, VPN type (protocol), and authentication credentials.
+
+**Split tunnelling** configures Windows to send only traffic destined for the corporate network through the VPN tunnel, while all other traffic (internet browsing, cloud services) goes directly to the internet via the local connection. This reduces load on the corporate VPN gateway but means corporate security controls do not inspect non-corporate traffic.
+
+### Always On VPN
+
+**Always On VPN** is an enterprise feature that automatically establishes a VPN connection when the device boots or a user logs in, without any manual action. It replaces DirectAccess (which required Windows Enterprise edition and domain membership) and uses standard VPN protocols (IKEv2 or SSTP). Always On VPN is deployed via **Intune** or **SCCM/ConfigMgr** and operates as a machine tunnel (pre-login) and/or a user tunnel (post-login).
+
+---
+
+## Windows Remote Management
+
+**WinRM (Windows Remote Management)** is the Windows implementation of the WS-Management protocol and is the foundation for **PowerShell Remoting**. It is not a remote desktop mechanism — it provides a command channel rather than a graphical session.
+
+WinRM listens on **HTTP port 5985** (unencrypted) and **HTTPS port 5986** (encrypted). It is enabled with `winrm quickconfig`, which creates the listener and the firewall exception. `Enable-PSRemoting` in PowerShell performs the same configuration and is often used in scripts.
+
+Once WinRM is active, administrators can use:
+- `Enter-PSSession -ComputerName server1` for an interactive remote PowerShell session
+- `Invoke-Command -ComputerName server1 -ScriptBlock { ... }` to run commands remotely and return results
+
+In a domain environment, machines trust each other for WinRM via Kerberos automatically. In workgroup environments, the target machine must be added to the `TrustedHosts` list on the client machine before a connection is accepted.
+
+---
+
+## Summary
+
+Windows remote access encompasses three distinct tools for distinct purposes: RDP for full graphical sessions (Pro/Enterprise only, TCP 3389, use RD Gateway to avoid internet exposure), Quick Assist for helpdesk support (all editions, HTTPS, 6-digit code, no infrastructure required), and the built-in VPN client for corporate network tunnelling (IKEv2 preferred for mobile workers via MOBIKE, SSTP for firewall-constrained environments, L2TP/IPsec for standard deployments). WinRM underpins PowerShell Remoting for command-line remote management and operates independently of RDP.

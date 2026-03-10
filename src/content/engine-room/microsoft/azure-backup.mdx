@@ -1,0 +1,145 @@
+---
+title: "Azure Backup and Site Recovery — Protecting Azure Workloads"
+category: "microsoft"
+topic: "azure-backup"
+summary: "How Azure Backup protects VMs, databases, files, and on-premises servers through a Recovery Services vault — and how Azure Site Recovery provides business continuity by replicating entire workloads to a secondary region for failover when a primary region fails."
+tags: ["azure", "azure-backup", "site-recovery", "asr", "disaster-recovery", "az-104"]
+order: 74
+draft: false
+---
+
+## Overview
+
+Data protection in Azure rests on two complementary services that serve different purposes. Azure Backup handles the recovery point objective (RPO) problem: it creates scheduled snapshots and backups so that, when data is lost or corrupted, it can be restored to a recent known-good state. Azure Site Recovery (ASR) handles the recovery time objective (RTO) problem: it continuously replicates entire virtual machines to a secondary region so that, when a primary region fails, workloads can be failed over to the secondary in minutes.
+
+Both services use the **Recovery Services vault** as the central management and storage container. Understanding how the vault is configured — its redundancy, its region, and its relationship to backup and replication policies — is foundational to designing a sound data protection strategy in Azure.
+
+## Recovery Services Vault
+
+The Recovery Services vault is an Azure resource that acts as the container for both backup data and Site Recovery replication metadata. A vault must be in the same subscription as the resources it protects, but it can be in a different region — and for Site Recovery, it **must** be in a different region than the source VMs.
+
+### Vault Storage Redundancy
+
+When backup data is transferred to the vault, Azure stores multiple copies for durability. The redundancy setting controls how those copies are distributed:
+
+| Redundancy | Copies | Distribution | Notes |
+|------------|--------|--------------|-------|
+| LRS (Locally Redundant) | 3 | Same datacenter | Lowest cost; no protection from datacenter failure |
+| ZRS (Zone-Redundant) | 3 | Three Availability Zones, same region | Protects from zone failure; available in select regions |
+| GRS (Geo-Redundant) | 6 | 3 local + 3 in paired region | Default; enables cross-region restore |
+
+The critical operational constraint: **vault redundancy can only be changed before the first backup item is configured.** Once any backup item is registered against the vault, the redundancy setting is locked. Create the vault, set the redundancy immediately, then configure backup items.
+
+### Soft Delete
+
+Soft delete protects backup data against accidental or malicious deletion. When a backup item is deleted, the data is not immediately removed — it is retained in a soft-deleted state for **14 additional days** at no cost. During this period, the backup can be undeleted and protection resumed. This provides a meaningful defence against ransomware attacks that attempt to delete backups before encrypting production data.
+
+Enhanced soft delete extends the retention period up to 180 days and adds the ability to make it irreversible — preventing even administrators from disabling soft delete once enabled. An immutable vault setting provides a complementary protection that prevents any modification or deletion of backup policies and backup data.
+
+## Azure Backup Workload Coverage
+
+Azure Backup protects a wide range of workload types through different agents and methods:
+
+| Workload | Method | RPO |
+|----------|--------|-----|
+| Azure VM | Snapshot extension (agentless) | As low as 4 hours (enhanced policy) |
+| SQL Server in Azure VM | Workload-aware extension | Log backups every 15 minutes |
+| SAP HANA in Azure VM | HANA plugin | Per configuration |
+| Azure Files | Share snapshots | As low as 4 hours |
+| On-premises files (Windows) | MARS agent | Up to 3 times daily |
+| On-premises workloads (Hyper-V, VMware, SQL) | MABS or DPM | Per policy |
+
+### Azure VM Backup
+
+Azure VM backup uses a snapshot-based approach without requiring an agent on the VM. When a backup is triggered, the Azure Backup extension installed on the VM coordinates with the Volume Shadow Copy Service (VSS) on Windows — or with pre/post scripts on Linux — to create an application-consistent snapshot. This means the snapshot captures the application in a consistent state, not just the raw disk at an arbitrary moment.
+
+The backup process has two phases. First, a snapshot is taken and stored temporarily in the resource group alongside the VM (enabling fast **Instant Restore** within 1–5 days). Then the snapshot is transferred to the vault for long-term retention.
+
+**Enhanced backup policy** supports multiple backups per day, up to every 4 hours, for workloads requiring a tighter RPO. The standard policy supports once-daily backup only.
+
+### MARS Agent
+
+The Microsoft Azure Recovery Services (MARS) agent is installed directly on Windows machines — either on-premises servers or Azure VMs — and backs up files, folders, and system state directly to the Recovery Services vault. It does not require an on-premises backup server. The MARS agent supports up to three scheduled backups per day but cannot provide application-consistent backups for workloads like SQL Server or Exchange.
+
+### MABS and DPM
+
+For on-premises environments requiring application-aware backups of workloads like Hyper-V VMs, VMware VMs, SQL Server, SharePoint, and Exchange, Microsoft Azure Backup Server (MABS) or System Center Data Protection Manager (DPM) provides the capability. These are on-premises backup servers that handle local backup and then offload to the Recovery Services vault for long-term cloud retention.
+
+## Backup Policies
+
+A backup policy defines the schedule and retention for a backup workload. Policy components include:
+
+- **Frequency** — how often backups are taken (daily, or multiple times per day with enhanced policy).
+- **Time** — the scheduled window for backup initiation.
+- **Retention** — how long each type of recovery point is kept: daily points (up to 9,999 days), weekly points, monthly points, and yearly points. Long-term retention is handled by keeping specific recovery points (for example, the last backup of each month) for extended periods.
+
+Older recovery points can be moved to the **Vault-Archive tier** — a lower-cost storage tier for recovery points that have been in the standard vault for at least 180 days. Archive tier retrieval takes longer, so it is appropriate only for compliance retention rather than operational recovery.
+
+## Azure VM Restore Options
+
+When it comes time to restore, Azure Backup offers several options depending on what needs to be recovered:
+
+| Restore Option | Description |
+|----------------|-------------|
+| Restore VM | Create a new VM from the recovery point — new name, same or different region |
+| Restore disks | Export the disks to a storage account; deploy the VM manually with customised settings |
+| Replace existing disk | In-place restore of the OS disk or a specific data disk on the existing VM |
+| File recovery | Mount the recovery point as a local drive on a running VM; copy specific files and folders |
+| Cross-region restore | Restore the VM to the paired region using backup data from a GRS vault |
+| Cross-subscription restore | Restore to a different subscription (requires enabling this capability on the vault) |
+
+File recovery is particularly useful when only a handful of files were accidentally deleted — mounting the recovery point is far faster than restoring an entire VM disk.
+
+## Azure Site Recovery
+
+Azure Site Recovery is a replication-based disaster recovery service. Rather than creating periodic backups, ASR continuously replicates changes from source VMs to a target region. When a disaster strikes the source region, administrators initiate a failover and the replicated VMs come online in the target region.
+
+ASR supports several scenarios: Azure VM to Azure VM (cross-region), on-premises Hyper-V VMs to Azure, on-premises VMware VMs to Azure, and on-premises physical servers to Azure. The cross-region Azure-to-Azure scenario is the most common for cloud-native workloads.
+
+### ASR Architecture for Azure-to-Azure Replication
+
+For Azure VM replication, the Recovery Services vault must be in the **target region** — the region where VMs will fail over to. This is the opposite of Azure Backup, where the vault is in the same region as the backed-up resources. The reason is practical: if the primary region fails and takes the vault with it, the DR capability is lost.
+
+| Component | Location |
+|-----------|----------|
+| Recovery Services vault | Target (DR) region |
+| Source VMs | Primary region |
+| Cache storage account | Primary region (temporary staging) |
+| Replicated VM copies | Target region |
+| Target VNet, NSGs, public IPs | Target region (configured separately) |
+
+Replication data flows from the source VM disk through a cache storage account in the source region, then transfers to managed disks in the target region. The cache account is a temporary staging area — it is not where the replicated data lives long-term.
+
+### Recovery Point Objectives
+
+ASR provides two types of recovery points:
+
+- **Crash-consistent** — captured every ~1 minute; equivalent to recovering from a power cut. Data in memory is lost. Appropriate for stateless or fault-tolerant workloads.
+- **Application-consistent** — uses VSS (Windows) or pre/post scripts (Linux) to create a consistent snapshot of application data; configured per policy at intervals of 1–12 hours. Required for databases and transaction-heavy workloads.
+
+RTO depends on VM restart time, typically 15–30 minutes for an automated failover to complete.
+
+### Failover Types
+
+| Failover Type | Description | Data Loss Risk |
+|---------------|-------------|----------------|
+| Test failover | Starts replicated VM in an isolated network; does not interrupt replication | None |
+| Planned failover | Graceful — shuts down source VM first, waits for full sync | Zero |
+| Unplanned failover | Emergency — source region may be unavailable; uses latest replicated point | Possible (seconds to minutes) |
+| Failback | Return to primary region after it recovers | None (re-replicate first) |
+
+Test failover is essential for validating DR readiness without impacting production. It creates a copy of the replicated VM in a separate network and is completely non-destructive — production replication continues uninterrupted.
+
+### Recovery Plans
+
+A recovery plan groups multiple VMs and orchestrates their failover in the correct sequence. For a multi-tier application, the database tier must come online before the application tier, which must come online before the web tier. Recovery plans define:
+
+- **VM groups** — VMs in group 1 fail over first, then group 2, and so on.
+- **Manual actions** — steps requiring human intervention between groups (for example, updating a DNS record or validating database connectivity).
+- **Script actions** — Azure Automation runbooks that run automatically between groups (for example, a script that removes an IP reservation or modifies a load balancer backend pool).
+
+Recovery plans can be tested using test failover, giving teams confidence that the entire multi-tier application will come online correctly in the event of a real disaster.
+
+## Summary
+
+Azure Backup and Azure Site Recovery serve complementary but distinct roles in a data protection strategy. Azure Backup is the tool for point-in-time recovery — restoring files, VMs, or databases that have been deleted, corrupted, or encrypted by ransomware. Site Recovery is the tool for business continuity — ensuring that a primary-region failure does not take down the business, by maintaining a continuously replicated copy of critical workloads in a secondary region. The Recovery Services vault connects both services under a single management plane, with redundancy settings, soft delete, and access control applied once and inherited by all protected workloads.

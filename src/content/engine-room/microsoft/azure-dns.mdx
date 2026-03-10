@@ -1,0 +1,121 @@
+---
+title: "Azure DNS — Public Zones, Private Zones, and Name Resolution"
+category: "microsoft"
+topic: "azure-dns"
+summary: "How Azure DNS hosts both public DNS zones delegated from registrars and private DNS zones for internal Azure name resolution — covering record types, alias records for Azure resources, private zone VNet links, and auto-registration of VM names."
+tags: ["azure", "dns", "private-dns", "name-resolution", "az-104"]
+order: 70
+draft: false
+---
+
+## Overview
+
+Azure DNS is a hosting service for DNS zones — not a domain registrar. You purchase a domain name through a registrar (GoDaddy, Namecheap, Google Domains, or similar), then delegate name authority for that domain to Azure DNS name servers by updating the registrar's NS records. Once delegated, all DNS queries for your domain are answered by Azure's globally distributed, anycast DNS infrastructure. Azure DNS also hosts private DNS zones that are invisible to the public internet and are used exclusively for name resolution within Azure VNets. This article covers both flavors, the record types and Azure-specific alias records available, and how DNS resolution works inside a VNet.
+
+## Public DNS Zones
+
+When you create a public DNS zone in Azure DNS for a domain (for example, `contoso.com`), Azure assigns four name servers to that zone — one from each of four different top-level domain registries:
+
+```
+ns1-01.azure-dns.com
+ns2-01.azure-dns.net
+ns3-01.azure-dns.org
+ns4-01.azure-dns.info
+```
+
+The four-zone spread across `.com`, `.net`, `.org`, and `.info` means that Azure DNS is resilient against a failure in any single TLD registry. To delegate the domain, you replace the registrar's default name server entries with these four Azure name servers. After propagation, queries for `contoso.com` and any subdomain are routed to Azure DNS.
+
+## Record Types
+
+Azure DNS supports all standard DNS record types:
+
+| Record Type | Description | Notes |
+|------------|-------------|-------|
+| A | IPv4 address | Maps hostname to IPv4 address |
+| AAAA | IPv6 address | Maps hostname to IPv6 address |
+| CNAME | Canonical name (alias) | Redirects queries to another hostname; cannot be used at zone apex |
+| MX | Mail exchange | Routes email; includes a priority value (lower number = higher priority) |
+| TXT | Text | Used for domain ownership verification, SPF records, DKIM |
+| PTR | Pointer | Reverse lookup: IP address → hostname. Lives in `in-addr.arpa` zones |
+| SRV | Service locator | Maps service + protocol to hostname and port; used by SIP, XMPP, and others |
+| NS | Name server | Defines authoritative name servers for a zone or delegated subdomain |
+| SOA | Start of authority | Created automatically; defines zone metadata (serial, refresh, retry, TTL) |
+| CAA | Certificate Authority Authorization | Specifies which CAs are permitted to issue certificates for the domain |
+
+The SOA and NS records for the zone itself are created automatically when the zone is created and should not be modified or deleted.
+
+## Alias Records
+
+Standard CNAME records have a well-known limitation: they cannot be used at the zone apex (the bare domain name, represented as `@`). A CNAME at `@` for `contoso.com` would conflict with the SOA and NS records that must exist there. This creates a problem when you want `contoso.com` (not just `www.contoso.com`) to resolve to an Azure resource like a Traffic Manager profile or a Front Door endpoint, because those services use FQDNs rather than static IPs.
+
+Azure DNS alias records solve this. An alias record is a special A, AAAA, or CNAME record that references an Azure resource directly rather than a static IP or hostname. Azure DNS dynamically resolves the alias to the current IP of the referenced resource at query time. Alias records can be placed at the zone apex.
+
+Supported alias targets:
+
+| Target Resource | Alias Record Type |
+|----------------|------------------|
+| Azure Public IP address | A or AAAA |
+| Azure Load Balancer (with public frontend) | A or AAAA |
+| Azure Traffic Manager profile | A, AAAA, or CNAME |
+| Azure Front Door profile | A, AAAA, or CNAME |
+| Azure CDN endpoint | CNAME |
+
+The critical operational benefit is that if the underlying Azure resource's IP changes — as happens when a Traffic Manager endpoint fails over, or when a public IP is reassigned — the alias record automatically reflects the new IP. No manual DNS record update is required, and the TTL on the alias record is ignored in favor of Azure's real-time resolution.
+
+## Private DNS Zones
+
+A private DNS zone is a DNS zone that resolves only within Azure VNets linked to it. The zone is not visible to the public internet. Private zones enable you to use meaningful, human-readable names for internal Azure resources without requiring a custom DNS server.
+
+To use a private DNS zone, you create a VNet link associating the zone with one or more VNets. Any VM in a linked VNet can resolve names in that zone using Azure-provided DNS (`168.63.129.16`). The zone name can be any valid DNS name — it does not need to match a publicly registered domain.
+
+**Auto-registration** is an optional feature on a VNet link. When enabled, Azure automatically creates an A record in the private zone for every VM that gets an IP address in the linked VNet, using the VM's name and the zone's domain suffix. When the VM is deallocated or its NIC IP is removed, the record is deleted automatically. This eliminates the need to manually manage internal A records for VM infrastructure. Important constraint: auto-registration can be enabled for a zone on only one VNet at a time, though a zone can be linked to up to 1,000 VNets total (with auto-registration enabled on just one of them).
+
+**Capacity limits:**
+
+| Limit | Value |
+|-------|-------|
+| Private DNS zones per subscription | 1,000 |
+| VNet links per private DNS zone | 1,000 |
+| VNets with auto-registration per zone | 1 |
+| Record sets per zone | 25,000 |
+
+## Private DNS for Private Endpoints
+
+When a private endpoint is created for a PaaS service, the service's public FQDN must resolve to the private endpoint's IP rather than the public IP. Azure provides recommended private DNS zone names for each service type, based on the `privatelink` subdomain pattern:
+
+| Service | Private DNS Zone Name |
+|---------|----------------------|
+| Azure Blob Storage | `privatelink.blob.core.windows.net` |
+| Azure SQL Database | `privatelink.database.windows.net` |
+| Azure Key Vault | `privatelink.vaultcore.azure.net` |
+| App Service | `privatelink.azurewebsites.net` |
+| Azure Container Registry | `privatelink.azurecr.io` |
+| Azure Monitor (Log Analytics) | `privatelink.oms.opinsights.azure.com` |
+
+When you create a private endpoint in the Azure portal and select the option to integrate with a private DNS zone, Azure automatically creates the private DNS zone (if it does not already exist), adds an A record for the private endpoint IP, and links the zone to the selected VNet. VMs in the linked VNet then resolve `myaccount.blob.core.windows.net` to the private endpoint IP rather than the public IP — even though the FQDN has not changed.
+
+For on-premises clients connected via ExpressRoute or VPN, additional DNS configuration is required. On-premises DNS servers cannot use Azure's `168.63.129.16` resolver directly. The recommended pattern is to deploy an Azure DNS Private Resolver with an inbound endpoint, configure on-premises DNS with conditional forwarders pointing to the resolver's inbound endpoint IP for the `privatelink.*` zone names, and let the resolver handle the query against Azure private DNS.
+
+## DNS Resolution Inside a VNet
+
+Every VNet has a built-in DNS resolver at `168.63.129.16` — a non-routable address that is only reachable from within Azure. This resolver handles three query types:
+
+1. **Public Azure DNS zones**: Resolves any record hosted in Azure DNS public zones.
+2. **Private DNS zones**: Resolves records in private zones linked to the VNet.
+3. **Recursive resolution**: Forwards queries for all other names to Azure's recursive resolvers, which have access to the global DNS hierarchy.
+
+When you configure **custom DNS servers** on a VNet (for example, pointing to on-premises AD DNS servers), Azure replaces `168.63.129.16` as the default resolver for VMs in that VNet. Custom DNS servers handle all queries from VMs. The critical operational requirement is that custom DNS servers must forward queries for `*.azure.com`, `*.windows.net`, and other Azure-internal names to `168.63.129.16`. Without this forwarding, VMs in the VNet cannot resolve Azure internal names (private endpoints, Azure Backup endpoints, Azure Update endpoints, etc.).
+
+A common misconfiguration is setting custom DNS on a VNet without adding a forwarding rule for `168.63.129.16` on the custom DNS server — the result is that Azure-internal name resolution breaks for all VMs in the VNet, causing failures in services that are unrelated to DNS at first glance.
+
+## Record TTL Considerations
+
+TTL (Time to Live) controls how long resolvers cache a DNS answer. Low TTLs (60–300 seconds) mean changes propagate quickly but generate higher query volumes. High TTLs (3600 seconds and above) reduce query load but delay propagation of changes.
+
+For records pointing to Azure resources that are expected to change — Traffic Manager endpoints, Front Door origins, IP addresses undergoing rotation — using alias records is preferable to managing TTL aggressively, because alias records bypass TTL caching by resolving dynamically at the Azure DNS layer.
+
+For records that are stable and high-traffic (public-facing A records for established services), higher TTLs reduce DNS query cost and improve resolution performance for clients far from Azure's anycast nodes.
+
+## Summary
+
+Azure DNS public zones eliminate the operational overhead of running DNS server infrastructure by providing a globally redundant, anycast-based hosting service for delegated domains. Alias records extend this with a native solution to the zone-apex CNAME problem, enabling dynamic resolution of Azure resources that have variable IPs. Private DNS zones bring the same simplicity to internal VNet name resolution, with auto-registration removing the manual burden of maintaining VM hostname records. The interaction between private DNS zones and private endpoints is a foundational pattern for securing PaaS connectivity — but it only works cleanly if the DNS resolution path for on-premises clients is also configured to reach the Azure private resolver.

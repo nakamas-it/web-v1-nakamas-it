@@ -1,0 +1,146 @@
+---
+title: "Azure Monitor — Metrics, Logs, Alerts, and Workbooks"
+category: "microsoft"
+topic: "azure-monitor-insights"
+summary: "How Azure Monitor collects metrics and logs from every Azure resource, routes them to Log Analytics workspaces for KQL querying, and triggers alerts through action groups — providing the observability layer that spans VMs, containers, networks, and applications."
+tags: ["azure", "azure-monitor", "log-analytics", "kql", "alerts", "az-104"]
+order: 73
+draft: false
+---
+
+## Overview
+
+Azure Monitor is the unified observability platform for everything running in Azure — and, through Azure Arc, for on-premises and multi-cloud infrastructure as well. Rather than a single tool, Azure Monitor is a collection of services sharing a common data pipeline: telemetry flows in from Azure resources, operating systems, and applications; it is stored in one of two data stores optimised for its type; and it is then made available for querying, alerting, and visualisation.
+
+Understanding Azure Monitor means understanding the distinction between its two data types — Metrics and Logs — and knowing how to route, query, and act on each. Every other Azure Monitor capability, from alerts to workbooks to insights, is built on top of these two stores.
+
+## Data Types and Platform Logs
+
+Azure Monitor organises the telemetry it collects into four distinct categories:
+
+**Metrics** are numerical time-series measurements — CPU percentage, disk IOPS, network bytes transmitted, memory working set. Metrics are lightweight, collected at high frequency (typically one-minute intervals), and retained for **93 days** by default. They are the foundation of performance dashboards and near-real-time threshold alerts. Azure resources emit metrics automatically — no configuration is required to start collecting them.
+
+**Activity Log** records subscription-level control plane events: who created, modified, or deleted which resource, and when. It answers the question "who did what?" across the entire subscription. The Activity Log is retained for **90 days** by default in Azure Monitor. Sending it to a Log Analytics workspace extends retention and enables KQL queries.
+
+**Resource Logs** (formerly Diagnostic Logs) capture data-plane operations within a specific resource — for example, SQL query execution, storage read/write operations, or Key Vault access events. Resource logs are **not collected by default**. Each resource must have a diagnostic setting configured to specify where its logs should be sent.
+
+**Platform logs** is an umbrella term covering both the Activity Log and resource logs — all structured log data emitted by the Azure platform itself, as distinct from application-level telemetry.
+
+| Data Type | Source | Default Retention | Collected Automatically |
+|-----------|--------|------------------|------------------------|
+| Metrics | Azure resources | 93 days | Yes |
+| Activity Log | Azure subscription | 90 days | Yes |
+| Resource Logs | Individual resources | N/A (must route) | No — requires diagnostic settings |
+
+## Diagnostic Settings
+
+A diagnostic setting on a resource specifies which log categories and metrics to collect and where to send them. Each resource supports up to **five diagnostic settings**, allowing simultaneous routing to multiple destinations.
+
+The available destinations are:
+
+- **Log Analytics workspace** — the primary destination for operational querying, alerting, and workbooks.
+- **Storage account** — long-term archival at lower cost; logs stored as JSON blobs.
+- **Event Hub** — stream logs to a SIEM (such as Microsoft Sentinel or Splunk) or a downstream event processor.
+- **Partner solutions** — direct integration with monitoring partners such as Datadog.
+
+A single diagnostic setting can route to multiple destinations simultaneously. For example, a storage account's logs might go to Log Analytics for short-term querying and to a storage account for compliance archiving.
+
+## Log Analytics Workspace
+
+The Log Analytics workspace is the central repository for log data in Azure Monitor. It is a distinct Azure resource with its own geographic region, RBAC access control, and data retention configuration. Resources from multiple subscriptions and even multiple Azure tenants can send data to the same workspace, making it practical to centralise monitoring for an entire organisation.
+
+Data within a workspace is organised into tables by type. Common tables include:
+
+| Table | Contents |
+|-------|----------|
+| `AzureActivity` | Subscription-level control plane events |
+| `AzureDiagnostics` | Resource logs from multiple resource types |
+| `Perf` | Performance counter data from agents |
+| `Event` | Windows Event Log entries |
+| `Syslog` | Linux syslog entries |
+| `SecurityEvent` | Windows security-audited events |
+| `Heartbeat` | Azure Monitor Agent connectivity check-ins |
+| `NetworkWatcherFlowLog` | NSG flow log data |
+
+Retention is configurable from **30 to 730 days** per workspace. Data older than the interactive retention period can be moved to archive tier, extending retention to years at reduced cost and query capability.
+
+## KQL — Kusto Query Language
+
+KQL is the query language used to retrieve and analyse data in Log Analytics workspaces. It is a pipe-based, read-only language where each operator in a chain filters or transforms the data stream produced by the previous step.
+
+A typical query structure:
+
+```
+TableName
+| where TimeGenerated > ago(24h)
+| where Column == "value"
+| project Column1, Column2, Column3
+| summarize count() by Category
+| order by count_ desc
+| take 10
+```
+
+Core operators:
+
+- `where` — filter rows by condition
+- `project` — select specific columns
+- `extend` — add a computed column
+- `summarize` — aggregate (count, avg, sum, max, min) with optional grouping
+- `join` — combine two tables on a key
+- `render` — visualise results as a chart within the portal
+
+Time functions used in nearly every query: `ago(24h)`, `ago(7d)`, `now()`, `bin(TimeGenerated, 1h)` for time-bucketing aggregations.
+
+KQL is designed for operational log analysis. It handles time-series operations naturally and is optimised for the pattern of filtering large volumes of structured log data and summarising the results.
+
+## Alerts
+
+Alert rules in Azure Monitor monitor a signal — a metric, a log query result, or an Activity Log event — and fire when a defined condition is met.
+
+**Metric alerts** evaluate a metric value against a static or dynamic threshold at a configured frequency, typically every 1–5 minutes. They are stateful: the alert fires when the threshold is breached and automatically resolves when the metric returns to a healthy value. Dynamic thresholds learn the resource's normal behaviour and alert on anomalies rather than fixed values.
+
+**Log search alerts** run a KQL query against a Log Analytics workspace on a schedule. The alert fires when the query returns results, or when the count of results crosses a threshold. Because queries are arbitrary KQL, log alerts can express complex conditions — for example, alerting when the same source IP generates more than 100 failed authentication events in a 10-minute window.
+
+**Activity log alerts** fire when a specific Azure operation occurs — a VM is deleted, an NSG rule is modified, a resource group is created. These are the mechanism for detecting configuration changes or operational events at the subscription level.
+
+**Smart detection** (part of Application Insights) uses machine learning to automatically detect anomalies in request failure rates, response times, and resource utilisation — with no threshold configuration required.
+
+## Action Groups
+
+An action group defines what happens when an alert fires. Action groups are Azure resources defined independently of alert rules, so the same group can be referenced by multiple rules — avoiding duplication of notification configuration.
+
+An action group can contain any combination of:
+
+| Action Type | Description |
+|-------------|-------------|
+| Email / SMS / Push / Voice | Direct notifications to individuals |
+| Webhook | HTTP POST to any endpoint (custom automation, ticketing systems) |
+| Azure Function | Trigger a serverless function for custom logic |
+| Logic App | Trigger a workflow for complex multi-step automation |
+| Automation Runbook | Run a PowerShell or Python runbook in Azure Automation |
+| ITSM connector | Create incidents in ServiceNow or other ITSM tools |
+| Event Hub | Stream alert data to a downstream processor |
+
+A single alert rule can reference up to five action groups. A subscription can contain up to 1,000 action groups.
+
+## Azure Monitor Workbooks
+
+Workbooks are interactive, parameterised reports that combine KQL queries, metric charts, text documentation, and user input controls into a single shareable document. They are the appropriate tool for recurring operational reports, capacity planning dashboards, compliance documentation, and troubleshooting playbooks.
+
+Microsoft provides a library of workbook templates covering common scenarios — VM performance analysis, failure investigation, network traffic analysis, security posture review. Teams can create custom workbooks and share them within an organisation. Parameters allow workbooks to be scoped dynamically: a time range picker, a subscription selector, or a resource group filter can change the data displayed across all queries in the workbook simultaneously.
+
+Workbooks are also the rendering engine behind Azure Monitor Insights — the curated monitoring experiences for VMs (VM Insights), containers (Container Insights), and networks (Network Insights) are all built on workbooks.
+
+## Monitor Insights
+
+Azure Monitor provides several pre-built monitoring solutions called Insights, each tailored to a specific resource type:
+
+**VM Insights** provides performance views (CPU, memory, disk, network over time) and a service map showing connections between VMs and processes. It requires the Azure Monitor Agent and the Dependency Agent installed on each VM.
+
+**Container Insights** monitors Azure Kubernetes Service clusters, collecting container logs (stdout/stderr), performance metrics per node and pod, and Kubernetes events. Data flows into the `ContainerLog`, `KubePodInventory`, and `InsightsMetrics` tables.
+
+**Network Insights** provides a unified view of all Azure networking resources — integrating Network Watcher diagnostics, NSG flow logs, and Traffic Analytics into a single experience within the Azure Monitor portal.
+
+## Summary
+
+Azure Monitor provides the observability foundation for Azure environments by unifying metric collection and log aggregation into a single platform. The separation between the Metrics store (fast, 93-day retention, near-real-time) and Log Analytics workspaces (flexible, KQL-queryable, configurable retention) is the key architectural distinction to understand. Diagnostic settings bridge the gap between Azure resources and the workspace. Alerts and action groups translate raw telemetry into operational responses, while workbooks turn repeated investigations into documented, repeatable processes. Together, these components give administrators and engineers the visibility required to operate Azure infrastructure confidently at scale.

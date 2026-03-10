@@ -1,0 +1,94 @@
+---
+title: "Azure Files — Cloud File Shares and Azure File Sync"
+category: "microsoft"
+topic: "azure-files"
+summary: "How Azure Files provides fully managed SMB and NFS file shares in the cloud — and how Azure File Sync extends those shares to on-premises Windows servers with intelligent cloud tiering that keeps frequently accessed files local while archiving the rest."
+tags: ["azure", "azure-files", "smb", "file-sync", "cloud-tiering", "az-104"]
+order: 62
+draft: false
+---
+
+## Overview
+
+Azure Files is a fully managed file sharing service hosted within Azure Storage accounts. Rather than provisioning and maintaining a file server, administrators define a share and mount it directly on Windows, Linux, or macOS clients over SMB 3.x or NFS 4.1. The service removes the operational burden of patching, disk management, and hardware replacement while delivering a familiar network drive experience to end users and applications.
+
+Azure File Sync extends this model to on-premises Windows Servers. Instead of replacing a file server, File Sync turns it into a local cache — frequently accessed files remain on local disk while less active content is tiered transparently to the Azure file share. The result is a single unified namespace accessible both from on-premises clients at local speed and from remote sites and cloud workloads via the Azure share directly.
+
+## Share Tiers and Capacity
+
+Azure Files offers two performance tiers, both delivered through storage accounts:
+
+| Attribute | Standard | Premium |
+|---|---|---|
+| Backing storage | HDD (magnetic) | SSD (NVMe) |
+| Max share size | 100 TiB | 100 TiB |
+| Max IOPS | 10,000 baseline | Provisioned (1 IOPS per GiB, min 400) |
+| Max throughput | 300 MB/s | Up to 10 GB/s |
+| Storage account type | GPv2 | Premium file shares account |
+
+Standard shares are billed on capacity used. Premium shares are billed on provisioned size regardless of actual usage, so over-provisioning carries a cost penalty — size should be planned based on expected IOPS requirements rather than raw space alone.
+
+NFS 4.1 shares require Premium tier and must be accessed over a private endpoint or service endpoint — NFS shares have no public internet access path by design.
+
+## Authentication Methods
+
+Azure Files supports multiple authentication models depending on the workload:
+
+**Storage account key** — Full access to the share, equivalent to root credentials. Appropriate for automated workloads and service accounts where identity-based access is impractical. Keys should be stored in Azure Key Vault.
+
+**On-premises AD DS (Kerberos)** — Join the storage account to an on-premises Active Directory domain. Windows clients authenticate using their domain Kerberos tickets, receiving NTFS share and file permissions. This is the recommended path for enterprise file migrations from on-premises file servers.
+
+**Entra ID Kerberos** — Kerberos authentication using Entra ID-issued tickets. Supports cloud-only and hybrid identities. Requires the storage account to be configured for Entra Kerberos authentication. Permissions are assigned via Azure RBAC storage file data roles: Storage File Data SMB Share Reader, Contributor, or Elevated Contributor.
+
+SMB shares encrypt data in transit using SMB 3.x encryption by default on Standard tier. Clients that do not support SMB 3.x encryption are blocked unless the secure transfer requirement is relaxed.
+
+## Share Snapshots
+
+Snapshots provide point-in-time, read-only, incremental copies of the entire file share. Each snapshot captures the full share state at the moment of creation, but only stores the delta relative to the previous snapshot — storage consumption is proportional to the volume of changes between snapshots, not the total share size.
+
+| Snapshot characteristic | Detail |
+|---|---|
+| Maximum per share | 200 |
+| Granularity | Entire share (not individual files or folders) |
+| Restoration scope | Individual files or full share |
+| Retention | Manual deletion or Azure Backup policy |
+
+Snapshots can be created manually through the portal, PowerShell, or Azure CLI, and can be automated through Azure Backup integration with a backup policy. Files within a snapshot are browsable through the portal or by mounting the snapshot path on a Windows client.
+
+## Azure File Sync
+
+Azure File Sync is a separate Azure resource — the Storage Sync Service — that orchestrates synchronisation between one or more Windows Server endpoints and an Azure file share. The architecture has four key components:
+
+**Storage Sync Service** — The top-level Azure resource. All sync groups and registered servers are scoped to one Storage Sync Service. Multiple sync services can exist per subscription.
+
+**Sync group** — Defines the topology of a single synchronised namespace. Each sync group contains exactly one cloud endpoint (the Azure file share) and one or more server endpoints (paths on registered Windows Servers).
+
+**Cloud endpoint** — The Azure Files share that acts as the source of truth. Changes made to the cloud endpoint propagate to all server endpoints in the sync group.
+
+**Server endpoint** — A specific folder path on a registered Windows Server. The agent must be installed on the server before it can be registered. A server can have multiple endpoints in different sync groups.
+
+Communication between the agent and Azure uses port 443 outbound over HTTPS. SMB port 445 is not required for sync agent traffic.
+
+## Cloud Tiering
+
+Cloud tiering is an optional feature on server endpoints that intelligently manages local disk usage. When enabled, the server maintains the full namespace (all file names and metadata are visible) but stores only the hot working set of file data locally. Cold files are replaced with a reparse point — a lightweight pointer to the Azure file share. When a tiered file is opened, the File Sync agent retrieves the content transparently from the cloud share; the application sees a normal file read with a small latency increase.
+
+Two policies control which files are kept local:
+
+**Volume free space policy** — Ensures that a configured percentage of the host volume remains free. When local disk space falls below the threshold, the oldest-accessed files are tiered until the free space target is met. Default: 20%.
+
+**Date policy** — Tiers files that have not been accessed within a specified number of days. Operates independently of the free space policy.
+
+Tiered files appear as normal files in Windows Explorer and are fully transparent to applications. The reparse point attribute is the only technical indicator of tiering. Files that have been tiered can be recalled manually or by simply opening them.
+
+## Multi-Site Sync
+
+Multiple server endpoints in a single sync group all synchronise to the same cloud endpoint, creating a multi-site topology where branch offices or regional servers share one coherent namespace. Changes made on any server endpoint — or directly in the Azure file share — propagate to all other endpoints.
+
+Conflict resolution follows a last-writer-wins rule. When two servers modify the same file concurrently before sync propagates the first change, both versions are preserved: the later change wins as the canonical version, and the earlier change is renamed with a conflict suffix that includes the source computer name and a timestamp. No data is silently lost.
+
+A registered server count limit of 30 servers per Storage Sync Service applies across all sync groups.
+
+## Summary
+
+Azure Files delivers managed SMB and NFS file shares without file server infrastructure, with authentication options ranging from simple storage account keys to full Kerberos integration via AD DS or Entra ID. Snapshots provide lightweight point-in-time recovery. Azure File Sync extends cloud file shares to on-premises Windows Servers, using cloud tiering to intelligently balance local storage consumption against access latency — keeping hot files local while archiving the rest transparently to Azure.

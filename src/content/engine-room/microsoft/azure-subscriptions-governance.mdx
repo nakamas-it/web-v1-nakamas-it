@@ -1,0 +1,75 @@
+---
+title: "Azure Subscriptions and Governance — Management Groups, Locks, and Tags"
+category: "microsoft"
+topic: "azure-governance"
+summary: "How Azure organises resources into a hierarchy of management groups, subscriptions, and resource groups — and how resource locks, tags, and cost management give administrators control over what gets deployed and what it costs."
+tags: ["azure", "subscriptions", "management-groups", "resource-locks", "tags", "az-104"]
+order: 57
+draft: false
+---
+
+## Overview
+
+Every resource deployed in Azure lives somewhere in a four-level containment hierarchy: management group, subscription, resource group, and resource. This hierarchy is not just an organisational convenience — it is the scaffolding on which governance controls are applied. Policies cascade downward, role assignments inherit, and cost data rolls up. Understanding how each level behaves, and what restrictions apply at each boundary, is the foundation of any Azure governance strategy.
+
+## The Management Group Hierarchy
+
+At the top of the tree sits the **Root Management Group**, created automatically when a tenant is provisioned. Every subscription in the tenant ultimately reports to this root. Between the root and individual subscriptions, organisations can create up to **six levels** of child management groups — not counting the root itself. A single tenant can contain up to **10,000 management groups**, and each management group or subscription has exactly one parent.
+
+Policies and role assignments applied at a management group scope are inherited by all descendant management groups, subscriptions, resource groups, and resources. This makes management groups the natural governance boundary for large organisations with regional IT teams, separate business units, or strict compliance zones. A policy denying the creation of resources outside approved regions, applied at the root, will block non-compliant deployments everywhere in the tenant with a single assignment.
+
+## Subscriptions
+
+A **subscription** is the billing and resource container. All Azure resources must belong to a subscription, and every subscription trusts exactly one Entra ID tenant for identity. Common subscription types include:
+
+| Type | Description |
+|------|-------------|
+| **Free** | 12 months of popular free services + $200 credit; credit card required |
+| **Pay-As-You-Go** | Billed monthly for actual consumption |
+| **Enterprise Agreement (EA)** | Volume licensing with committed spend; negotiated pricing |
+| **Cloud Solution Provider (CSP)** | Partner-managed billing; reseller is the billing entity |
+
+Resources can be moved between subscriptions, but the move operation does not redeploy them — the resource ID changes because it reflects the new path, but the underlying resource is not destroyed and recreated. Not all resource types support moves. Remove resource locks before moving, and reapply them afterward. Moving resources between regions requires Azure Resource Mover or a redeploy, not the standard move operation.
+
+## Resource Groups
+
+A **resource group** is a logical container for a set of Azure resources. The resource group itself has a region, but this region only stores the resource group's metadata — individual resources inside the group can be deployed to any Azure region. Resource groups cannot be nested. All resources in a group are deleted when the group is deleted, making resource groups the natural unit of lifecycle management for an application or workload.
+
+## Resource Locks
+
+Resource locks prevent accidental modification or deletion of critical resources. Two lock types exist:
+
+| Lock Type | What It Allows | What It Blocks |
+|-----------|---------------|----------------|
+| **CanNotDelete** | Read and modify | Delete |
+| **ReadOnly** | Read | Create, update, delete |
+
+Locks are applied at the subscription, resource group, or individual resource level and **inherit downward** — a lock on a resource group protects every resource it contains. Only identities with the **Owner** or **User Access Administrator** role (or a role that includes `Microsoft.Authorization/locks/*`) can create or remove locks. ReadOnly locks can produce surprising side effects: listing storage account keys is a POST operation internally, so a ReadOnly lock on a storage account blocks key enumeration even though it feels like a read operation.
+
+Locks operate at the management plane (Azure Resource Manager). They do not protect data plane access — a ReadOnly lock on a storage account does not prevent a caller with the right data permissions from reading or writing blob data directly.
+
+## Tags
+
+Tags are key-value pairs attached to resources, resource groups, and subscriptions. They are the primary mechanism for cost attribution, automation filters, and operational metadata.
+
+| Constraint | Limit |
+|------------|-------|
+| Tags per resource / resource group / subscription | 50 |
+| Tag name maximum length | 512 characters |
+| Tag value maximum length | 256 characters |
+
+Tags do **not** automatically inherit from parent scopes. A tag placed on a resource group does not appear on the resources inside it unless inheritance is enforced through Azure Policy — typically a `Modify` or `Append` effect policy that copies tag values from the resource group to child resources. Tag values appear in cost analysis after a delay of 24–48 hours following tag creation or assignment.
+
+## Cost Management
+
+**Azure Cost Management + Billing** provides visibility into spending across subscriptions. The cost analysis view breaks down consumption by resource, resource group, subscription, tag, service, location, and billing period — any combination of these dimensions can be used to isolate cost drivers.
+
+**Budgets** define spending thresholds at the subscription or resource group scope. When spending reaches a configured percentage of the budget — or when the forecasted spend is projected to exceed it — alerts fire to a configured list of recipients or an Action Group. Budgets do not automatically stop or delete resources; they are notification mechanisms only.
+
+**Reservations** allow pre-paying for one or three years of compute, SQL Database, or other eligible capacity in exchange for up to a 72% discount compared to pay-as-you-go pricing. Reservation scope can be shared across all subscriptions in a billing account, limited to a single subscription, or scoped to a single resource group.
+
+**Azure Hybrid Benefit** allows organisations with existing Windows Server or SQL Server licenses covered by Software Assurance to apply those licenses to Azure virtual machines, reducing the OS or SQL licensing cost. Combined with reservations, hybrid benefit can reduce the total cost of running Windows workloads on Azure by 40–49% or more.
+
+## Summary
+
+Azure governance is layered: management groups provide tenant-wide policy and RBAC scope; subscriptions are billing and resource boundaries; resource groups are lifecycle units for workloads. Resource locks guard against accidental changes at the management plane, tags provide the metadata fabric for cost and operational visibility, and Cost Management translates raw spending data into actionable budgets and optimisation signals. Together these tools give administrators the controls needed to run Azure at scale without losing visibility into what exists, who deployed it, and what it costs.

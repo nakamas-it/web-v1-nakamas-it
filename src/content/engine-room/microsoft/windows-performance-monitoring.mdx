@@ -1,0 +1,128 @@
+---
+title: "Windows Performance and Event Monitoring — Task Manager, Perfmon, and Event Viewer"
+category: "microsoft"
+topic: "windows-performance"
+summary: "How to monitor and diagnose Windows performance issues — using Task Manager's seven tabs for real-time process and resource visibility, Performance Monitor for detailed counter-based analysis with Data Collector Sets, Resource Monitor for per-process network and disk I/O, and Event Viewer for correlating system events with performance degradation."
+tags: ["windows", "task-manager", "performance-monitor", "event-viewer", "md-100"]
+order: 90
+draft: false
+---
+
+## Overview
+
+Performance monitoring on Windows is not a single tool — it is a layered stack of utilities, each suited to a different level of detail and different diagnostic question. Task Manager gives a real-time snapshot of the machine's overall health in seconds. Resource Monitor adds per-process granularity for CPU, memory, disk, and network. Performance Monitor records counter data over time for trend analysis. Event Viewer correlates system and application events with the timeline of a performance problem. Together they cover the full range from "why is the machine slow right now" to "what happened at 2 AM last Tuesday."
+
+---
+
+## Task Manager — Seven Tabs
+
+Task Manager (`taskmgr.exe`, or Ctrl+Shift+Esc) is the first tool to open when investigating a performance complaint. Its seven tabs each address a different aspect of system state:
+
+| Tab | What It Shows |
+|-----|--------------|
+| Processes | All running apps and background processes with real-time CPU, memory, disk, and network usage; right-click to End Task or inspect properties |
+| Performance | Live graphs for CPU, RAM, disk, network, and GPU; total handle and thread counts; memory breakdown (in use, available, committed, cached); link to Resource Monitor |
+| App history | Cumulative CPU time and network usage per UWP/Store app since last reset — not useful for Win32 processes |
+| Startup | Apps that launch at startup with an impact rating (Low/Medium/High); disable items here to improve boot time |
+| Users | Active sessions and their resource consumption; admins can disconnect or sign out other users |
+| Details | All processes with PID, status, CPU%, memory in KB, handles, threads, and UAC virtualization status — more granular than the Processes tab |
+| Services | All Windows services with running/stopped status; right-click to start or stop; link to Services.msc for full management |
+
+In the Performance tab, right-clicking the CPU graph offers a "Change graph to > Logical processors" view that shows individual core utilisation — useful for identifying single-threaded bottlenecks that average well across all cores but saturate one.
+
+The memory section in Performance shows four values that matter for diagnosis:
+
+| Value | Meaning |
+|-------|---------|
+| In Use | RAM actively used by processes |
+| Available | RAM free for new allocations without paging |
+| Committed | Virtual address space reserved (can exceed physical RAM) |
+| Cached | Standby list — recently used data kept in RAM but reclaimable |
+
+Low "Available" combined with high "Committed" is the signature of memory pressure.
+
+---
+
+## Resource Monitor — Per-Process Granularity
+
+Resource Monitor (`resmon.exe`) provides the level of detail Task Manager omits — specifically, which process is holding which file handle, which TCP connection belongs to which process, and exactly how much data each process is reading and writing to each disk.
+
+| Tab | Key Information |
+|-----|----------------|
+| CPU | Per-process CPU% with associated services listed; suspend or resume processes |
+| Memory | Physical memory breakdown with per-process working set; standby and free memory visualised |
+| Disk | Per-process disk read/write in bytes/sec, broken down by file path — identifies which files are being accessed |
+| Network | Per-process network activity; TCP connections with state (Established, Listening, Time Wait); listening ports with owning process |
+
+The Network tab is particularly useful for finding unexpected outbound connections or identifying which process is saturating bandwidth. The Disk tab reveals I/O patterns that look like overall disk load in Task Manager but turn out to be a single process hammering one file.
+
+---
+
+## Performance Monitor — Counter-Based Analysis
+
+Performance Monitor (`perfmon.exe`) moves beyond real-time snapshots into recorded, counter-based analysis. It is the right tool when a problem is intermittent — occurs at night, during batch jobs, or under specific load — and needs to be captured over time rather than observed live.
+
+Key performance counters and their diagnostic thresholds:
+
+| Counter | Object | Concern Threshold |
+|---------|--------|------------------|
+| % Processor Time | Processor | Sustained >85% indicates CPU saturation |
+| % Privileged Time | Processor | High values indicate kernel/driver activity |
+| Available MBytes | Memory | Below 100 MB sustained signals memory pressure |
+| Pages/sec | Memory | Sustained >20 indicates hard paging — insufficient RAM |
+| Committed Bytes | Memory | Approaches or exceeds physical RAM size |
+| Avg. Disk Queue Length | Physical Disk | >2 per spindle sustained indicates disk bottleneck |
+| Disk Read/Write Bytes/sec | Physical Disk | Compare against disk's rated sequential throughput |
+| Bytes Total/sec | Network Interface | Compare against link speed to assess saturation |
+
+**Data Collector Sets (DCS)** are the mechanism for recording counter data over time. A DCS groups together a set of performance counters, event trace providers, and configuration snapshots. Once configured, a DCS can be scheduled to start and stop automatically — for example, run from midnight to 6 AM every night for a week. Results are saved as log files and can be opened in Performance Monitor for graph visualisation or exported for analysis.
+
+DCS can also trigger alerts when a counter crosses a threshold — useful for automated notification when disk queue length exceeds 2 or available memory drops below a defined value.
+
+---
+
+## Event Viewer — System and Security Events
+
+Event Viewer (`eventvwr.msc`) organises Windows log data into two top-level categories:
+
+**Windows Logs** — the classic logs:
+
+| Log | Contents |
+|-----|----------|
+| Application | Events from applications and services (errors, warnings, information) |
+| Security | Audit events — requires audit policies to be enabled via `secpol.msc` |
+| Setup | Events from Windows installation and update processes |
+| System | Events from OS components, drivers, and services |
+| Forwarded Events | Events collected from remote computers via subscriptions |
+
+**Applications and Services Logs** — component-specific operational logs (e.g., Group Policy Operational, PowerShell, Task Scheduler/Operational).
+
+Key Security event IDs worth memorising:
+
+| Event ID | Description |
+|----------|-------------|
+| 4624 | Successful logon |
+| 4625 | Failed logon — repeated failures indicate brute-force attempts |
+| 4634 / 4647 | Logoff events |
+| 4648 | Logon with explicit credentials (runas or network pass-through) |
+| 4720 | User account created |
+| 4740 | Account locked out |
+| 1102 | Audit log cleared — always suspicious; investigate immediately |
+
+**Custom Views** let you filter across multiple logs by event ID, source, level, and date range, then save the filter for reuse. For performance troubleshooting, create a custom view combining System errors and Application errors in the same time window as a performance spike captured in Performance Monitor.
+
+**Event Subscriptions** pull events from remote source computers to a central collector. The source computers must have WinRM enabled (`Enable-PSRemoting`); the collector subscribes using `wecutil`. This centralises log review without deploying a full SIEM.
+
+---
+
+## Reliability Monitor
+
+Reliability Monitor (`perfmon /rel` or Control Panel > Security and Maintenance > Reliability Monitor) provides a timeline view of the machine's stability — a stability index from 1 to 10, plotted over time, with markers for application failures, Windows failures, hardware failures, warnings, and informational events (software installs and uninstalls).
+
+Its primary value is correlation: an application crash that started happening every day lines up on the timeline with a software install from three days ago. Without Reliability Monitor, making that connection requires cross-referencing Application event log entries against Setup log entries manually.
+
+---
+
+## Summary
+
+Windows performance monitoring uses a layered approach: Task Manager for immediate triage, Resource Monitor for per-process drill-down, Performance Monitor with Data Collector Sets for recorded trend analysis, and Event Viewer for correlating events with performance symptoms. Key counter thresholds — Pages/sec above 20 for memory, Avg. Disk Queue Length above 2 for disk — provide quantitative benchmarks beyond subjective "it feels slow." The Security log's event IDs, especially 4625 for failed logons and 1102 for cleared audit logs, are essential for correlating performance problems with security incidents.

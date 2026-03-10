@@ -1,0 +1,113 @@
+---
+title: "Windows Update — Client Servicing, WSUS, and Repair"
+category: "microsoft"
+topic: "windows-update-client"
+summary: "How Windows 10 and 11 receive and apply updates — the servicing model separating quality from feature updates, deferral policies for controlling update timing, WSUS for centralised on-premises update management, and DISM plus SFC for repairing a corrupted Windows component store."
+tags: ["windows", "windows-update", "wsus", "dism", "sfc", "md-100"]
+order: 89
+draft: false
+---
+
+## Overview
+
+Windows as a Service (WaaS) is Microsoft's approach to delivering improvements continuously rather than through discrete OS releases. Instead of shipping Windows 10 and then Windows 11 as entirely separate products, Microsoft ships updates that progressively improve the same installed OS. Two distinct update categories handle different aspects of this: quality updates for security and reliability, and feature updates for new capabilities and OS version increments.
+
+Client devices receive these updates either directly from Microsoft's Content Delivery Network or from an on-premises Windows Server Update Services (WSUS) server, depending on how the environment is configured. Either way, update timing can be controlled through deferral periods and deadline policies — giving IT administrators a window to validate updates before they roll out to the full device fleet.
+
+---
+
+## Windows Servicing Model
+
+| Update Type | Cadence | Maximum Deferral | Description |
+|-------------|---------|-----------------|-------------|
+| Quality Updates | Monthly (Patch Tuesday) | 30 days | Cumulative security patches and bug fixes; each release includes all previous fixes |
+| Feature Updates | Annually | 365 days | New Windows version increment (e.g., 22H2 → 23H2); major changes to OS capabilities |
+| Driver Updates | As available | 30 days | Hardware driver updates distributed via Windows Update |
+| Definition Updates | Continuously | Not deferrable | Windows Defender antivirus signature updates |
+
+Quality updates are cumulative. Deferring a quality update by 14 days means the device installs the full cumulative patch 14 days after release — not 14 separate days' worth of patches. This means there is no update debt from skipping a month; the next cumulative update contains everything prior.
+
+Feature updates represent a full OS version upgrade. The 365-day deferral gives organisations a full year to validate a new Windows release against their application estate before deploying broadly.
+
+---
+
+## Update Rings and Deferral
+
+Update rings are logical device groups, each with a different deferral period, used to stage rollout across a fleet. A problem in a monthly patch shows up in the Pilot ring before it reaches the majority of devices.
+
+| Ring | Quality Deferral | Feature Deferral | Audience |
+|------|-----------------|-----------------|----------|
+| Pilot | 0 days | 0 days | IT staff and early adopters; catch problems first |
+| Early Adopters | 7 days | 30 days | Tech-comfortable users; broader validation |
+| Broad | 21 days | 90 days | General workforce; Pilot has cleared by now |
+| Critical | 30 days | 365 days | Production endpoints; maximum validated buffer |
+
+Deferral periods are configured via Group Policy at `Computer Configuration > Administrative Templates > Windows Components > Windows Update > Windows Update for Business`, or via Intune Update Ring policies. Key GPO settings include `DeferQualityUpdatesPeriodInDays` (0–30) and `DeferFeatureUpdatesPeriodInDays` (0–365). Quality and feature updates can also be paused entirely for up to 35 days using the pause policies.
+
+---
+
+## WSUS — On-Premises Update Management
+
+Windows Server Update Services provides on-premises update distribution for environments that need to control exactly which updates reach devices, or that cannot rely on direct internet access from endpoints.
+
+WSUS downloads approved updates from Microsoft and caches them locally. Client machines contact the WSUS server rather than Microsoft's CDN. Admins approve updates per computer group before clients receive them — this is the key operational difference from Windows Update for Business, where deferral controls timing but not approval of individual updates.
+
+**Client configuration via Group Policy** (`Computer Configuration > Administrative Templates > Windows Components > Windows Update`):
+
+| GPO Setting | Purpose |
+|-------------|---------|
+| Specify intranet Microsoft update service location | Points clients to the WSUS URL (e.g., `http://wsus-server:8530`) |
+| Configure Automatic Updates | Controls download and install behaviour |
+| Enable client-side targeting | Assigns the client to a named WSUS computer group |
+
+WSUS listens on HTTP port 8530 and HTTPS port 8531 by default. It requires either SQL Server or the bundled Windows Internal Database. Update content is downloaded during scheduled synchronisation with Microsoft Update and stored on the WSUS server's local disk.
+
+A critical exam point: WSUS-managed clients do not contact Windows Update directly. If a client cannot reach the WSUS server — due to a network failure or misconfigured URL — it receives no updates at all. It will not fall back to Microsoft's CDN.
+
+---
+
+## Update Troubleshooting
+
+When Windows Update fails, three resources provide diagnostic information:
+
+- **Windows Update Troubleshooter**: Settings > Troubleshoot > Additional troubleshooters > Windows Update. Resets the Update services and clears the download cache automatically.
+- **CBS.log**: `C:\Windows\Logs\CBS\CBS.log` — the Component-Based Servicing log records all update installation and component activity in detail.
+- **Windows Update ETL logs**: `Get-WindowsUpdateLog` (PowerShell) converts raw ETW trace files from `C:\Windows\Logs\WindowsUpdate\` into a readable `WindowsUpdate.log`.
+
+For stuck or failed updates, the manual reset procedure clears the download cache:
+
+1. `net stop wuauserv` — stop the Windows Update service
+2. `net stop bits` — stop the Background Intelligent Transfer Service
+3. `net stop cryptsvc` — stop the Cryptographic Services
+4. Delete or rename `C:\Windows\SoftwareDistribution` to `SoftwareDistribution.old`
+5. `net start wuauserv`, `net start bits`, `net start cryptsvc` — restart services
+6. Trigger a new update scan
+
+---
+
+## DISM and SFC — Repairing the Component Store
+
+The Windows component store (CBS store) is the authoritative repository of Windows files that SFC and Windows Update draw on for repairs. If the component store itself is corrupted, SFC cannot fix system files reliably. The correct repair sequence is always DISM first, then SFC.
+
+| Step | Command | Effect |
+|------|---------|--------|
+| 1 | `DISM /Online /Cleanup-Image /CheckHealth` | Reads a corruption flag in the image — fast, no scan performed |
+| 2 | `DISM /Online /Cleanup-Image /ScanHealth` | Actively scans the component store for corruption — takes 10–30 minutes |
+| 3 | `DISM /Online /Cleanup-Image /RestoreHealth` | Repairs corruption by downloading replacement files from Windows Update |
+| 4 | `sfc /scannow` | Scans protected system files and repairs them using the now-healthy component store |
+
+If the device lacks internet access or Windows Update cannot supply the repair source, provide a local source:
+
+```
+DISM /Online /Cleanup-Image /RestoreHealth /Source:wim:D:\sources\install.wim:1 /LimitAccess
+```
+
+`/LimitAccess` prevents DISM from contacting Windows Update even if it cannot read from the specified source — useful when the WSUS environment should not be bypassed.
+
+The exam trap: running `sfc /scannow` first on a corrupted component store may fail or silently leave files unrepaired, because SFC relies on the CBS store as its reference. Always run DISM RestoreHealth before SFC.
+
+---
+
+## Summary
+
+Windows Update on client devices follows a WaaS model with two distinct update streams — monthly cumulative quality updates and annual feature updates — each with its own deferral ceiling. Update rings stage rollout across device groups, with Pilot absorbing any problematic updates before they reach the fleet. WSUS provides on-premises update approval and caching for environments that need fine-grained control or offline operation. When updates fail, CBS.log and the SoftwareDistribution reset procedure address most issues. Component store corruption requires DISM RestoreHealth before SFC — always in that order.

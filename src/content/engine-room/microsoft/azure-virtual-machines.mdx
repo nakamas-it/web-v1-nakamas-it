@@ -1,0 +1,114 @@
+---
+title: "Azure Virtual Machines — Compute, Disks, and High Availability"
+category: "microsoft"
+topic: "azure-vms"
+summary: "How Azure Virtual Machines work — choosing VM sizes for workload requirements, selecting the right managed disk type, and architecting for high availability using availability sets, availability zones, proximity placement groups, and Azure Bastion for secure access."
+tags: ["azure", "virtual-machines", "managed-disks", "availability-zones", "az-104"]
+order: 64
+draft: false
+---
+
+## Overview
+
+Azure Virtual Machines deliver Infrastructure-as-a-Service compute — the familiar model of a guest operating system running on virtualised hardware, but without any physical hardware procurement or data centre operations. Every VM in Azure runs on a managed host node within a region. The administrator selects the VM size (which determines vCPU, RAM, and maximum disk count), the operating system image, and the network and storage configuration. Azure handles the physical host, hypervisor, and hardware lifecycle.
+
+The key design decisions for an Azure VM deployment are: the right size series for the workload, the right managed disk type for the storage requirements, and the right availability construct to meet the target SLA.
+
+## VM Size Series
+
+Azure groups VM sizes into named series, each optimised for a different workload profile:
+
+| Series | Purpose | Typical Use Case |
+|---|---|---|
+| B | Burstable — variable CPU with credits | Dev/test, low-traffic web servers |
+| D | General purpose — balanced CPU/memory | Most application tiers |
+| E | Memory optimised | Databases, in-memory caching |
+| F | Compute optimised — high CPU-to-memory ratio | Batch processing, gaming servers |
+| G | Memory and local storage | Large relational databases |
+| H | High performance compute | MPI workloads, scientific simulation |
+| L | Storage optimised — high disk throughput | NoSQL, data warehousing |
+| M | Large memory — up to 11.4 TB RAM | SAP HANA, very large in-memory databases |
+| N | GPU | AI/ML training (NC), GPU visualisation (NV) |
+
+The VM name encodes the configuration. `Standard_D4s_v5` breaks down as: Standard tier, D series, 4 vCPUs, premium storage supported (`s` suffix), fifth generation (`v5`). The `a` suffix indicates an AMD processor; the `d` suffix indicates a local NVMe temp disk.
+
+VM sizes are subject to per-region, per-subscription vCPU quotas. Quota increases are requested through Azure Support.
+
+## Managed Disks
+
+Managed disks are the standard storage option for Azure VMs. Azure handles disk placement, replication, and snapshot management; the administrator simply selects a disk type and size.
+
+| Disk Type | Max IOPS | Max Throughput | Typical Use |
+|---|---|---|---|
+| Standard HDD | 2,000 | 500 MB/s | Dev/test, backup, archive |
+| Standard SSD | 6,000 | 750 MB/s | Light production, web servers |
+| Premium SSD | 20,000 | 900 MB/s | Production databases, line-of-business apps |
+| Premium SSD v2 | 80,000+ | 1,200 MB/s | Mission-critical, high-IOPS databases |
+| Ultra Disk | 160,000 | 2,000 MB/s | SAP HANA, top-tier latency-sensitive workloads |
+
+Premium SSD requires a VM size with the `s` suffix (premium storage eligible). Premium SSD v2 and Ultra Disk can only be used as data disks — not OS disks — and are only available in availability zone-enabled regions.
+
+Every VM has three disk roles:
+
+**OS disk** — The boot volume containing the operating system. Always present. Cannot be detached while the VM is running. Defaults to ReadWrite caching.
+
+**Data disk** — Optional additional disks for application data. The maximum number of data disks is determined by the VM size. Data disks default to no caching; database log files should use no caching; database data files benefit from ReadOnly caching.
+
+**Temp disk** — Local SSD attached to the physical host. Not a managed disk; the data it contains is lost when the VM is stopped and deallocated or when it is live-migrated to a different host. Used for paging files, temporary build artefacts, and scratch data. Presented as the D: drive on Windows.
+
+## Availability Sets
+
+An availability set is a logical grouping that instructs Azure to distribute the VMs within it across separate physical fault domains and update domains.
+
+**Fault domains (FD)** represent physical separation — different server racks with independent power feeds and network switches. Up to three fault domains are available depending on the region. VMs in different fault domains survive a rack-level hardware failure.
+
+**Update domains (UD)** are logical groups used to sequence planned maintenance operations. Azure will only reboot VMs in one update domain at a time during host maintenance. Up to 20 update domains are available.
+
+A deployment of two or more VMs in an availability set receives a 99.95% SLA. VM membership in an availability set is set at creation time and cannot be changed afterwards. Availability sets protect against within-datacenter failures only — they do not span datacentre buildings.
+
+## Availability Zones
+
+Availability zones are physically separate datacentre facilities within a single Azure region, each with independent power, cooling, and networking. Deploying VMs across two or more zones protects against an entire datacentre building failure.
+
+Two or more VMs deployed across two or more availability zones receive a 99.99% SLA — higher than the 99.95% SLA of availability sets. Zone assignment is specified at VM creation and cannot be changed.
+
+Not every region supports availability zones, and not every VM size supports all zones within a supported region. Premium SSD managed disks support zone-redundant storage (ZRS) replication, which keeps disk replicas in multiple zones for additional resilience.
+
+## Proximity Placement Groups
+
+Proximity placement groups (PPG) instruct Azure to co-locate VMs as physically close as possible — ideally within the same datacenter row — to minimise network latency between them. This is used for latency-sensitive multi-tier applications where sub-millisecond inter-VM latency matters.
+
+The trade-off is reduced fault isolation. VMs in a PPG are physically close, which reduces the geographic separation that protects against localised hardware failures. PPGs can be combined with availability sets: the availability set is created inside the PPG, distributing VMs across fault domains while keeping them geographically proximate.
+
+## Azure Spot VMs
+
+Spot VMs use Azure's surplus compute capacity at discounts of up to 90% compared to pay-as-you-go pricing. Azure can evict a Spot VM at any time when it needs the capacity back or when the Spot price exceeds the maximum price configured by the customer. There is no SLA for Spot VMs.
+
+The eviction policy controls what happens on eviction: the VM can be deallocated (stopped with disk preserved) or deleted (VM and disk removed). Spot VMs cannot be converted to regular on-demand VMs. They are suitable for stateless workloads, batch jobs, rendering, and dev/test tasks that can tolerate interruption.
+
+## Azure Bastion
+
+Azure Bastion is a Platform-as-a-Service resource that provides browser-based RDP and SSH access to VMs directly through the Azure portal over HTTPS on port 443. Because the connection is proxied through Bastion, VMs do not require public IP addresses for remote administration, and RDP or SSH ports do not need to be open on the VM's network security group.
+
+Bastion is deployed into a dedicated subnet that must be named `AzureBastionSubnet` with a minimum prefix size of /26. The subnet has its own required NSG rules (inbound 443 from internet, inbound 8080 and 5701 from GatewayManager, outbound 3389 and 22 to the VNet).
+
+| SKU | Features |
+|---|---|
+| Basic | Browser-based RDP/SSH via portal |
+| Standard | File upload/download, IP-based connection, shareable links, native client, host scaling, VNet peering support |
+
+## VM Extensions
+
+Extensions are small agents that run inside the VM to perform post-deployment configuration or ongoing management tasks:
+
+**Custom Script Extension (CSE)** — Downloads and executes a script (PowerShell or bash) from a URI at deployment time or on demand. One CSE per VM. Used for software installation, configuration, and bootstrap tasks.
+
+**Azure Monitor Agent (AMA)** — Collects OS metrics and log data and forwards them to a Log Analytics workspace. Replaces the legacy Log Analytics agent (MMA/OMS).
+
+**Desired State Configuration (DSC)** — Applies a PowerShell DSC configuration to a Windows VM to enforce a defined configuration state. Managed through Azure Automation DSC or the DSC extension directly.
+
+**BGInfo** — Displays VM properties (hostname, IP address, OS version) on the Windows desktop background, useful for identifying VMs during console or screenshot-based access.
+
+## Summary
+
+Azure VM deployment combines size series selection for workload fit, managed disk type selection for IOPS and latency requirements, and an availability construct — availability sets for rack-level fault tolerance with a 99.95% SLA, or availability zones for datacenter-level fault tolerance with a 99.99% SLA. Proximity placement groups trade fault isolation for ultra-low inter-VM latency. Azure Bastion removes the need to expose SSH or RDP publicly. Extensions handle post-deployment configuration without requiring bespoke automation infrastructure.

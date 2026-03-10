@@ -1,0 +1,143 @@
+---
+title: "Windows Imaging with DISM — WIM, FFU, and Image Servicing"
+category: "microsoft"
+topic: "windows-dism"
+summary: "How DISM manages Windows images — capturing and applying WIM and FFU format images, servicing images offline to inject drivers, updates, and features, and using Sysprep to generalise a reference installation before deployment to multiple machines."
+tags: ["windows", "dism", "wim", "ffu", "sysprep", "md-100"]
+order: 78
+draft: false
+---
+
+## Overview
+
+Every Windows deployment rests on an image — a snapshot of a configured operating system that can be copied to new hardware reproducibly. The Deployment Image Servicing and Management tool (DISM) is the engine underneath every imaging workflow, whether a technician is manually applying a WIM from a USB drive or an MDT task sequence is deploying to hundreds of machines overnight. Understanding DISM means understanding how images are structured, how they are modified without booting into them, and how Sysprep prepares an installation for multi-machine deployment.
+
+---
+
+## Image Formats: WIM and FFU
+
+Windows uses two image formats, each suited to a different deployment scenario.
+
+| Feature | WIM (Windows Imaging Format) | FFU (Full Flash Update) |
+|---------|-------------------------------|------------------------|
+| Storage unit | File-based — captures individual files and folders | Sector-based — copies raw disk sectors |
+| Compression | High compression; single-instance storage for duplicate files | Less compressible; sector-level copy |
+| Partial apply | Yes — apply specific images within the WIM | No — full disk copy required |
+| Apply speed | Slower (file extraction overhead) | Faster, especially to fixed storage |
+| Capture scope | Single partition or folder | Entire disk including partition table |
+| Hardware independence | Yes — applies to any hardware | Hardware-specific sector layout |
+| Primary use | Enterprise deployment, MDT, SCCM OSD | IoT devices, Surface factory provisioning, OEM |
+
+WIM is the standard format for the vast majority of enterprise deployments. The `install.wim` file on Windows installation media uses single-instance storage: if the same DLL appears in both the Windows folder and an application directory, it is stored once in the WIM with multiple references pointing to it. A single WIM file can contain multiple images at different indices — the retail Windows media ships Home, Pro, and Enterprise as separate indices inside one `install.wim`.
+
+FFU is the right choice when speed matters more than flexibility and the target hardware is known in advance. Surface devices and IoT products are provisioned this way at the factory.
+
+---
+
+## DISM Command Reference
+
+DISM runs in both the full Windows environment and Windows PE, making it available at every stage of a deployment workflow.
+
+| Command | Purpose |
+|---------|---------|
+| `dism /Get-ImageInfo /ImageFile:install.wim` | List all images (indices) in a WIM file with names and sizes |
+| `dism /Mount-Image /ImageFile:install.wim /Index:1 /MountDir:C:\Mount` | Mount a WIM image to a folder for offline servicing |
+| `dism /Image:C:\Mount /Add-Driver /Driver:C:\Drivers /Recurse` | Inject all drivers from a folder tree into the mounted image |
+| `dism /Image:C:\Mount /Add-Package /PackagePath:C:\Updates\KB.msu` | Add a Windows update or cabinet package to the mounted image |
+| `dism /Image:C:\Mount /Enable-Feature /FeatureName:NetFx3 /All /Source:D:\sxs` | Enable an optional Windows feature with source files |
+| `dism /Image:C:\Mount /Get-Drivers` | List all third-party drivers in the mounted image |
+| `dism /Image:C:\Mount /ScanHealth` | Check whether the mounted image has any detectable corruption |
+| `dism /Unmount-Image /MountDir:C:\Mount /Commit` | Save all changes and unmount the image |
+| `dism /Unmount-Image /MountDir:C:\Mount /Discard` | Abandon all changes and unmount |
+| `dism /Capture-Image /ImageFile:D:\custom.wim /CaptureDir:C:\ /Name:"Custom W11"` | Capture a volume or folder into a new WIM file |
+| `dism /Apply-Image /ImageFile:D:\custom.wim /Index:1 /ApplyDir:D:\` | Apply a WIM image to a partition |
+| `dism /Export-Image /SourceImageFile:custom.wim /SourceIndex:1 /DestImageFile:clean.wim /Compress:max` | Export an image to a new WIM, reclaiming space after edits |
+| `dism /Online /Cleanup-Image /RestoreHealth` | Repair the running system's component store using Windows Update |
+
+After mounting a WIM and making changes, always export to a new file before deploying. DISM tracks deleted and replaced files in the WIM's metadata but retains the old blocks on disk. The WIM grows over time with successive edit cycles. Exporting produces a clean WIM containing only the current state.
+
+---
+
+## Sysprep — Generalising a Reference Installation
+
+A freshly installed Windows machine is not ready to be cloned. It carries machine-specific identity: a unique Security Identifier (SID) for the local accounts and the machine itself, the computer name entered during setup, hardware-specific driver entries for the current chipset, and an activation state tied to a particular licence.
+
+Deploying that image to a second machine would produce two machines with identical SIDs — a condition that breaks Kerberos authentication, group membership evaluation, and domain join operations. Sysprep resolves this by stripping all machine-specific state before capture.
+
+```
+C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown
+```
+
+What `/generalize` does:
+
+- Removes the machine SID and generates a new one on next boot.
+- Clears the computer name — MDT or the answer file will assign a new one.
+- Removes hardware abstraction layer entries for the current hardware so Windows will re-detect hardware on the new machine.
+- Strips the activation state so the new machine activates independently.
+- Clears Windows event logs.
+
+The `/oobe` switch sets the machine to show the Out-of-Box Experience on next boot rather than going directly to the desktop. In an enterprise deployment, the OOBE is typically suppressed by an answer file. The `/shutdown` switch powers off the machine after generalisation, leaving it in a state ready for WIM capture with DISM.
+
+### Sysprep Limitations
+
+Sysprep can be run on a Windows installation a **maximum of three times** (the rearm limit). Each `/generalize` operation consumes one rearm count. The remaining count can be checked with `slmgr /dlv`. If the limit is exhausted, the only remediation is to rebuild the reference machine from scratch. For this reason, reference images should be built from a clean installation with minimal changes — not evolved through repeated cycles of modification and resysprep.
+
+Some applications do not survive Sysprep. Software that stores hardware fingerprints or activation state in the registry or in files will break when the hardware identity changes on the destination machine. Such applications must be installed post-deployment by the task sequence, not baked into the reference image.
+
+---
+
+## Answer Files and Configuration Passes
+
+An answer file (`unattend.xml`) automates the choices a technician would otherwise make at every setup prompt. The Windows System Image Manager (SIM) tool, included in the ADK, creates answer files by importing a catalog built from the WIM being deployed.
+
+Setup processes the answer file in ordered configuration passes:
+
+| Pass | When It Runs | Typical Settings |
+|------|-------------|-----------------|
+| `windowsPE` | Windows PE / setup environment | Disk partitioning, image selection, locale for setup UI |
+| `offlineServicing` | DISM applies packages before first boot | Add packages/drivers offline |
+| `generalize` | During `sysprep /generalize` | Settings to apply during generalisation |
+| `specialize` | First boot, machine-specific phase | Computer name, domain join, network configuration |
+| `auditSystem` | Audit mode, system context | Driver and app pre-installation |
+| `auditUser` | Audit mode, user context | User-context customisation |
+| `oobeSystem` | Out-of-Box Experience | Skip OOBE prompts, auto-logon, locale for end user |
+
+The answer file is placed at `C:\Windows\Panther\unattend.xml` or passed directly to `setup.exe` with `/unattend:`. For domain-joined deployments, the `Microsoft-Windows-UnattendedJoin` component in the `specialize` pass handles the domain join automatically — no human interaction required.
+
+---
+
+## USMT — Capturing and Restoring User Data
+
+The User State Migration Tool bridges wipe-and-load deployments. ScanState captures the source machine; LoadState restores to the destination.
+
+```
+# Capture — run on source machine
+scanstate \\server\migration\store /i:MigDocs.xml /i:MigApp.xml /i:MigUser.xml /l:scan.log
+
+# Restore — run on destination after OS deploy
+loadstate \\server\migration\store /i:MigDocs.xml /i:MigApp.xml /i:MigUser.xml /l:load.log
+```
+
+| Migration XML | Content |
+|--------------|---------|
+| `MigUser.xml` | User profile folders (Desktop, Documents, AppData) |
+| `MigDocs.xml` | Documents, Downloads, Pictures, Music, Videos |
+| `MigApp.xml` | Application settings (Office, browser favourites, etc.) |
+
+USMT captures settings and data, not applications themselves. Applications must be reinstalled on the destination machine — the task sequence typically handles this.
+
+**Migration store types** determine where and how the captured data is stored:
+
+| Store Type | Description | Use Case |
+|-----------|-------------|---------|
+| Compressed (network share) | Single compressed file on a UNC share | Migrating to new hardware |
+| Uncompressed (network share) | Files copied directly to UNC share | Easier to browse for troubleshooting |
+| Hard-link | Data stays on the same physical disk, linked in place | PC refresh on the same machine — fastest, no network required |
+
+Hard-link stores cannot be used when migrating to different hardware. They are only valid when the ScanState and LoadState both run on the same machine — a refresh scenario where the disk is wiped and the OS is reinstalled, but the same hardware is retained.
+
+---
+
+## Provisioning Packages
+
+Windows Configuration Designer (WCD) produces provisioning packages (`.ppkg` files) that configure a device without any imaging infrastructure. A provisioning package can join a domain or Entra ID, apply Wi-Fi profiles, install certificates, and configure settings — all by double-clicking the `.ppkg` during OOBE or after Windows is running. Provisioning packages are the right tool for small deployments or device handoff scenarios where a full imaging pipeline is not justified.

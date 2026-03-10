@@ -1,0 +1,132 @@
+---
+title: "Azure Application Insights — APM and Application Telemetry"
+category: "microsoft"
+topic: "azure-app-insights"
+summary: "How Azure Application Insights provides application performance monitoring for live applications — automatically collecting request rates, response times, failure rates, and dependencies, then surfacing them through dashboards, smart detection alerts, distributed traces, and availability tests."
+tags: ["azure", "application-insights", "apm", "telemetry", "az-104"]
+order: 76
+draft: false
+---
+
+## Overview
+
+Azure Application Insights is the application performance monitoring (APM) layer within Azure Monitor. While Azure Monitor collects infrastructure-level telemetry — VM CPU, disk IOPS, NSG flow logs — Application Insights collects telemetry from inside the application itself: every HTTP request handled, every database call made, every exception thrown, every custom event the developer chose to track.
+
+This distinction matters in practice. Infrastructure monitoring tells you that a VM's CPU is at 95%. Application Insights tells you which specific API endpoint is causing 4,000 ms response times, which dependency calls are failing, and which users are experiencing errors — without requiring any infrastructure-level investigation. The two are complementary, but Application Insights is the first tool to reach for when diagnosing application-level performance problems.
+
+Application Insights is implemented in a **workspace-based model**: all telemetry is stored in a Log Analytics workspace, making it queryable alongside infrastructure logs in the same KQL environment. The classic standalone model (where Application Insights stored data independently) is retired.
+
+## Instrumentation
+
+Application Insights collects telemetry through two mechanisms:
+
+**SDK-based instrumentation** involves adding the Application Insights SDK to the application code. The SDK intercepts HTTP requests, outbound dependency calls, exceptions, and log output automatically, and provides an API for recording custom events and metrics. Available for .NET, Java, Node.js, Python, JavaScript (browser), and other platforms.
+
+**Auto-instrumentation** (also called codeless attach or agent-based instrumentation) installs an agent alongside the application without modifying source code. Azure App Service, Azure Functions, Azure Spring Apps, and Azure VMs can be configured to attach the agent at runtime. Auto-instrumentation provides a subset of telemetry compared to the SDK (no custom events or metrics without code changes) but requires zero development effort and works on existing deployed applications.
+
+### Connection String vs Instrumentation Key
+
+The application must know which Application Insights resource to send telemetry to. This was historically done with an **instrumentation key** — a GUID that identified the resource. The modern approach is the **connection string**, which includes both the instrumentation key and the endpoint URL:
+
+```
+InstrumentationKey=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx;IngestionEndpoint=https://region.in.applicationinsights.azure.com/
+```
+
+The connection string is the required approach for new deployments. The instrumentation key alone is deprecated because it assumes a fixed global ingestion endpoint, whereas the connection string allows regional endpoints and sovereign cloud routing.
+
+## Telemetry Types
+
+Application Insights collects seven categories of telemetry:
+
+| Telemetry Type | Description |
+|----------------|-------------|
+| **Requests** | Inbound HTTP calls handled by the application — URL, method, status code, duration |
+| **Dependencies** | Outbound calls the application makes — SQL queries, HTTP calls to other services, message queue operations |
+| **Exceptions** | Unhandled (and optionally handled) exceptions with full stack traces |
+| **Traces** | Custom log messages from the application's logging framework (log4j, ILogger, etc.) |
+| **Custom Events** | Developer-defined events (e.g., "UserRegistered", "OrderPlaced") for business-level tracking |
+| **Custom Metrics** | Developer-defined numerical measurements (e.g., queue depth, active sessions, cache hit rate) |
+| **Page Views** | Client-side telemetry from the browser JavaScript SDK — page load times, client-side exceptions |
+
+Each telemetry item is stored as a row in a corresponding table in the Log Analytics workspace: `requests`, `dependencies`, `exceptions`, `traces`, `customEvents`, `customMetrics`, and `pageViews`.
+
+## Sampling
+
+In high-traffic applications, sending every telemetry item to Application Insights would be prohibitively expensive and produce more data than is useful. Sampling reduces the volume of telemetry while preserving statistical accuracy.
+
+**Adaptive sampling** is the default. The Application Insights SDK automatically adjusts the sampling rate based on telemetry volume, targeting a configurable maximum telemetry rate. When traffic is low, all telemetry is sent. When traffic is high, the SDK samples a percentage and extrapolates. The portal and queries automatically account for sampling to show accurate counts and rates.
+
+**Fixed-rate sampling** applies a configured percentage consistently — for example, send 10% of all request telemetry. This is useful when both the client SDK and the server SDK are instrumented and must agree on which requests to sample (so that end-to-end traces are complete rather than partially sampled).
+
+**Ingestion sampling** is applied at the Application Insights ingestion endpoint after the telemetry arrives. It does not reduce data sent from the application (and therefore does not reduce SDK processing overhead) but does reduce what is stored and charged. It is the option of last resort for cost control when the SDK cannot be modified.
+
+## Application Map
+
+The Application Map auto-discovers and visualises the topology of a distributed application. Each box in the map represents a component — a service, a database, a message queue, an external HTTP dependency — and the arrows between them show the call relationships the application telemetry has revealed.
+
+Each component shows at a glance: request rate, response time, and failure rate. Components with elevated failure rates or response times are highlighted, making it immediately obvious where problems are occurring in a multi-service architecture. Clicking a component navigates to its specific telemetry for investigation.
+
+The Application Map is built entirely from dependency telemetry — the outbound calls each component makes — rather than from a manually defined architecture diagram. It reflects the actual call topology the application exhibits at runtime, not an idealised design.
+
+## Live Metrics
+
+Live Metrics provides a real-time stream of application telemetry with sub-second latency. Unlike the normal telemetry pipeline, which batches and processes data before making it available for querying (introducing a delay of 30–60 seconds), Live Metrics sends a lightweight heartbeat stream that arrives in the portal nearly instantaneously.
+
+The Live Metrics view shows:
+- Incoming request rate and response time (rolling average)
+- Outgoing dependency call rate and duration
+- Exception rate
+- Server CPU and memory
+- Count of active server instances
+
+Live Metrics is the tool to use when monitoring a deployment in progress, watching for failures immediately after releasing a new version, or debugging a production incident where the 60-second telemetry delay would be too slow.
+
+## Availability Tests
+
+Availability tests run synthetic HTTP requests against application endpoints from multiple Azure regions around the world, on a configurable schedule. They confirm that the application is reachable from external perspectives and performing within expected response time thresholds.
+
+Three types of availability tests are available:
+
+| Test Type | Description |
+|-----------|-------------|
+| **Standard test** | HTTP GET to a URL; check status code, response time, and optionally content match |
+| **Multi-step web test** | Record a sequence of browser actions (login, navigate, submit) using Visual Studio Web Performance Test format; replay the sequence as a synthetic user |
+| **Custom TrackAvailability** | Code-based test using the SDK — maximum flexibility for testing custom protocols or internal endpoints not accessible from Azure's test infrastructure |
+
+Tests run from up to **16 Azure regions** simultaneously. An alert can be configured to fire when a specified number of regions report failures, filtering out transient failures from a single location. The standard alert: fail in 5 of 16 locations for more than 5 minutes.
+
+Availability test results appear in the `availabilityResults` table in the Log Analytics workspace and in the Availability blade in the Application Insights portal experience.
+
+## Failures and Performance Blades
+
+The **Failures blade** is the operational centre for investigating errors. It breaks down failed requests by:
+- HTTP result code (500, 404, 503, etc.)
+- Operation name (specific API endpoint or page)
+- Exception type
+
+From any failure group, a single click navigates to individual end-to-end transaction details — the complete trace of that specific request, including all dependency calls made during that request, with timing for each step. This is distributed tracing: even when a request spans multiple services, Application Insights correlates the telemetry using an operation ID so the complete call chain is visible as a single trace.
+
+The **Performance blade** shows operation response time distributions, highlights slow dependency calls, and compares performance across time periods or deployment versions. It surfaces the operations that contribute most to response time at the application level.
+
+## Smart Detection
+
+Smart Detection uses machine learning to automatically detect anomalies in application telemetry without requiring any threshold configuration. It monitors for:
+
+- **Failure anomalies** — a sudden increase in the failure rate of requests or dependency calls.
+- **Performance degradation** — a significant increase in average response time compared to historical baseline.
+- **Memory leaks** — a sustained upward trend in memory consumption in a process.
+- **Abnormal rise in exception volume** — an unusual increase in exceptions of a specific type.
+
+When Smart Detection identifies an anomaly, it generates a proactive detection alert — an email that describes what changed, when it started, what the baseline was, and which specific operation or exception type is affected. These alerts require no configuration to receive; they are active by default for any Application Insights resource with sufficient telemetry volume.
+
+Smart Detection alerts can be converted to standard Azure Monitor alert rules, enabling them to trigger action groups (sending SMS, calling webhooks, or creating ITSM tickets) rather than only sending email.
+
+## Retention
+
+In the workspace-based model, Application Insights telemetry retention is governed by the Log Analytics workspace settings. The default retention is **90 days**, configurable up to **730 days** for interactive retention. Data beyond the interactive retention period can be moved to archive tier, extending retention to years for compliance purposes at reduced cost.
+
+This workspace-based retention model is more flexible than the classic Application Insights standalone model, which had a fixed 90-day retention. It also enables queries that correlate application telemetry with infrastructure logs — for example, correlating a spike in application exceptions with a VM CPU event or a storage throttling event — within a single KQL query.
+
+## Summary
+
+Azure Application Insights closes the observability gap between infrastructure monitoring and application behaviour. Automatic collection of requests, dependencies, exceptions, and traces — combined with Application Map for topology, Live Metrics for real-time visibility, availability tests for synthetic monitoring, and Smart Detection for anomaly alerting — provides a comprehensive picture of how an application is performing and where it is failing. Built on the Log Analytics workspace model, Application Insights integrates seamlessly with the rest of Azure Monitor, enabling unified queries across infrastructure and application telemetry in a single operational platform.

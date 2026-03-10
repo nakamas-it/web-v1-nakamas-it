@@ -1,0 +1,102 @@
+---
+title: "Azure Blob Storage — Block Blobs, Versioning, and Data Protection"
+category: "microsoft"
+topic: "azure-blob"
+summary: "How Azure Blob Storage organises unstructured data into containers and blobs, the differences between block, append, and page blob types, and how features like versioning, soft delete, immutability policies, and object replication protect data from accidental loss."
+tags: ["azure", "blob-storage", "data-protection", "static-website", "az-104"]
+order: 61
+draft: false
+---
+
+## Overview
+
+Azure Blob Storage is the object storage service within a Storage account, designed for unstructured data at any scale — documents, images, video, backups, log files, VM disk images, and application binaries. Data is organised into **containers** (analogous to directories or buckets) which hold **blobs** (individual objects). There is no additional nesting within containers; the flat namespace of a container can simulate folder hierarchy through slash-delimited blob name prefixes, but these are name conventions rather than real directory structures.
+
+Understanding Blob Storage at depth means understanding the three blob types, the data protection features that preserve data against accidental or malicious deletion, and the secondary use cases like static website hosting that turn a storage account into a content origin.
+
+## Blob Types
+
+Azure Blob Storage exposes three distinct blob types, each optimised for a different I/O pattern:
+
+| Blob Type | Maximum Size | I/O Pattern | Typical Use Case |
+|-----------|-------------|-------------|-----------------|
+| **Block blob** | ~190.7 TiB | Sequential read/write | General purpose — files, media, backups, data lake |
+| **Append blob** | ~195 GiB | Append only | Log files, audit trails, streaming data |
+| **Page blob** | 8 TiB | Random 512-byte-aligned read/write | Unmanaged VM disks (VHDs) |
+
+**Block blobs** are the default and most common type. They are composed of up to 50,000 individually addressable blocks, each up to 4,000 MiB in size — giving the 190.7 TiB theoretical maximum. Large file uploads use the Put Block + Put Block List pattern, where blocks are uploaded in parallel and committed atomically. Block blobs support all four access tiers (Hot, Cool, Cold, Archive).
+
+**Append blobs** disallow modification of existing blocks — new data can only be added at the end. This constraint makes them ideal for scenarios where concurrent writers append records without coordination, such as distributed logging.
+
+**Page blobs** use 512-byte-aligned random access, matching the sector size of traditional disks. They underpin unmanaged Azure VM disks, where the hypervisor reads and writes arbitrary 512-byte-aligned sectors. Managed disks — the current recommended approach for VM disks — abstract this away, but page blobs remain available for legacy and custom VHD workloads.
+
+A blob's type is set at creation time and cannot be changed afterward.
+
+## Blob Access Tiers
+
+Individual block blobs can have their access tier set independently of the account-level default. Setting a blob to Archive does not affect other blobs in the same container. Tier transitions can be triggered manually through the portal, CLI, PowerShell, or REST API, or automatically through lifecycle management policies based on time conditions.
+
+Early deletion fees apply when a blob is moved out of Cool (before 30 days), Cold (before 90 days), or Archive (before 180 days). These fees recoup the storage cost for the minimum retention period regardless of when the data is moved.
+
+## Blob Versioning
+
+When blob versioning is enabled on a storage account, Azure automatically preserves previous versions of a blob whenever it is overwritten or deleted. Each write operation that modifies a blob creates a new version. The current version is always the latest; previous versions are immutable and identified by a version ID timestamp.
+
+Versioning is enabled at the storage account level, not per-container or per-blob. Versions are stored as separate billing objects — deduplication occurs at the block level, so versions that share blocks with the current version are not billed for the shared data.
+
+To restore a previous version, the restore operation copies the desired version over the current version, making it the new current. The old current version is preserved as a version itself. Blob versioning is a prerequisite for several other data protection features, including object replication and point-in-time restore.
+
+## Soft Delete
+
+Soft delete provides a recycle bin for blobs and containers. When blob soft delete is enabled, deleted blobs are retained in a soft-deleted state for a configurable period of 1–365 days. During this window, the blob can be undeleted and restored to its previous state. After the retention period expires, the blob is permanently deleted.
+
+Container soft delete works analogously at the container level — a deleted container and all blobs it contained are retained for the configured period. Blob soft delete and container soft delete are configured independently and both default to disabled. Enabling both, combined with blob versioning, provides layered protection against accidental deletion.
+
+## Point-in-Time Restore
+
+Point-in-time restore allows an administrator to restore all block blobs in a storage account to their state at any point within the restore window. This is a coarser, account-wide operation compared to restoring individual blob versions.
+
+Point-in-time restore requires three features to be enabled simultaneously: blob versioning, change feed, and blob soft delete. The restore window is bounded by the soft delete retention period. A restore operation creates a new set of blobs reflecting the account state at the specified timestamp; blobs added after that timestamp are removed and blobs deleted before it are reinstated.
+
+## Change Feed
+
+The change feed is an ordered, persistent transaction log of all create, modify, and delete operations on blobs and blob metadata in a storage account. Change feed records are stored as blobs in the reserved `$blobchangefeed` container and are available within a few minutes to one hour of the originating operation.
+
+Change feed serves audit, event sourcing, and data pipeline use cases. It is also a technical prerequisite for object replication and point-in-time restore — both features consume the change feed internally to track which blobs need to be replicated or reinstated.
+
+## Object Replication
+
+Object replication asynchronously copies block blobs from a source storage account to a destination storage account. Source and destination can be in different subscriptions and different Azure regions, making object replication suitable for cross-region data distribution and disaster recovery staging.
+
+Replication rules specify which containers in the source map to which containers in the destination, optionally filtered by blob name prefix or creation time. Both accounts must have blob versioning enabled; the source must have change feed enabled. Object replication does not replicate blob snapshots, blobs in the Archive tier, or blobs encrypted with customer-managed keys.
+
+## Immutability Policies
+
+Immutability policies enforce WORM (Write Once, Read Many) compliance on blob data — once written, blobs cannot be modified or deleted for the duration of the policy.
+
+Two immutability policy types exist:
+
+- **Time-based retention**: Blobs are immutable until the retention period expires. Retention periods can be extended but never shortened once the policy is locked. Locked policies provide auditable, court-admissible immutability for regulatory compliance (SEC 17a-4, FINRA, CFTC, and similar frameworks).
+- **Legal hold**: Blobs are immutable for an indefinite period until the legal hold tag is explicitly removed. There is no time limit; legal holds are used when data must be preserved pending litigation or investigation.
+
+Immutability policies are applied at the container level or, for version-level immutability, at the account level. An unlocked policy can be freely modified or deleted — useful for testing. Once locked, a time-based policy is permanent in its minimum retention guarantee.
+
+## Static Website Hosting
+
+A Standard GPv2 storage account can serve static web content — HTML, CSS, JavaScript, images — directly from a special reserved container named `$web`. When static website hosting is enabled, Azure exposes a public endpoint at `https://<accountname>.z<N>.web.core.windows.net`. Blobs placed in `$web` are served publicly without requiring SAS tokens or authentication.
+
+For HTTPS with a custom domain, Azure CDN (or Azure Front Door) is placed in front of the storage static website endpoint. CDN provides the TLS certificate for the custom domain and caches content at edge PoP locations globally. The storage firewall cannot be applied to the static website endpoint — network restrictions apply to the blob service endpoint, not the static website endpoint.
+
+## Access Control for Containers and Blobs
+
+Containers have a configurable anonymous access level:
+
+- **Private** (default): No anonymous access; all requests must be authenticated
+- **Blob**: Anonymous read access to individual blobs but not to list the container contents
+- **Container**: Anonymous read access to blobs and the ability to list container contents
+
+Anonymous access can be disabled at the storage account level entirely, overriding the per-container setting. For production workloads, the recommended pattern is to keep all containers private and grant access through Entra ID role assignments, SAS tokens, or stored access policies — never through anonymous public access.
+
+## Summary
+
+Azure Blob Storage combines three specialised blob types with a layered data protection model. Block blobs handle the vast majority of object storage workloads; append blobs suit sequential write-only scenarios; page blobs underpin legacy VM disk workloads. Versioning, soft delete, change feed, and point-in-time restore stack together to provide graduated protection against accidental loss, while immutability policies extend that protection to meet regulatory WORM requirements. Object replication and static website hosting address distribution use cases, making Blob Storage a versatile foundation for everything from application data to compliance archives to content delivery origins.

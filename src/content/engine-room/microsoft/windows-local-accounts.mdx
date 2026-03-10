@@ -1,0 +1,140 @@
+---
+title: "Windows Local Accounts — UAC, Windows Hello, and Account Policies"
+category: "microsoft"
+topic: "windows-accounts"
+summary: "How Windows manages local user accounts and administrator elevation through User Account Control — the account types available, how UAC intercepts privilege escalation requests, and the Windows Hello authentication methods that replace passwords with biometrics and PINs."
+tags: ["windows", "uac", "windows-hello", "local-accounts", "md-100"]
+order: 79
+draft: false
+---
+
+## Overview
+
+Before a device is joined to a domain or enrolled in Entra ID, its entire identity model lives in the local Security Account Manager (SAM) database. Even on managed domain-joined machines, local accounts remain relevant — the built-in Administrator account, emergency recovery scenarios, and local service accounts all rely on the local SAM. Understanding how Windows categorises local accounts, how User Account Control gates privilege elevation, and how Windows Hello replaces password prompts with hardware-bound authentication is foundational to Windows client administration.
+
+---
+
+## Account Types
+
+Windows divides local accounts into three functional categories based on what the holder is permitted to do on the machine.
+
+| Account Type | Capabilities | UAC Prompt Behaviour |
+|-------------|-------------|---------------------|
+| Administrator | Full control of the local system — install software, change system settings, manage other accounts | Consent dialog — click Yes to elevate (no credential entry required) |
+| Standard User | Run applications, change own profile settings, cannot install software system-wide or modify system configuration | Credential prompt — must enter an administrator username and password |
+| Guest | Severely restricted temporary access; no persistent profile changes, cannot install anything | Not applicable — Guest accounts have no elevation path |
+
+### Built-in Accounts
+
+Windows ships with several built-in accounts that exist regardless of what an administrator creates manually.
+
+**Built-in Administrator**: Disabled by default in Windows 10 and 11. Microsoft disabled it because having a well-known account name with a predictable SID ending in -500 is a persistent attack surface. It can be re-enabled for recovery purposes with `net user Administrator /active:yes` or via Local Users and Groups (`lusrmgr.msc`), but it should not be used for day-to-day administration. Note that `lusrmgr.msc` is not available on Windows Home edition.
+
+**Guest**: Also disabled by default. Intended for temporary visitors who need limited access. Without a password by default, and with a profile that resets between sessions on some configurations. Should remain disabled on any managed machine.
+
+**DefaultAccount**: A system-managed account used by Windows itself, not intended for interactive logon.
+
+Members of the local Administrators group receive a split access token at logon: a filtered standard token for normal operations and a full elevated token that activates when the user consents through UAC. This split-token model means that even administrators run with standard privileges by default — elevation is explicit, not automatic.
+
+---
+
+## User Account Control (UAC)
+
+UAC intercepts any action that requires elevated privileges and forces an explicit acknowledgement before granting the elevated token. Without UAC, every administrator-level process would silently run with full privilege — a compromised process or a malicious application would inherit that elevation automatically.
+
+### UAC Prompt Types
+
+The prompt type depends on whether the current user already has administrator credentials.
+
+**Consent prompt** (shown to administrators): A dialog appears asking "Do you want to allow this app to make changes to your device?" The user clicks Yes or No. No credential entry is required because Windows already knows the account is in the Administrators group.
+
+**Credential prompt** (shown to standard users): A dialog appears asking for an administrator username and password. The standard user must know a valid administrator credential to proceed. If they do not, the elevation is denied.
+
+### UAC Notification Levels
+
+The slider in Control Panel > User Accounts > Change User Account Control settings controls four notification levels:
+
+| Level | Behaviour | Security |
+|-------|-----------|---------|
+| Always notify | Prompts for both Windows changes and third-party app changes. Secure desktop active | Highest — any elevation requires explicit confirmation |
+| Notify only for apps (default) | Prompts when third-party apps request elevation; Windows built-in tools silently elevate | Balanced — default recommendation |
+| Notify for apps, no secure desktop | Same as above but the desktop does not dim | Slightly lower — prompt can be spoofed by other windows |
+| Never notify | UAC effectively disabled — all administrator operations are silent | Not recommended — no friction for malicious elevation |
+
+The secure desktop (dimming effect) ensures that only the Windows kernel can draw on screen during the prompt. Without it, a malicious application could overlay a fake "Yes" button on top of the real prompt.
+
+### UAC Registry Configuration
+
+UAC settings are stored under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`. Group Policy and MDM can enforce these values centrally.
+
+| Value | Effect |
+|-------|--------|
+| `EnableLUA = 1` | UAC is enabled (default) |
+| `EnableLUA = 0` | UAC completely disabled — all processes run with full administrator token |
+| `ConsentPromptBehaviorAdmin = 5` | Default — consent prompt on secure desktop for admins |
+| `ConsentPromptBehaviorAdmin = 2` | Consent prompt without secure desktop |
+| `ConsentPromptBehaviorAdmin = 1` | Credential prompt for admins (strongest) |
+| `ConsentPromptBehaviorAdmin = 0` | Silent elevation — no prompt at all |
+| `ConsentPromptBehaviorUser = 3` | Default — credential prompt on secure desktop for standard users |
+| `ConsentPromptBehaviorUser = 0` | Auto-deny all elevation requests from standard users |
+
+Setting `EnableLUA = 0` disables all UAC filtering. Every process launched by an administrator runs with the full elevated token with no prompt. This is a significant security regression and should only ever be a temporary diagnostic step.
+
+---
+
+## Credential Manager
+
+Credential Manager (accessible from Control Panel or `credwiz.exe`) stores credentials so that Windows can re-use them for network resources without prompting the user repeatedly.
+
+**Windows Credentials** stores credentials for domain resources: server shares, mapped drives, domain controllers. When a user authenticates to a file share and checks "Remember my credentials," the entry lands here.
+
+**Web Credentials** stores credentials saved by Internet Explorer and legacy Edge. Modern Edge uses its own credential store.
+
+Both sets of credentials can be backed up to a password-protected `.crd` file and restored on another machine — useful when migrating a user's working environment. Credentials are stored encrypted in the user's profile under `%APPDATA%\Microsoft\Credentials\` and `%LOCALAPPDATA%\Microsoft\Credentials\`.
+
+---
+
+## Windows Hello Authentication Methods
+
+Windows Hello is the framework for credential alternatives that replace the traditional password at the Windows logon prompt. All Windows Hello credentials are device-specific — a PIN set on one machine will not work on another, and a Hello credential cannot be extracted from the device and replayed elsewhere.
+
+| Method | Hardware Required | Works Offline |
+|--------|-----------------|--------------|
+| PIN | TPM recommended (not required) | Yes — bound to this device only |
+| Facial recognition | Windows Hello-compatible IR camera (not a standard webcam) | Yes |
+| Fingerprint | Fingerprint reader | Yes |
+| Security key (FIDO2) | FIDO2 USB, NFC, or Bluetooth key (e.g. YubiKey) | Depends on configuration |
+
+### Why a PIN Is Not a Password
+
+A Windows Hello PIN looks like a password but behaves fundamentally differently. The PIN is stored locally on the device, protected by the TPM if one is present. It is never transmitted to any server. If a server-side credential database is breached, the PIN is not exposed because it never left the device. By contrast, a password hash can be captured in transit or extracted from a credential store. The PIN is an unlock key for the device-bound cryptographic material — it proves to the local TPM that the right person is present, and the TPM then unlocks the credential used for actual authentication.
+
+### Windows Hello for Business
+
+In enterprise deployments, Windows Hello for Business (WHfB) extends the consumer model with a PKI or key-trust backend. The device generates a key pair during registration; the public key is registered with Entra ID or on-premises AD. Authentication uses the private key (protected in TPM) to sign a challenge — Kerberos for on-premises resources, OAuth tokens for cloud resources. WHfB requires either Entra ID (cloud trust or certificate trust) or an on-premises configuration involving AD FS or a WHfB server component.
+
+---
+
+## Account Policies
+
+Account policies govern password requirements and account lockout behaviour. On domain-joined machines these policies come from AD (Default Domain Policy or a Fine-Grained Password Policy). On standalone machines they are configured via Local Security Policy (`secpol.msc`), which is not available on Home edition.
+
+**Password policy settings:**
+
+| Setting | Purpose |
+|---------|---------|
+| Minimum password length | Enforce a minimum character count (NIST recommends 12+) |
+| Password complexity | Require uppercase, lowercase, digit, and special character mix |
+| Minimum password age | Prevent immediate password cycling to satisfy history |
+| Maximum password age | Force periodic changes (though NIST now questions this practice) |
+| Enforce password history | Remember the last N passwords; prevent immediate reuse |
+
+**Account lockout policy settings:**
+
+| Setting | Purpose |
+|---------|---------|
+| Account lockout threshold | Number of failed attempts before lockout (0 = never lock) |
+| Account lockout duration | Minutes to stay locked (0 = requires admin to unlock manually) |
+| Reset account lockout counter after | Minutes of no failures before the counter resets |
+
+On a standalone machine, these policies apply to local accounts only. Domain accounts receive their effective policy from AD, and local policy settings for domain accounts are ignored. Fine-Grained Password Policies in AD allow different password requirements for different groups — service accounts can have very long maximum ages while privileged admin accounts can have stronger complexity requirements.

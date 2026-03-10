@@ -1,0 +1,101 @@
+---
+title: "Azure App Service — Managed Web Hosting and Deployment Slots"
+category: "microsoft"
+topic: "azure-app-service"
+summary: "How Azure App Service provides a fully managed platform for hosting web applications, APIs, and mobile backends — covering App Service plan tiers, deployment methods, deployment slots for zero-downtime releases, autoscale, and custom domain and TLS configuration."
+tags: ["azure", "app-service", "web-apps", "deployment-slots", "az-104"]
+order: 67
+draft: false
+---
+
+## Overview
+
+Azure App Service is a fully managed platform-as-a-service (PaaS) for hosting web applications, REST APIs, and mobile backends. The key distinction from running a web server on a virtual machine is that App Service abstracts away OS patching, infrastructure scaling, and load balancing — you deploy code or a container image, and the platform handles the runtime environment. App Service supports multiple languages and runtimes natively: .NET, Node.js, Python, Java, PHP, and Ruby on Linux, with .NET and Java also available on Windows. This article covers the underlying plan model that determines pricing and capability, the deployment methods available, and the slot mechanism that enables zero-downtime production releases.
+
+## App Service Plans
+
+An App Service plan is the unit of compute that one or more apps run on. The plan defines the region, operating system, VM size, and pricing tier. Multiple apps can share a single plan, but all apps on a plan share the same underlying VM instances.
+
+| Tier | Shared / Dedicated | Max Instances | Deployment Slots | Key Features |
+|------|--------------------|---------------|------------------|--------------|
+| Free (F1) | Shared infrastructure | 1 | None | 60 min/day compute, no custom domain, no SLA |
+| Shared (D1) | Shared infrastructure | 1 | None | Custom domain, no SLA |
+| Basic (B1–B3) | Dedicated VMs | 3 (manual) | None | Custom domains, SSL, manual scale |
+| Standard (S1–S3) | Dedicated VMs | 10 (autoscale) | 5 | Autoscale, Traffic Manager, deployment slots |
+| Premium (P0v3–P3v3) | Dedicated VMs | 30 (autoscale) | 30 | VNet integration, private endpoints, larger VMs |
+| Isolated / Isolated v2 | Single-tenant VNet injection | 100 (autoscale) | 30 | App Service Environment, fully network-isolated |
+
+**Free and Shared tiers** run on shared infrastructure alongside other customers' apps. There is no SLA, and compute time is capped per day — these tiers are development and testing environments only.
+
+**Basic** introduces dedicated VM instances. Scaling is manual only, and there is no autoscale or slot support. SSL and custom domains are available, making Basic suitable for internal tools or low-traffic sites that do not need zero-downtime releases.
+
+**Standard** unlocks the two features most relevant in production: autoscale (triggered by metrics or schedule) and deployment slots (up to 5 per app). Standard is the minimum tier for any CI/CD pipeline that uses staging-to-production slot swaps.
+
+**Premium** raises the slot limit to 30, adds VNet Integration for outbound private connectivity, and introduces private endpoints for locking down inbound traffic. Premium v3 SKUs offer significantly more RAM and vCPU than Standard, with better price-per-performance ratios for compute-intensive workloads.
+
+**Isolated** runs in an App Service Environment (ASE), a single-tenant deployment of the App Service infrastructure injected directly into a customer-owned VNet. All inbound and outbound traffic flows within the VNet — the app has no public internet exposure by default. ASE is the choice for workloads with strict compliance requirements around network isolation.
+
+## Deployment Methods
+
+App Service supports several deployment mechanisms, each suited to different workflows:
+
+**ZIP deploy** packages the application as a ZIP archive and uploads it via the Azure CLI (`az webapp deployment source config-zip`) or the REST API. It is fast and stateless, making it well suited for pipeline-driven deployments where no local file state is needed.
+
+**FTP/FTPS** provides direct file-level access using deployment credentials. There are two credential scopes: user-level credentials (shared across all apps in the subscription) and app-level credentials (unique per app). FTP is the simplest path for ad-hoc uploads but is not recommended for automated pipelines because it transfers the full file tree on every deployment.
+
+**GitHub Actions** integrates directly with the App Service publishing profile. A YAML workflow using the `azure/webapps-deploy` action builds the application, authenticates to Azure, and deploys to a specified slot. This is the recommended path for teams using GitHub for source control.
+
+**Local Git** provisions a Git endpoint on the App Service itself. A push to that endpoint triggers a Kudu-based build. Useful in scenarios without an external CI/CD system.
+
+**Container image** deployment pulls from Azure Container Registry (ACR) or Docker Hub. The App Service runtime is replaced by the container image's runtime entirely. Useful for polyglot applications or for maintaining environment parity between local development and production.
+
+**Run from Package** mounts a ZIP file directly as the wwwroot without extracting it. The app runs from the mounted ZIP, which prevents file modification during runtime. This approach reduces cold start time and eliminates write conflicts in multi-instance deployments.
+
+## Deployment Slots
+
+A deployment slot is a live, separately addressable instance of the app running under the same App Service plan. Each slot has its own hostname (e.g., `myapp-staging.azurewebsites.net`), its own configuration, and its own deployment history. The production slot is `myapp.azurewebsites.net`.
+
+The standard release pattern is: deploy to a staging slot → run smoke tests and warm-up → swap staging into production. The swap operation redirects incoming traffic from the production slot to the staging slot near-instantaneously, with no restart of the production app and no DNS change required.
+
+**What gets swapped during a slot swap:**
+
+| Swapped (moves with the slot's app content) | Sticky (stays with the slot) |
+|---------------------------------------------|------------------------------|
+| Application code and runtime binaries | Connection strings marked as slot setting |
+| General configuration (app settings not flagged sticky) | App settings flagged as slot setting |
+| Handler mappings | Custom domain bindings |
+| WebJob content | SSL certificate bindings |
+| Content in /site/wwwroot | Scale instance count |
+
+The sticky/slot-setting distinction is the critical operational detail. A staging slot typically connects to a test database via a connection string marked as a slot setting. When the swap fires, the staging app content moves to production, but the connection string stays behind in the staging slot. Production continues to use its own production database connection string. Without this mechanism, a swap would send your production slot's code to talk to your staging database — an easy mistake in simpler deployment models.
+
+**Traffic splitting** allows a percentage of live production traffic to be routed to a non-production slot. This enables A/B testing and gradual canary rollouts without a full swap.
+
+## Autoscale
+
+Autoscale applies to Standard tier and above. Scale-out rules add VM instances to the App Service plan; scale-in rules remove them. Triggers include:
+
+- **Metric-based**: CPU percentage, memory percentage, HTTP queue length, data in/out
+- **Schedule-based**: Pre-emptively add instances before a known traffic peak
+
+A cooldown period (minimum time between successive scale actions) prevents thrashing — the default is 5 minutes for both scale-out and scale-in. For scale-in, it is common to set a longer cooldown (10–15 minutes) to avoid removing instances before a traffic burst has fully subsided.
+
+## Networking
+
+**VNet Integration** (Standard and above) routes outbound traffic from the app through a subnet in a VNet. This allows the app to reach private resources — databases, VMs, Key Vault via private endpoint — without those resources being exposed to the public internet. VNet Integration is outbound only: it does not place an inbound listener in the VNet.
+
+**Private Endpoints** work in the opposite direction. A private endpoint places a NIC with a private IP inside a customer VNet and points it at the App Service. Inbound HTTPS traffic arrives at the private IP and is routed to the app. When a private endpoint is configured, the app's public internet endpoint can be disabled entirely.
+
+## Custom Domains and TLS
+
+Custom domains require verification. For subdomain records, create a CNAME from your subdomain to the default App Service hostname (`myapp.azurewebsites.net`). For apex domains (the bare `example.com`), create an A record pointing to the App Service IP, plus a TXT record for ownership verification.
+
+App Service Managed Certificates provide free TLS for custom domains using SNI SSL. The certificate is provisioned and renewed automatically; the only cost is the App Service plan being at Basic tier or above. For wildcard certificates or IP SSL bindings, upload a PFX certificate manually or purchase through the App Service Certificate service.
+
+## WebJobs
+
+WebJobs run scripts or programs in the same App Service plan context as the web application. They share the same VM instances, file system, and environment variables. A continuous WebJob starts immediately and restarts automatically if it exits. A triggered WebJob runs on demand or on a CRON schedule. WebJobs are suitable for background processing tasks — sending emails, processing queue messages, running nightly maintenance — without requiring a separate compute resource.
+
+## Summary
+
+App Service plan tier determines the entire capability envelope of an app: whether it can autoscale, how many deployment slots it can use, whether it can integrate with a VNet, and whether it can be fully isolated in an ASE. Deployment slots are the mechanism that makes zero-downtime releases possible at the platform level, with slot-sticky settings ensuring each environment connects to its own backing services through the swap. Understanding what gets swapped and what stays is the detail that separates a reliable slot-based release process from one that inadvertently connects production code to staging data.

@@ -1,0 +1,116 @@
+---
+title: "Azure Container Instances and Container Registry — Running Containers Without Kubernetes"
+category: "microsoft"
+topic: "azure-containers"
+summary: "How Azure Container Instances lets you run containers directly on Azure without managing any underlying infrastructure — and how Azure Container Registry stores and distributes private container images with geo-replication and automated build pipelines."
+tags: ["azure", "aci", "container-instances", "acr", "containers", "az-104"]
+order: 66
+draft: false
+---
+
+## Overview
+
+Container technology separates an application and its runtime dependencies from the underlying operating system, packaging them into a portable image that runs consistently across any compliant container host. Azure provides two complementary services that cover the container lifecycle: Azure Container Registry (ACR) stores and distributes container images, and Azure Container Instances (ACI) runs those containers directly on Azure infrastructure without the need to provision or manage virtual machines or an orchestration cluster.
+
+Together these services cover the space between a single containerised application and a full Kubernetes deployment — suitable for short-lived workloads, event-driven tasks, batch jobs, development environments, and any scenario where container orchestration overhead is not justified.
+
+## Azure Container Instances
+
+ACI is a serverless container execution platform. When a container group is created, Azure allocates compute resources, pulls the specified image, and starts the containers. There is no host VM to configure, no container runtime to maintain, and no cluster control plane to operate. Billing is per-second of actual CPU and memory consumption, with no charge when the container is stopped.
+
+### Container Groups
+
+The fundamental deployment unit in ACI is the container group — a collection of one or more containers that share a lifecycle, a local network namespace, and storage volumes. Containers within the same group communicate with each other over localhost and share the group's single public IP address. The concept is analogous to a Kubernetes pod.
+
+Multi-container groups are only supported on Linux. Windows containers in ACI are always single-container groups. A common pattern is a primary application container paired with a sidecar container for log shipping or configuration management, both within the same group.
+
+Resource requests are specified at the container level. Each container declares the number of CPU cores (fractional values supported, such as 0.5 cores) and memory in gigabytes it requires. The container group's total allocation is the sum of its containers' requests.
+
+### Restart Policies
+
+The restart policy controls ACI's behaviour when a container exits:
+
+| Policy | Behaviour | Typical Use |
+|---|---|---|
+| Always | Restart on any exit, including successful exit | Long-running services, web servers |
+| OnFailure | Restart only on non-zero exit code | Batch jobs, scripts that may need retry |
+| Never | Run once and do not restart | One-shot tasks, init operations |
+
+`Always` is the default. For batch jobs that should run to completion and then stop billing, `OnFailure` or `Never` is appropriate.
+
+### Networking
+
+ACI container groups can be exposed in two ways:
+
+**Public IP** — ACI allocates a public IP address for the container group. A DNS name label can be attached to give it a stable hostname (`<label>.<region>.azurecontainer.io`). Ports are exposed by declaring them in the container definition.
+
+**VNet injection** — The container group is deployed into a delegated subnet within an Azure Virtual Network. It receives a private IP address and can communicate with other resources in the VNet (databases, APIs, other services) without traversing the public internet. This is the recommended networking model for production workloads.
+
+### Environment Variables and Secure Values
+
+Environment variables are passed to containers at deployment time. Standard environment variables are visible in portal and API responses. Secure environment variables are identical at runtime but are never returned in API responses or portal UI — they behave as one-way writes. Use secure values for connection strings, API keys, and any credential that should not be readable after deployment.
+
+### Volume Mounts
+
+Containers are ephemeral by default — any data written to the container filesystem is lost when the container stops. Persistent storage requires mounting a volume:
+
+**Azure Files share** — Mounts an SMB share from a storage account. Data persists across container restarts and is accessible to other services with access to the same share. This is the primary persistent storage option for ACI.
+
+**emptyDir** — A temporary volume that exists for the lifetime of the container group and is shared between all containers within the group. Useful for sharing files between a primary container and a sidecar within the same group.
+
+**gitRepo** — Clones a Git repository into the container at startup. Useful for injecting configuration files or static content at launch time.
+
+### Init Containers
+
+Init containers run to completion before any application containers in the group start. They are used for setup tasks: waiting for a dependency to become available, pre-populating a shared volume, or performing database schema migrations before the application container starts serving traffic. If an init container exits with a non-zero code, ACI retries it according to the group's restart policy.
+
+## Azure Container Registry
+
+Azure Container Registry is a private, managed Docker-compatible registry hosted in Azure. It stores container images and Helm charts, and distributes them to ACI, AKS, App Service, VMSS, or any Docker-compatible runtime that can authenticate with the registry.
+
+### SKUs
+
+ACR is available in three service tiers:
+
+| SKU | Included Storage | Geo-replication | Private Link | Content Trust | Use Case |
+|---|---|---|---|---|---|
+| Basic | 10 GiB | No | No | No | Development, low-volume testing |
+| Standard | 100 GiB | No | No | No | Production, most workloads |
+| Premium | 500 GiB | Yes | Yes | Yes | Enterprise, multi-region, security |
+
+All SKUs support push and pull via the Docker CLI and Azure CLI. The admin account (a simple username/password credential) is disabled by default; production deployments should authenticate using Entra ID service principals, managed identities, or individual user identities rather than the admin account.
+
+### Geo-replication
+
+Premium SKU registries can be replicated to additional Azure regions. Each replica is a full copy of the registry content stored in the target region. Clients pulling images from that region pull from the local replica, reducing pull latency and eliminating cross-region data transfer costs.
+
+Geo-replication is transparent to callers — they use the same registry login server URL regardless of their region. Azure routes pull requests to the nearest available replica. Replication is asynchronous; there is a brief propagation delay when an image is pushed to the primary before replicas reflect the update.
+
+### ACR Tasks
+
+ACR Tasks automates the container image build lifecycle without requiring a separate CI/CD pipeline:
+
+**Quick task** — A single image build triggered on demand via `az acr build`. The source context is uploaded to ACR and the build runs in Azure.
+
+**Triggered task** — A task definition that fires automatically on one or more trigger conditions:
+- **Code commit** — A webhook from GitHub or Azure DevOps triggers a build when source code changes.
+- **Base image update** — ACR detects when a base image (for example, `node:20-alpine`) is updated in the registry and automatically rebuilds all images that depend on it.
+- **Schedule** — A CRON expression triggers the build on a defined schedule.
+
+**Multi-step task** — A YAML file defines a sequence of build, test, and push steps. Each step runs as a container. Multi-step tasks can build an image, run a test suite against it, and push to the registry only if tests pass — all within the ACR Task infrastructure, with no external build agents needed.
+
+## ACI Compared to Other Compute Options
+
+| Dimension | ACI | App Service | AKS |
+|---|---|---|---|
+| Infrastructure management | None (serverless) | None (PaaS) | Control plane managed; nodes customer-managed |
+| Container support | Any container | Any container | Any container |
+| Scaling | Manual or event-driven (via Logic Apps/Functions) | Built-in autoscale | Kubernetes HPA/KEDA |
+| Persistent state | Azure Files mount | Azure Files mount or managed database | PersistentVolumes |
+| Best for | Short-lived tasks, batch, dev/test | Web apps with managed scaling | Complex multi-service applications |
+
+ACI is not a replacement for Kubernetes — it lacks service discovery, health-based routing, and the full orchestration primitives that AKS provides. It is the right tool for isolated container workloads where the overhead of managing a cluster is not warranted.
+
+## Summary
+
+Azure Container Instances provides on-demand, serverless container execution with per-second billing, flexible restart policies for long-running services and batch jobs alike, and both public and VNet-private networking. Azure Container Registry provides the image store that feeds ACI and other runtimes, with geo-replication for regional pull performance on Premium SKU and ACR Tasks for automated image build pipelines triggered by code changes, base image updates, or schedules. Together they form a complete container workflow without requiring a Kubernetes cluster.

@@ -1,0 +1,111 @@
+---
+title: "Azure VPN Gateway and ExpressRoute — Hybrid Network Connectivity"
+category: "microsoft"
+topic: "azure-hybrid-connectivity"
+summary: "How Azure connects on-premises networks to the cloud — through VPN Gateway for encrypted tunnels over the public internet, and ExpressRoute for private dedicated circuits that bypass the internet entirely — and how Virtual WAN simplifies hub-and-spoke connectivity at scale."
+tags: ["azure", "vpn-gateway", "expressroute", "hybrid", "az-104"]
+order: 72
+draft: false
+---
+
+## Overview
+
+When an organisation moves workloads to Azure, the on-premises network does not disappear overnight. Servers, Active Directory domain controllers, file shares, and legacy applications remain on-premises while cloud VMs and PaaS services spin up in Azure. Bridging these two worlds reliably and securely is the job of Azure's hybrid connectivity services.
+
+Azure offers two fundamentally different approaches. VPN Gateway creates encrypted IPsec tunnels across the public internet — suitable for most branch-to-cloud and remote-access scenarios. ExpressRoute provisions a private, dedicated circuit through a connectivity provider that never touches the public internet — suitable for latency-sensitive workloads, regulatory compliance, and high-throughput data transfer. Azure Virtual WAN sits above both, providing a Microsoft-managed hub-and-spoke WAN for organisations with many branches and regions.
+
+## VPN Gateway
+
+A VPN Gateway is an Azure resource deployed into a dedicated subnet called the **GatewaySubnet**. The subnet must be at least `/29`, but Microsoft recommends `/27` or larger to accommodate future gateway instances and zone-redundant deployments. No other resources should be placed in GatewaySubnet.
+
+### VPN Types: Route-Based vs Policy-Based
+
+| Type | Routing | IKE Version | Tunnels | BGP Support | Use Case |
+|------|---------|-------------|---------|-------------|----------|
+| Route-based | Dynamic (routing table) | IKEv2 | Multiple | Yes | Modern S2S, P2S, active-active |
+| Policy-based | Static traffic selectors | IKEv1 | Single | No | Legacy on-premises devices |
+
+Policy-based VPNs use static, manually defined traffic selectors — specific source and destination IP ranges — to decide what traffic enters the tunnel. They support only a single tunnel and IKEv1, making them suitable only for legacy VPN appliances that cannot support IKEv2. Route-based VPNs use a routing table to direct traffic into the tunnel dynamically, support multiple simultaneous tunnels, IKEv2, Point-to-Site connections, and BGP. Route-based is the correct choice for virtually all new deployments.
+
+### Gateway SKUs
+
+| SKU | Aggregate Throughput | BGP | Zone-Redundant |
+|-----|---------------------|-----|----------------|
+| Basic | 100 Mbps | No | No |
+| VpnGw1 | 650 Mbps | Yes | No |
+| VpnGw2 | 1 Gbps | Yes | No |
+| VpnGw3 | 1.25 Gbps | Yes | No |
+| VpnGw1AZ | 650 Mbps | Yes | Yes |
+| VpnGw2AZ | 1 Gbps | Yes | Yes |
+| VpnGw3AZ | 1.25 Gbps | Yes | Yes |
+
+The Basic SKU lacks BGP support, cannot be configured active-active, and does not support RADIUS or Entra ID authentication for Point-to-Site connections. It exists for development and testing only. VpnGw1 through VpnGw3 add BGP, active-active configuration, and P2S support. The AZ-suffixed SKUs deploy across Availability Zones for higher availability.
+
+### Connection Types
+
+**Site-to-Site (S2S)** creates an IPsec/IKE tunnel between the Azure VPN Gateway and an on-premises VPN appliance. The on-premises device must have a routable public IP address. A Local Network Gateway resource in Azure represents the on-premises side, containing the on-premises public IP and the address prefixes behind it.
+
+**Point-to-Site (P2S)** allows individual client machines — Windows, macOS, Linux — to connect to the Azure VNet over VPN without requiring an on-premises VPN device. Authentication options are:
+
+- **Azure certificate** — root certificate uploaded to the gateway; client machines present a certificate derived from that root.
+- **RADIUS** — delegates authentication to a RADIUS server, enabling integration with Active Directory.
+- **Entra ID (Azure AD)** — OAuth-based authentication using organisational identities; supports Conditional Access; requires OpenVPN protocol and Windows 10 or later clients.
+
+Supported tunnel protocols for P2S include SSTP (Windows only), OpenVPN (cross-platform), and IKEv2 (macOS, iOS, Windows).
+
+**VNet-to-VNet** connects two Azure VNets through VPN Gateway tunnels. For VNets in the same region, VNet peering is usually preferred due to lower latency and cost. VNet-to-VNet over VPN Gateway is appropriate when transit through encrypted tunnels is required or when cross-subscription/cross-tenant connectivity rules out peering.
+
+### BGP and Active-Active
+
+BGP enables the VPN Gateway to exchange routing information dynamically with on-premises BGP peers rather than requiring manually maintained static route tables. When on-premises networks change — new subnets added, routes withdrawn — BGP propagates those changes automatically. Each VPN Gateway has an Autonomous System Number (ASN); the default is 65515.
+
+Active-active configuration assigns two public IP addresses to the gateway and establishes two BGP sessions to the on-premises peer. Both tunnels are active simultaneously, providing higher throughput and eliminating the failover delay inherent in active-standby configurations. Active-standby — the default — uses one active instance and a standby that takes over in roughly 10–15 seconds for planned maintenance and up to 90 seconds for unplanned failures.
+
+## ExpressRoute
+
+ExpressRoute provides a private Layer 3 connection between an on-premises network and Azure through a connectivity provider's MPLS or backbone network. Traffic never traverses the public internet. ExpressRoute circuits are ordered at a specific bandwidth — from 50 Mbps to 100 Gbps — from a provider at a peering location (a co-location facility or exchange point).
+
+**ExpressRoute does not encrypt traffic by default.** The connection is private because it does not use the public internet, but it is not encrypted at the network layer. Organisations requiring encryption over ExpressRoute must implement MACsec at the provider level or run IPsec tunnels over the ExpressRoute circuit.
+
+### Peering Types
+
+**Azure Private Peering** connects to Azure VNets. Traffic flows from on-premises through the ExpressRoute circuit into VNets in the same or other Azure regions. This is the most common peering type for IaaS workloads.
+
+**Microsoft Peering** connects to Azure PaaS services (Azure Storage, Azure SQL Database) and Microsoft 365 services over the private path. It uses public IP ranges but routes them through the private circuit rather than the internet. Route filters control which BGP communities are received to limit the advertised prefixes to specific services.
+
+### Circuit SKUs
+
+ExpressRoute circuits come in three SKUs:
+
+- **Local** — access only to Azure regions near the provider's peering location. Often lower-cost.
+- **Standard** — access to all Azure regions within the same geopolitical boundary (e.g., all European regions from a European peering location).
+- **Premium** — global reach across all Azure regions regardless of geopolitical boundary; also required for Global Reach.
+
+### ExpressRoute Global Reach and FastPath
+
+**Global Reach** connects two ExpressRoute circuits so that on-premises sites can communicate with each other through the Microsoft backbone, without routing traffic back over their own WAN. This is useful for organisations with multiple datacentres each connected via ExpressRoute — inter-site traffic uses the Microsoft backbone as a private transit network.
+
+**FastPath** is available on Ultra Performance and ErGw3AZ ExpressRoute gateway SKUs. It allows network traffic to flow directly to virtual machines in the VNet, bypassing the gateway for the data plane. This eliminates the gateway as a throughput bottleneck and reduces latency for high-performance workloads.
+
+## Azure Virtual WAN
+
+Azure Virtual WAN (vWAN) is a Microsoft-managed networking service that provides any-to-any connectivity between branches, Azure VNets, and internet — through Microsoft-managed virtual hubs deployed in Azure regions. Rather than manually configuring VNet peering, VPN gateways, and route tables across many spokes, Virtual WAN handles the routing and management of the hub automatically.
+
+| SKU | Supported Connectivity |
+|-----|----------------------|
+| Basic | Site-to-Site VPN only |
+| Standard | S2S VPN + P2S VPN + ExpressRoute + VNet connections + Azure Firewall (Secure Hub) |
+
+The Standard tier supports deploying Azure Firewall inside the virtual hub, turning it into a **Secure Hub** that inspects all inter-spoke and internet-bound traffic centrally. This is particularly valuable in large-scale deployments where managing individual spoke firewalls would be operationally complex.
+
+## Choosing Between VPN Gateway and ExpressRoute
+
+VPN Gateway is the right choice when cost is the primary constraint, when bandwidth requirements are below 1–2 Gbps, or when the connection is to branch offices rather than primary datacentres. The trade-off is that performance depends on internet path quality, and latency is variable.
+
+ExpressRoute is appropriate when workloads require consistent low latency, when compliance mandates that traffic not traverse the public internet, or when data transfer volumes are large enough that bandwidth costs on VPN tunnels become significant. The higher setup cost and longer provisioning time (involves a connectivity provider) are the primary trade-offs.
+
+For large organisations with dozens of branches across multiple regions, Virtual WAN eliminates the operational overhead of managing individual VPN gateways and peering relationships, while providing a consistent any-to-any connectivity model.
+
+## Summary
+
+Azure hybrid connectivity is built on two distinct technologies that serve different use cases. VPN Gateway provides encrypted tunnels over the public internet — flexible, cost-effective, and sufficient for most branch and remote-access scenarios. ExpressRoute provides a private dedicated circuit for workloads requiring consistent performance, privacy guarantees, or regulatory compliance. BGP and active-active configurations improve resilience and routing flexibility for both. Azure Virtual WAN simplifies the management of hybrid connectivity at scale, replacing complex manual hub-and-spoke topologies with a Microsoft-managed service.

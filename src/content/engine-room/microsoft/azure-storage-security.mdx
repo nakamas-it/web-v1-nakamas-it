@@ -1,0 +1,92 @@
+---
+title: "Azure Storage Security — SAS Tokens, Keys, and Encryption"
+category: "microsoft"
+topic: "azure-storage-security"
+summary: "How Azure Storage protects data at rest and in transit — through shared access signatures for delegated access, storage account keys and their rotation, Azure AD authentication for blob and file workloads, customer-managed encryption keys, and infrastructure encryption."
+tags: ["azure", "storage", "sas", "encryption", "cmk", "az-104"]
+order: 63
+draft: false
+---
+
+## Overview
+
+Azure Storage accounts hold blob data, file shares, queues, and tables — assets that must be protected both while stored and while being accessed. Azure Storage provides a layered security model: keys for administrative access, shared access signatures for delegated time-limited access, Entra ID authentication for identity-based access, and encryption at rest for every byte of data regardless of the access method used.
+
+Understanding when to use each control — and the implications of rotating, revoking, or misconfiguring them — is central to operating Azure Storage safely in a production environment.
+
+## Storage Account Keys
+
+Every storage account is provisioned with two 512-bit access keys, referred to as Key1 and Key2. Possession of either key grants unrestricted access to all data in all services within the storage account — blobs, files, queues, and tables — with no restrictions on operations or resources. Keys behave like root credentials and should be treated accordingly.
+
+The dual-key design exists to enable zero-downtime rotation. The procedure is:
+
+1. Update all applications and services currently using Key1 to use Key2.
+2. Regenerate Key1 in the portal or via PowerShell/CLI.
+3. Update any remaining references back to the new Key1 if desired.
+
+This rotation can be automated using Azure Key Vault's key rotation policy integrated with the storage account. Key Vault contacts Azure Storage on a schedule, rotates the designated key, and updates the Key Vault secret so applications reading the key from Key Vault automatically receive the new value.
+
+Shared key authentication can be disabled entirely by setting `allowSharedKeyAccess: false` on the storage account. This blocks all key-based access — including SAS tokens signed with account keys — and forces all callers to authenticate via Entra ID. This is the recommended posture for sensitive storage accounts where identity-based auditing is required.
+
+## Shared Access Signatures
+
+A shared access signature (SAS) is a URI that grants scoped, time-limited access to storage resources without exposing the account key. Three SAS types exist, differing in scope and the credential used to sign them:
+
+| SAS Type | Scope | Signed With | Revocable |
+|---|---|---|---|
+| Account SAS | One or more services and resource types | Storage account key | Only by rotating the signing key |
+| Service SAS | Specific resource within one service | Storage account key | Via stored access policy or key rotation |
+| User Delegation SAS | Blob and Data Lake Storage Gen2 only | Entra ID OAuth token | By revoking the OAuth token or expiry |
+
+Every SAS URI encodes its permissions inline: the allowed operations (read, write, delete, list, add, create, update), the target resource, the validity window (start and expiry times), an optional IP address restriction, and an optional protocol restriction (HTTPS-only). The signature is computed by hashing these parameters against the signing credential — any modification to the URI invalidates the signature.
+
+**User Delegation SAS** is the most secure option because it is signed with an Entra ID credential rather than a storage account key. The signing token has a maximum lifetime of seven days, which serves as the outer bound on the SAS validity period. Compromising a user delegation SAS cannot be leveraged to gain account key access, and the token can be revoked by removing the Entra ID OAuth token or waiting for natural expiry.
+
+**Stored access policies** provide revocability for Service SAS tokens without key rotation. Up to five stored access policies can be attached to a container, queue, table, or file share. A Service SAS can reference one of these policies by name — the effective permissions and expiry come from the policy rather than the SAS URI itself. To revoke all SAS tokens tied to a policy, modify or delete the policy. This invalidates every SAS token that referenced it, leaving SAS tokens not tied to any policy unaffected.
+
+Account SAS tokens cannot be selectively revoked. Revoking an account SAS requires rotating the signing key, which invalidates every token signed with that key across all resources and services in the account.
+
+## Entra ID Authentication for Storage
+
+For blob and queue workloads, Entra ID authentication using OAuth 2.0 is the preferred alternative to key-based access. Callers authenticate with Entra ID and present a bearer token; Azure Storage validates the token and checks the caller's RBAC role assignment before serving the request.
+
+Key storage data roles for blob:
+
+| Role | Permissions |
+|---|---|
+| Storage Blob Data Reader | Read blob data only |
+| Storage Blob Data Contributor | Read, write, and delete blob data |
+| Storage Blob Data Owner | Full data access including setting ACLs |
+
+For Azure Files over SMB, Entra ID Kerberos authentication assigns permissions through file-specific roles: Storage File Data SMB Share Reader, Contributor, and Elevated Contributor (which can modify NTFS permissions). Table Storage does not support Entra ID authentication and requires storage account keys or SAS.
+
+RBAC for storage data roles is distinct from RBAC for management plane operations. A user with the Contributor role on the storage account resource can manage the account configuration but cannot read blob data without an explicit storage data role assignment.
+
+## Encryption at Rest
+
+All data written to Azure Storage is encrypted at rest using AES-256. This occurs automatically, applies to all storage services and all replication tiers, and cannot be disabled. The encryption model is envelope encryption: each blob is encrypted with a data encryption key (DEK), and the DEK itself is encrypted with a key encryption key (KEK).
+
+By default, Microsoft manages the KEK — this is the Microsoft-managed keys (MMK) model. No configuration is required and there is no additional cost.
+
+**Customer-managed keys (CMK)** allow an organisation to supply its own KEK stored in Azure Key Vault or Azure Key Vault Managed HSM. The storage account is granted access to the Key Vault via a managed identity, and all DEK encryption operations use the customer-supplied key. This means:
+
+- The customer controls key lifecycle, including rotation and revocation.
+- If the key is deleted or access is removed, the storage account cannot decrypt data.
+- Key versioning supports automatic rotation (storage account fetches the latest key version automatically) or manual rotation (a specific version is pinned).
+- CMK is configured per storage account.
+
+**Infrastructure encryption** adds a second independent layer of encryption at the Azure storage infrastructure level, below the service encryption layer. This results in data being encrypted twice with separate keys managed by Microsoft. Infrastructure encryption must be enabled at storage account creation and cannot be toggled on existing accounts. It is used to satisfy regulatory requirements that mandate double encryption at rest.
+
+## Secure Transfer and Network Controls
+
+The secure transfer required setting forces all connections to use HTTPS (for REST APIs) or SMB with encryption (for file shares). It is enabled by default on new storage accounts and should not be disabled in production.
+
+Network access controls restrict which sources can reach the storage account:
+
+- **Firewall rules** — Allow specific public IP ranges or Azure VNet subnets using service endpoints. Traffic from allowed subnets traverses the Microsoft backbone rather than the public internet.
+- **Private endpoints** — Deploy a private NIC in the VNet with a private IP mapped to the storage account. All traffic to the account uses this private address, and the public endpoint can be disabled entirely. Private endpoints require a private DNS zone (for example, `privatelink.blob.core.windows.net`) to resolve the storage account hostname to the private IP.
+- **Trusted Microsoft services** — Certain Azure services (Azure Backup, Azure Event Grid, Azure Monitor) can be permitted to bypass firewall rules. This is toggled per storage account.
+
+## Summary
+
+Azure Storage security operates across multiple independent layers: account keys for administrative access with a dual-key rotation model, SAS tokens for delegated scoped access with user delegation SAS offering the strongest security posture, Entra ID roles for identity-based data access without credential exposure, and AES-256 encryption at rest for all data with optional customer-managed keys for regulatory control. Network-level controls via firewall rules and private endpoints complete the defence-in-depth picture.

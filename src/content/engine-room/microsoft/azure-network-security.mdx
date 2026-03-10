@@ -1,0 +1,137 @@
+---
+title: "Azure Network Security — NSGs, ASGs, and Azure Firewall"
+category: "microsoft"
+topic: "azure-network-security"
+summary: "How Azure secures network traffic at the subnet and NIC level with Network Security Groups — and when to graduate to Azure Firewall for centralised stateful inspection, threat intelligence, FQDN filtering, and cross-VNet policy enforcement."
+tags: ["azure", "nsg", "azure-firewall", "network-security", "az-104"]
+order: 69
+draft: false
+---
+
+## Overview
+
+Azure provides two distinct layers of network access control. Network Security Groups (NSGs) are free, stateful packet filters attached directly to subnets and VM NICs — they enforce allow/deny rules based on IP addresses, port ranges, and protocols. Azure Firewall is a managed PaaS service that adds centralized, policy-driven inspection: FQDN filtering, threat intelligence, TLS inspection, and a rule hierarchy that spans multiple VNets from a single control plane. Understanding where NSGs are sufficient and when Azure Firewall justifies its cost is a core architectural decision for any Azure network design.
+
+## NSG Fundamentals
+
+An NSG is a collection of inbound and outbound security rules. It can be associated with a subnet (applying to all NICs within that subnet) or with an individual VM NIC (applying only to that VM). Associating an NSG with both a subnet and a NIC is permitted and common — both are evaluated for every packet.
+
+**Evaluation order for inbound traffic:**
+1. Subnet NSG inbound rules
+2. NIC NSG inbound rules
+
+**Evaluation order for outbound traffic:**
+1. NIC NSG outbound rules
+2. Subnet NSG outbound rules
+
+A packet must be allowed by both NSGs to pass. If the subnet NSG denies a packet, the NIC NSG never sees it. This creates a defense-in-depth model: the subnet NSG provides a broad perimeter, and the NIC NSG provides VM-specific exceptions.
+
+## NSG Rule Properties
+
+Each rule has six properties that define what traffic it matches and what action to take:
+
+| Property | Description |
+|----------|-------------|
+| Priority | 100–4096. Lower number = higher priority. First matching rule wins; no further rules are evaluated. |
+| Source | IP address, CIDR range, service tag, or application security group |
+| Source port range | Single port, hyphen-separated range, or `*` for all |
+| Destination | IP address, CIDR range, service tag, or application security group |
+| Destination port range | Single port, hyphen-separated range, or `*` for all |
+| Protocol | TCP, UDP, ICMP, ESP, AH, or Any |
+| Action | Allow or Deny |
+
+## Default Rules
+
+Azure automatically inserts six non-deletable default rules in every NSG. Custom rules override them by using a lower priority number.
+
+**Inbound defaults:**
+
+| Priority | Name | Action | Source → Destination |
+|----------|------|--------|----------------------|
+| 65000 | AllowVNetInBound | Allow | VirtualNetwork → VirtualNetwork |
+| 65001 | AllowAzureLoadBalancerInBound | Allow | AzureLoadBalancer → Any |
+| 65500 | DenyAllInBound | Deny | Any → Any |
+
+**Outbound defaults:**
+
+| Priority | Name | Action | Source → Destination |
+|----------|------|--------|----------------------|
+| 65000 | AllowVNetOutBound | Allow | VirtualNetwork → VirtualNetwork |
+| 65001 | AllowInternetOutBound | Allow | Any → Internet |
+| 65500 | DenyAllOutBound | Deny | Any → Any |
+
+The default rules permit all intra-VNet traffic and all outbound internet traffic while blocking unsolicited inbound traffic from the internet. In practice, the `AllowInternetOutBound` default means VMs can reach the internet by default — if that is not desired, add a Deny rule with priority lower than 65001 targeting destination `Internet`.
+
+## Service Tags
+
+A service tag is a Microsoft-managed named set of IP address ranges representing an Azure service or group of services. Instead of maintaining lists of Azure datacenter IP ranges — which change frequently as Azure expands — you reference the tag name in NSG source and destination fields. Azure updates the ranges automatically.
+
+Commonly used service tags:
+
+| Tag | Represents |
+|-----|-----------|
+| `Internet` | All IP addresses outside the VNet and not known to Azure |
+| `VirtualNetwork` | The VNet address space, peered VNets, and connected on-premises ranges |
+| `AzureLoadBalancer` | Azure's infrastructure load balancer IP (required for health probes) |
+| `Storage` | Azure Storage public endpoints in all regions |
+| `Sql` | Azure SQL and Azure Synapse public endpoints |
+| `AzureActiveDirectory` | Entra ID authentication endpoints |
+| `GatewayManager` | Azure VPN Gateway management traffic |
+| `AzureFrontDoor.Frontend` | Azure Front Door client-facing IPs |
+
+## Application Security Groups
+
+Application Security Groups (ASGs) let you group VM NICs by application role and reference the group in NSG rules, rather than managing IP address lists. An ASG named `asg-webservers` might contain the NICs of all web tier VMs. An NSG rule that reads "allow TCP 443 from `Internet` to `asg-webservers`" automatically applies to every VM added to that ASG — and stops applying when a VM is removed. This eliminates the manual work of updating NSG rule IP lists as VMs scale in and out.
+
+Constraints: all NICs in an ASG must be in the same VNet. A NIC can belong to multiple ASGs. ASGs cannot span VNets.
+
+## Augmented Security Rules
+
+A single NSG rule can specify multiple sources, multiple destinations, and multiple port ranges by listing them as comma-separated values. This reduces the rule count required to implement policies that would otherwise require one rule per IP or one rule per port. For example, a single rule can allow traffic from both `10.0.0.0/24` and `10.1.0.0/24` to ports 80, 443, and 8080 in one entry.
+
+## Azure Firewall
+
+Azure Firewall is a managed, stateful network security service deployed as a PaaS resource. Where NSGs are distributed per-subnet and per-NIC policies, Azure Firewall provides a centralized inspection point that all traffic passes through. The typical topology deploys Azure Firewall in a hub VNet, with user-defined routes in spoke VNets directing traffic through the firewall.
+
+**Deployment requirements:** Azure Firewall requires a dedicated subnet named exactly `AzureFirewallSubnet` with a minimum prefix of `/26`. It is assigned one or more static Standard SKU public IP addresses. The firewall itself is zone-redundant in supported regions.
+
+## Azure Firewall Rule Types
+
+Azure Firewall processes three distinct rule types in a fixed evaluation order:
+
+**DNAT rules** (Destination Network Address Translation): Translate inbound traffic arriving at the firewall's public IP to a private backend IP. Used for exposing internal resources to the internet without giving those resources their own public IPs. For example, translate `<firewall-public-ip>:3389` to `10.0.1.5:3389` to allow RDP to a specific VM.
+
+**Network rules**: Layer 3/4 allow or deny based on source IP, destination IP, protocol, and port. Evaluated after DNAT. Use network rules for non-HTTP/S protocols or for simple IP-based control of HTTP/S where FQDN inspection is not needed.
+
+**Application rules**: Layer 7 allow or deny based on FQDN or URL category. Allow VMs to reach `*.microsoft.com` or deny access to social media URL categories without maintaining IP lists. Application rules require the firewall to act as a forward proxy for the traffic — for HTTPS, TLS inspection (Premium SKU) is needed to inspect the actual URL inside the encrypted tunnel.
+
+**Evaluation order**: DNAT → Network → Application. If no rule matches in any category, traffic is denied by default.
+
+## Azure Firewall SKUs
+
+| SKU | Key Capabilities |
+|-----|-----------------|
+| Basic | Cost-optimized, limited throughput (250 Mbps), no threat intelligence, SMB and test scenarios |
+| Standard | L3–L7 filtering, FQDN tags, threat intelligence (alert or deny), DNS proxy, 30 Gbps throughput |
+| Premium | All Standard plus TLS inspection, IDPS (Intrusion Detection and Prevention System), URL category filtering, Web category filtering |
+
+**Premium** is the appropriate choice when you need to inspect encrypted HTTPS traffic for content (not just the server's SNI hostname) or when IDPS signature-based detection of known attack patterns is required.
+
+## Firewall Policy and Firewall Manager
+
+**Firewall Policy** is an Azure resource that encapsulates all rule collections for one or more Azure Firewall instances. Instead of configuring rules directly on each firewall, you define them in a policy and associate the policy with firewalls. Policies support a parent-child hierarchy: a base policy contains organization-wide rules that child policies inherit and cannot override. Team-specific or application-specific rules live in child policies.
+
+**Azure Firewall Manager** is the management plane for deploying and governing Azure Firewall across multiple VNets and Virtual WAN hubs from a single interface. It integrates with Firewall Policy for centralized rule management and provides a topology view of secured virtual hubs and VNets.
+
+## Choosing NSGs vs. Azure Firewall
+
+NSGs and Azure Firewall are complementary, not alternatives. The standard pattern is to use both:
+
+- NSGs on subnets for intra-VNet microsegmentation — controlling which subnet can talk to which subnet on which port. NSGs are free and operate at wire speed.
+- Azure Firewall at the perimeter for centralized control of north-south traffic (internet inbound/outbound) and east-west traffic between VNets, where FQDN filtering, threat intelligence, and centralized logging justify the cost.
+
+Azure Firewall is not appropriate for replacing NSGs entirely. Fine-grained per-VM rules are better expressed in NSGs closer to the workload. Azure Firewall is the right tool when you need a policy hierarchy that spans multiple VNets, FQDN-based allow lists for internet-bound traffic, or IDPS for detecting known attack signatures in traffic traversing the network boundary.
+
+## Summary
+
+NSGs provide the baseline traffic filter for every subnet and NIC in Azure. Their rule priority system, service tag library, and ASG integration handle the majority of access control requirements for workloads within a single VNet. Azure Firewall extends control to centralized inspection with threat intelligence, FQDN filtering, and a hierarchical policy model — capabilities that become essential as network topology grows to span multiple VNets and the security team needs a single authoritative view of what traffic the environment permits.

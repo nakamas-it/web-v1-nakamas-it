@@ -1,0 +1,139 @@
+---
+title: "AppLocker and Application Control — Whitelisting Apps on Windows"
+category: "microsoft"
+topic: "windows-applocker"
+summary: "How AppLocker enforces application control policies on Windows Enterprise and Education devices — defining which executables, scripts, Windows Installer packages, and packaged apps users are allowed to run — and how the modern Windows Package Manager and MSIX packaging format fit into enterprise app management."
+tags: ["windows", "applocker", "application-control", "msix", "winget", "md-100"]
+order: 91
+draft: false
+---
+
+## Overview
+
+Application whitelisting inverts the traditional security model. Instead of blocking known-bad software and allowing everything else, it defines a list of approved applications and blocks everything not on that list. This approach stops malware that security scanners have never seen, because the malware is not on the approved list regardless of whether its signature is known.
+
+AppLocker is Microsoft's application whitelisting solution for Windows Enterprise and Education editions. It is configured through Group Policy or Local Security Policy, enforced by the Application Identity service, and logs all policy decisions to a dedicated event log. For organisations on Windows Pro or Home, AppLocker rules can be pushed via Group Policy but will not be enforced — the edition restriction is hard.
+
+---
+
+## AppLocker Rule Collections
+
+AppLocker organises rules into five collections, each targeting a specific category of executable content:
+
+| Collection | File Types Covered |
+|------------|-------------------|
+| Executable Rules | `.exe` and `.com` files |
+| Windows Installer Rules | `.msi`, `.msp`, and `.mst` files |
+| Script Rules | `.ps1`, `.bat`, `.cmd`, `.vbs`, and `.js` files |
+| Packaged App Rules | MSIX and AppX packages (Microsoft Store apps) |
+| DLL Rules | `.dll` and `.ocx` files — disabled by default; significant performance impact when enabled |
+
+DLL Rules are not enabled by default because every process loads dozens of DLLs; enforcing rules on each load introduces meaningful overhead. Enable DLL Rules only if the security requirement explicitly demands it.
+
+When any rule collection is configured, AppLocker's default behaviour for that collection becomes deny-all — anything not explicitly allowed is blocked. This means a misconfigured policy that allows nothing will prevent all executables from running, including Windows itself. The creation wizard offers to automatically generate default Allow rules for Windows directories and Program Files to prevent this lockout.
+
+---
+
+## Rule Conditions
+
+Each AppLocker rule uses one of three conditions to identify what it applies to:
+
+**Publisher rules** match files based on their digital signature. A publisher rule can be configured to allow any version of an application from a specific publisher, a specific product family, or a specific file name and version range. Publisher rules are the most flexible condition — they survive application updates because the signature does not change when a vendor releases a new version.
+
+**Path rules** match files by location — a specific file path or a folder path with wildcards. For example, `%PROGRAMFILES%\*` allows anything installed under Program Files. Path rules are easy to create but easier to bypass: any process that can write files to an allowed path can drop an executable there and run it.
+
+**Hash rules** match a specific file by its SHA-256 cryptographic hash. Hash rules are the most precise condition — they apply to exactly one version of exactly one file. The weakness is maintenance: every time the application is updated, the hash changes, and the rule must be updated to match the new hash. Hash rules are best used as a last resort when a file is unsigned and cannot be covered by publisher or path rules.
+
+| Condition | Survives App Updates | Bypass Risk | Use Case |
+|-----------|---------------------|------------|---------|
+| Publisher | Yes | Low | Signed applications — preferred |
+| Path | Yes | Medium | Unsigned apps in controlled locations |
+| Hash | No | Very low | Specific unsigned executables |
+
+---
+
+## Enforcement Mode and Default Rules
+
+AppLocker supports two enforcement modes per rule collection:
+
+- **Enforce rules**: Policy decisions are enforced. Applications not matching an Allow rule are blocked and the block is logged.
+- **Audit only**: Policy decisions are logged but not enforced. Applications run normally, but the event log records what would have been blocked.
+
+Audit mode is essential before switching to Enforce. Running in Audit mode for one to two weeks reveals which legitimate applications would be blocked by the current rule set, allowing the rules to be refined before enforcement disrupts users.
+
+When creating a new policy, the wizard's **Create Default Rules** option generates three Allow rules:
+- Allow all files in `%WINDIR%\` (Windows system files)
+- Allow all files in `%PROGRAMFILES%\` (installed applications)
+- Allow all files for the local Administrators group (admins are not restricted)
+
+Without these default rules, enabling enforcement would immediately block Windows from functioning. Always create default rules before switching to Enforce mode in production.
+
+---
+
+## AppLocker vs Software Restriction Policies
+
+Software Restriction Policies (SRP) is the predecessor to AppLocker. Both appear in Group Policy under Security Settings, but they differ substantially:
+
+| Feature | SRP | AppLocker |
+|---------|-----|-----------|
+| Available on | All Windows editions | Enterprise and Education only |
+| Rule conditions | Hash, Certificate, Path, Internet Zone | Publisher, Path, Hash |
+| Store app support | No | Yes (Packaged App Rules) |
+| Audit mode | No | Yes |
+| Per-user/per-group rules | No | Yes |
+| Event log | Application log | Dedicated AppLocker log |
+| Status | Legacy | Current — prefer AppLocker |
+
+AppLocker's dedicated event log lives at `Applications and Services Logs > Microsoft > Windows > AppLocker`. Separate channels exist for each rule collection (EXE and DLL, MSI and Script, AppX). Event ID 8003 is logged when a file would be blocked (audit mode); Event ID 8004 is logged when a file is actually blocked (enforce mode).
+
+---
+
+## MSIX Packaging and Sideloading
+
+MSIX is Microsoft's modern app packaging format, replacing MSI, AppX, and ClickOnce for new Windows applications. MSIX packages are signed, containerised (no registry pollution outside the package), and support clean uninstall without leftover artifacts.
+
+Installing an MSIX package outside the Microsoft Store is called sideloading:
+
+- **Windows 10**: Sideloading must be explicitly enabled via Settings > Update & Security > For Developers.
+- **Windows 11**: Sideloading is enabled by default; `.msix` files can be installed directly.
+- **PowerShell**: `Add-AppxPackage -Path C:\app.msix`
+
+**MSIX App Attach** extends the format to virtual desktop scenarios: MSIX packages are stored on a network share and attached to Windows Virtual Desktop (Azure Virtual Desktop) session hosts at logon time. The application appears installed on the session host but the files live on the share — enabling per-user app assignment without baking applications into the base image.
+
+AppLocker's Packaged App Rules collection governs whether MSIX and Store apps can run. Publisher rules work well here — the Store enforces code signing, so every Store app has a valid signature to match against.
+
+---
+
+## Windows Package Manager (winget)
+
+`winget` is Microsoft's command-line package manager, available in Windows 10 and 11 as part of App Installer. It sources packages from the Windows Package Manager Community Repository and the Microsoft Store.
+
+| Command | Effect |
+|---------|--------|
+| `winget search "app name"` | Search for packages by name or keyword |
+| `winget install Publisher.AppID` | Install a specific package by its ID |
+| `winget upgrade --all` | Upgrade all installed packages to the latest version |
+| `winget uninstall Publisher.AppID` | Remove an installed package |
+| `winget list` | List all installed packages detectable by winget |
+| `winget export -o packages.json` | Export the installed package list to a JSON file |
+| `winget import -i packages.json` | Install all packages listed in a JSON file — bulk restore |
+
+The `export` and `import` workflow enables repeatable machine setup: export the package list from a configured reference machine and import it on new machines to install the same set of applications in one command. This complements Autopilot and Intune app deployment for scenarios where a curated package list is sufficient.
+
+---
+
+## Kiosk Mode and Assigned Access
+
+When a device must be locked to a specific application or set of applications — a lobby kiosk, a shared workstation, a point-of-sale terminal — Windows provides Assigned Access:
+
+- **Single-app kiosk**: The device boots directly into one UWP app. The user cannot reach the desktop, Start menu, or taskbar. Configured via Settings > Accounts > Other users > Set up a kiosk, or via Intune Kiosk configuration profile.
+- **Multi-app kiosk**: The user sees a restricted Start menu containing only the approved applications. Implemented via the `AssignedAccess` CSP in MDM or a Windows Configuration Designer provisioning package.
+- **Shell Launcher**: Replaces `Explorer.exe` with a custom application as the shell. Appropriate when the kiosk application is a Win32 app rather than a UWP app. Requires Enterprise or Education edition.
+
+AppLocker and Assigned Access address the same goal from different angles: AppLocker controls which applications can execute anywhere on the device; Assigned Access controls which applications the user interface exposes. Combining both provides defence in depth for locked-down deployments.
+
+---
+
+## Summary
+
+AppLocker enforces application whitelisting on Windows Enterprise and Education devices through five rule collections — Executables, Installers, Scripts, Packaged Apps, and (optionally) DLLs. Publisher rules are the preferred condition because they survive application updates; hash rules are the most precise but require maintenance after every update. Audit mode before enforce mode is essential for validating a policy without disrupting users. Default rules must be created first to prevent accidental self-lockout. MSIX provides clean, signed packaging for modern apps; `winget` provides command-line package management with bulk import/export for repeatable deployments. Kiosk mode through Assigned Access restricts the user interface to approved applications without replacing AppLocker's underlying execution control.

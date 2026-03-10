@@ -1,0 +1,128 @@
+---
+title: "Windows Networking — IPv4, IPv6, and Network Troubleshooting"
+category: "microsoft"
+topic: "windows-networking"
+summary: "How Windows configures and troubleshoots network connectivity — covering IPv4 addressing including APIPA fallback, IPv6 address types and transition technologies, network profiles, and the command-line tools used to diagnose connectivity issues from name resolution to packet loss."
+tags: ["windows", "networking", "ipv4", "ipv6", "troubleshooting", "md-100"]
+order: 83
+draft: false
+---
+
+## Overview
+
+Windows networking is built on a layered TCP/IP stack that supports both IPv4 and IPv6 simultaneously. Every Windows 10 and 11 installation runs a dual-stack configuration by default — both protocols are active on every network adapter, and Windows prefers IPv6 when both are available for a given destination. For the MD-100 exam and for day-to-day administration, understanding how Windows acquires and assigns addresses, how it falls back when assignment fails, and how to diagnose the resulting conditions is foundational.
+
+Network configuration in Windows is managed through Settings > Network and Internet, the legacy Control Panel's Network and Sharing Centre (`ncpa.cpl` for adapters directly), and a set of command-line tools that have remained consistent across Windows versions while gaining PowerShell equivalents.
+
+---
+
+## IPv4 Address Assignment
+
+Windows can acquire an IPv4 address in three ways:
+
+**DHCP (Dynamic Host Configuration Protocol)** is the default for all network adapters. The adapter sends a DHCP Discover broadcast, and a DHCP server responds with an offer containing an IP address, subnet mask, default gateway, and DNS server addresses. The assignment is a lease with a configurable duration, after which the client must renew.
+
+**Static assignment** is configured through adapter properties (Settings > Network and Internet > Ethernet or Wi-Fi > Properties, then Edit IP assignment and switch to Manual). A static address requires the IP address, subnet mask, default gateway, and at least one DNS server. Static addresses are used for servers, printers, and devices that must remain reachable at a predictable address.
+
+**APIPA (Automatic Private IP Addressing)** is the automatic fallback when DHCP fails. If Windows cannot reach a DHCP server — because the server is down, the network cable is disconnected, or there is a VLAN misconfiguration — it self-assigns an address from the **169.254.0.0/16** range. APIPA addresses are link-local only: they are not routable and cannot reach resources outside the local subnet, including the internet or any server on a different network segment. Seeing a 169.254.x.x address is a reliable indicator that DHCP has failed and the underlying cause needs investigation. Windows continues sending DHCP Discover packets in the background while using the APIPA address.
+
+An **alternate configuration** can be configured on the adapter to use a specified static address when DHCP is unavailable, rather than falling back to APIPA. This is useful for laptops that move between a DHCP-served office network and a static-addressed lab or home network.
+
+---
+
+## IPv6 Address Types
+
+IPv6 addresses are 128 bits expressed in eight groups of four hexadecimal digits. Windows configures several types of IPv6 address on each interface simultaneously, and understanding which type serves which purpose is important for both troubleshooting and exam questions.
+
+| Address Type | Range | Purpose |
+|---|---|---|
+| Link-Local | `fe80::/10` | Auto-configured on every IPv6-capable interface; not routable; used for neighbour discovery, router advertisements, and DHCPv6 discovery |
+| Unique Local | `fc00::/7` (commonly `fd00::/8`) | Private addressing analogous to RFC 1918 (10.x.x.x, 192.168.x.x); routable within the organisation but not on the public internet |
+| Global Unicast | `2000::/3` | Publicly routable IPv6 addresses; equivalent to public IPv4 addresses |
+| Loopback | `::1/128` | Equivalent to 127.0.0.1; always present |
+| Multicast | `ff00::/8` | One-to-many delivery; used by neighbour discovery and routing protocols |
+
+A link-local address is always present on every active IPv6 interface regardless of any other configuration. It is derived from the interface's MAC address using the EUI-64 process and is used for local-link communication before any other address is assigned.
+
+---
+
+## IPv6 Address Assignment
+
+IPv6 provides two mechanisms for assigning addresses beyond the link-local address:
+
+**DHCPv6 (stateful)** works similarly to DHCPv4: a DHCPv6 server assigns an IPv6 address and provides DNS server information. The router indicates that DHCPv6 should be used by setting the Managed (M) flag in its Router Advertisement messages.
+
+**SLAAC (Stateless Address Autoconfiguration)** allows a device to construct its own global unicast address without a DHCPv6 server. The router sends a Router Advertisement containing the network prefix (the first 64 bits of the address). The device combines this prefix with a 64-bit interface identifier to form the complete 128-bit address. The interface identifier can be derived from the MAC address via **EUI-64** — which inserts `FF:FE` into the middle of the 48-bit MAC and flips the seventh bit — or it can be a randomly generated privacy address (used by default in Windows to avoid device tracking).
+
+---
+
+## IPv6 Transition Technologies
+
+During the long transition from IPv4 to IPv6 infrastructure, several tunnelling mechanisms allow IPv6 traffic to traverse IPv4-only networks:
+
+| Technology | Prefix | Mechanism |
+|---|---|---|
+| 6to4 | `2002::/16` | Encapsulates IPv6 packets inside IPv4 (Protocol 41); prefix embeds the public IPv4 address; site-to-site use |
+| Teredo | `2001::/32` | Tunnels IPv6 over UDP/IPv4; designed to work through NAT; client-side connectivity; appears as a Teredo Tunneling Pseudo-Interface in Windows |
+| ISATAP | N/A | Intra-Site Automatic Tunnel Addressing Protocol; tunnels IPv6 over IPv4 within an organisation's internal network |
+
+Teredo is the most commonly encountered transition technology on Windows clients because it allows IPv6 connectivity even when the client is behind a NAT device. Its status can be checked with `netsh interface ipv6 show teredo`.
+
+---
+
+## Network Profiles
+
+Windows assigns one of three network profiles to each connected network, and the firewall applies a corresponding set of rules based on the active profile:
+
+**Domain** is applied automatically when Windows detects that the network provides access to a domain controller for the machine's domain. This detection uses Network Location Awareness (NLA). Domain profile firewall rules are typically the most permissive, as the network is considered trusted and controlled.
+
+**Private** is a user-assigned profile for trusted non-domain networks such as a home network or a small office. It allows more inbound traffic than Public but is not as open as Domain.
+
+**Public** is the default profile applied to any new network connection that has not been designated otherwise. It is the most restrictive, blocking most inbound connections. It is appropriate for coffee shops, hotels, and any network where the connected machines cannot be trusted.
+
+On a multi-homed machine (one with multiple active network adapters), each adapter independently holds its own profile. All three profiles can be simultaneously active — for example, a server with a domain-connected internal adapter and a perimeter adapter connected to a less-trusted network.
+
+---
+
+## Network Troubleshooting Commands
+
+| Command | Purpose |
+|---|---|
+| `ipconfig /all` | Show all adapter configuration details: IP address, subnet mask, gateway, DNS servers, MAC address, DHCP server, lease obtained and expiry |
+| `ipconfig /release` | Release the current DHCP lease |
+| `ipconfig /renew` | Request a new DHCP lease from the server |
+| `ipconfig /flushdns` | Clear the local DNS resolver cache |
+| `ipconfig /displaydns` | Display all entries currently in the DNS resolver cache |
+| `ping target` | Send ICMP Echo Requests to test reachability; four packets by default |
+| `ping -6 target` | Force ping to use IPv6 |
+| `tracert target` | Trace the hop-by-hop path to a destination using ICMP TTL Exceeded messages |
+| `pathping target` | Combine tracert and ping: traces the route, then measures packet loss at each hop over approximately 300 seconds |
+| `netstat -ano` | List all active TCP/UDP connections and listening ports with the associated process ID |
+| `netstat -r` | Display the IP routing table (equivalent to `route print`) |
+| `nslookup` | Query DNS servers; use interactively to switch server or query type, or as a single-shot command |
+| `arp -a` | Display the ARP cache mapping IP addresses to MAC addresses on the local subnet |
+| `netsh winsock reset` | Reset the Winsock catalog to resolve network stack corruption |
+| `netsh int ip reset` | Reset the TCP/IP stack |
+| `Test-NetConnection` | PowerShell equivalent; tests TCP connectivity to a specific port and provides detailed diagnostic output |
+
+A machine showing a 169.254.x.x address from `ipconfig /all` confirms APIPA is active and DHCP has failed. The DHCP server field will show an address of 0.0.0.0 or will be absent. The correct remediation sequence is to investigate the DHCP server availability, check physical connectivity, and then run `ipconfig /release` followed by `ipconfig /renew` once the underlying issue is resolved.
+
+---
+
+## Name Resolution Order
+
+When a Windows machine resolves a hostname to an IP address, it checks sources in this order:
+
+1. The local **hosts file** at `C:\Windows\System32\drivers\etc\hosts` — entries here override DNS and are checked first.
+2. The local **DNS resolver cache** — recently resolved names are cached per their TTL.
+3. **DNS server query** — the configured DNS servers are queried.
+4. **LLMNR (Link-Local Multicast Name Resolution)** — a multicast query sent on the local link for names that DNS could not resolve.
+5. **NetBIOS over TCP/IP / WINS** — legacy name resolution, broadcast-based or via a WINS server.
+
+LLMNR, while useful on small networks, is a known attack vector — tools like Responder can capture credentials by responding to LLMNR queries. Security-hardened environments disable LLMNR via Group Policy.
+
+---
+
+## Summary
+
+Windows networking provides automatic IPv4 address acquisition via DHCP with a 169.254.x.x APIPA fallback when DHCP is unreachable, dual-stack IPv6 support with link-local addresses always present and global addresses via SLAAC or DHCPv6, and profile-based firewall rules that automatically adapt based on the detected network type. The `ipconfig`, `ping`, `tracert`, `pathping`, and `nslookup` command-line tools form the core diagnostic toolkit for working through connectivity issues from the address layer up through name resolution.

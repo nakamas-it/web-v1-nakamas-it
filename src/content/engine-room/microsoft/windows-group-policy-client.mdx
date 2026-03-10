@@ -1,0 +1,117 @@
+---
+title: "Group Policy on Windows Clients — LGPO, Processing Order, and Troubleshooting"
+category: "microsoft"
+topic: "windows-gpo-client"
+summary: "How Group Policy applies to Windows client devices — the LSDOU processing order that determines which settings win when policies conflict, the Local Group Policy Object for standalone devices, and the command-line tools that reveal exactly which policies applied, from which GPO, and why."
+tags: ["windows", "group-policy", "lgpo", "gpresult", "md-100"]
+order: 87
+draft: false
+---
+
+## Overview
+
+Group Policy is the mechanism Windows uses to deliver configuration settings to computers and users — centrally defined once and applied automatically across every device in scope. Settings cover everything from password complexity and firewall rules to mapped drives, desktop wallpaper, and software installation. On domain-joined machines, Group Policy Objects (GPOs) are stored in Active Directory and applied by the Group Policy Client service. On standalone machines with no Active Directory, the Local Group Policy Object (LGPO) provides the same structure with local scope only.
+
+Policy is not a one-time push. Windows reapplies Group Policy on a schedule — every 90 minutes (plus a random offset of up to 30 minutes) for client computers, and every 5 minutes for domain controllers. Computer Configuration settings are applied at startup; User Configuration settings are applied at logon and again on each refresh cycle.
+
+---
+
+## LSDOU — Policy Processing Order
+
+When a domain-joined device evaluates Group Policy, it applies GPOs in a fixed order called LSDOU:
+
+| Stage | Source | Notes |
+|-------|--------|-------|
+| **L** — Local | LGPO on the device itself | Applied first; lowest precedence |
+| **S** — Site | GPOs linked to the AD site | Applied second |
+| **D** — Domain | GPOs linked to the AD domain | Applied third |
+| **O** — OU | GPOs linked to the OU containing the object | Applied last; parent OU before child OU |
+
+Because Group Policy settings accumulate and conflicts are resolved by last-writer-wins, the OU GPO has the highest effective precedence — it is applied last and overwrites any conflicting settings from earlier stages. A child OU GPO overrides a parent OU GPO for the same reason.
+
+Two features modify this default order:
+
+- **Block Inheritance**: Prevents GPOs from higher-level containers (site, domain, parent OU) from flowing into a specific OU. Useful for isolating a lab OU from production policy.
+- **Enforced (No Override)**: Forces a GPO's settings to win regardless of any later GPO. An Enforced GPO cannot be blocked by Block Inheritance. Used for security baselines that must not be overridden.
+
+Computer Configuration settings apply to the computer account regardless of who logs in. User Configuration settings apply to the user account regardless of which computer they log into. When the two sections conflict, Computer Configuration wins by default. GPO Loopback Processing (in Replace or Merge mode) can reverse this by forcing the computer's GPOs to also process User Configuration settings — commonly used for kiosk or shared-computer scenarios.
+
+---
+
+## Local Group Policy Object (LGPO)
+
+The LGPO exists on every Windows machine except Home edition, which ships without `gpedit.msc`. It applies to the local computer only — no Active Directory, no domain, no network dependency.
+
+Open it with `gpedit.msc`. The structure mirrors a domain GPO exactly:
+
+- **Computer Configuration**: Applied at startup, applies to all users of this computer.
+- **User Configuration**: Applied at logon, applies to users on this computer.
+
+Each section contains three sub-nodes:
+
+| Sub-node | Contents |
+|----------|----------|
+| Software Settings | Software installation packages |
+| Windows Settings | Scripts, security settings, folder redirection |
+| Administrative Templates | Registry-based settings — thousands of OS and application options defined by `.admx` files |
+
+Administrative Templates are the most-used section for day-to-day configuration. Settings can be **Not Configured** (no registry change), **Enabled** (applies the setting), or **Disabled** (actively reverses the setting). On non-domain machines, Windows also supports per-user LGPOs that apply different settings to different local user accounts.
+
+---
+
+## gpupdate — Forcing Policy Refresh
+
+Group Policy refreshes automatically, but `gpupdate` triggers an immediate reapplication without waiting for the background cycle:
+
+| Command | Effect |
+|---------|--------|
+| `gpupdate` | Refresh both computer and user policy (only changed settings) |
+| `gpupdate /force` | Reapply all settings even if unchanged since last refresh |
+| `gpupdate /target:computer` | Refresh computer policy only |
+| `gpupdate /target:user` | Refresh user policy only |
+| `gpupdate /boot` | Trigger a restart after refresh (required for some computer settings) |
+| `gpupdate /logoff` | Trigger a logoff after refresh (required for some user settings) |
+
+Some policy settings only take effect at startup (for Computer Configuration) or logon (for User Configuration). Running `gpupdate` without `/boot` or `/logoff` will not apply those settings until the next natural startup or logon event.
+
+---
+
+## gpresult — Reading Applied Policy
+
+`gpresult` queries the RSoP (Resultant Set of Policy) — the computed effective policy for a user and computer after all GPOs have been evaluated and conflicts resolved.
+
+| Command | Output |
+|---------|--------|
+| `gpresult /r` | Summary of applied GPOs for the current user and computer |
+| `gpresult /h report.html` | Full HTML report with every applied setting and its source GPO |
+| `gpresult /scope computer` | Computer policy only |
+| `gpresult /scope user` | User policy only |
+| `gpresult /user username /r` | Check another user's applied policies (requires admin rights) |
+
+The HTML report (`/h`) is the most useful troubleshooting output. It shows every setting, which GPO it came from, and whether it was applied or filtered. If a GPO appears under "Denied GPOs", the report explains why — typically a security filter exclusion or a WMI filter mismatch.
+
+---
+
+## Troubleshooting Policy Application
+
+When a GPO is not applying as expected, work through these checks in order:
+
+**Event Viewer** is the first stop. Navigate to `Applications and Services Logs > Microsoft > Windows > Group Policy > Operational`. This log records every policy processing event — which GPOs were evaluated, which were applied, and any errors encountered during processing.
+
+**Common reasons a GPO does not apply**:
+
+| Reason | Explanation |
+|--------|-------------|
+| Security filtering | GPO only applies to security groups that contain the object; if the computer or user account is not in the group, the GPO is skipped |
+| WMI filter | A WMI query attached to the GPO evaluated to false for this device (e.g., wrong OS version) |
+| Wrong OU | The computer or user account is in a different OU than the one the GPO is linked to |
+| Loopback processing | GPO loopback is changing which User Configuration settings apply — the computer's OUs drive user policy instead of the user's OUs |
+| Link disabled | The GPO link to the OU is disabled without disabling the GPO itself |
+
+Running `gpresult /h report.html` on the affected machine and inspecting the "Denied GPOs" and "Applied GPOs" sections almost always surfaces the root cause within minutes.
+
+---
+
+## Summary
+
+Group Policy on Windows clients flows through the LSDOU order — Local, Site, Domain, OU — with later stages overwriting earlier ones on conflicts. The LGPO provides the same Computer and User Configuration structure on standalone machines without Active Directory. `gpupdate /force` triggers an immediate full refresh; `gpresult /h` generates the definitive report of what applied, what was denied, and why. When a GPO is not applying, the Group Policy Operational event log and the `gpresult` HTML report together cover the vast majority of troubleshooting scenarios.

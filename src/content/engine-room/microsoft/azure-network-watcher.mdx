@@ -1,0 +1,120 @@
+---
+title: "Azure Network Watcher — Network Diagnostics and Monitoring"
+category: "microsoft"
+topic: "azure-network-watcher"
+summary: "How Azure Network Watcher provides a toolkit of network diagnostic and monitoring capabilities — from testing whether traffic is allowed by NSG rules, to capturing packets on VMs, to analysing NSG flow logs for visibility into all traffic flows across your Azure network."
+tags: ["azure", "network-watcher", "nsg-flow-logs", "traffic-analytics", "az-104"]
+order: 75
+draft: false
+---
+
+## Overview
+
+Azure Network Watcher is the operational toolkit for Azure networking. When a VM cannot reach a database, when traffic that should be blocked is getting through, when a VPN connection is behaving unexpectedly, or when an application team reports intermittent connectivity issues — Network Watcher is where the investigation starts.
+
+Network Watcher is a **regional service**, which means it must be enabled in each Azure region where you need diagnostics. In newer subscriptions, Network Watcher is automatically enabled when the first VNet is created in a region. In older subscriptions or regions where a VNet existed before automatic enablement was introduced, it may need to be enabled manually through the portal, CLI, or PowerShell. Network Watcher is free — there is no charge for the service itself, though associated resources (storage accounts for logs, Log Analytics workspaces for Traffic Analytics) have their own costs.
+
+Network Watcher's capabilities fall into three categories: diagnostic tools for troubleshooting specific problems, packet-level inspection for deep analysis, and flow log monitoring for network-wide traffic visibility.
+
+## Diagnostic Tools
+
+### IP Flow Verify
+
+IP Flow Verify answers the most common Azure networking question: "Is NSG blocking this traffic?"
+
+Given a specific 5-tuple — source IP, destination IP, source port, destination port, and protocol — IP Flow Verify tests whether that packet would be **allowed or denied** by the NSG rules applied to a VM's NIC and the NIC's subnet. If the traffic is denied, the tool identifies exactly which NSG and which rule is responsible.
+
+This is significantly faster than manually reviewing all effective NSG rules. The diagnostic runs against the actual evaluated ruleset — including default rules, inherited rules, and rules applied at both the subnet and NIC levels — and returns a definitive allow or deny with the matching rule name.
+
+Common use cases: confirming that a newly added allow rule is correctly permitting traffic before deploying an application, or identifying which of multiple overlapping NSGs is blocking an unexpected connection.
+
+### Next Hop
+
+Next Hop shows the routing decision Azure makes for traffic originating from a specific VM NIC destined for a specific IP address. It returns the next hop **type** (VirtualNetwork, Internet, VirtualNetworkGateway, VirtualAppliance, or None) and, where applicable, the next hop IP address.
+
+This is the correct tool for diagnosing routing anomalies. If a VM should be routing traffic through an NVA (Network Virtual Appliance) but is going directly to the internet instead, Next Hop will show `Internet` rather than `VirtualAppliance`, confirming that the UDR is not applied or has the wrong configuration.
+
+`None` as a next hop type indicates that Azure has no route for the destination — the traffic is being dropped. This is a common cause of apparent connectivity failures that have no NSG explanation.
+
+### Effective Security Rules
+
+Effective Security Rules provides a merged, priority-ordered view of all NSG rules currently applied to a specific VM NIC — combining the rules from both the NIC-level NSG and the subnet-level NSG into a single list. This is the tool to use when you know traffic is being blocked but are not sure which rule or which NSG is responsible.
+
+The output shows each rule's priority, source, destination, port range, protocol, and allow/deny action. Effective Security Rules is complementary to IP Flow Verify: IP Flow Verify tells you the verdict for a specific packet; Effective Security Rules shows you the entire ruleset so you can understand why.
+
+### Connection Monitor
+
+Connection Monitor provides **continuous, ongoing monitoring** of connectivity between a source and a destination. Unlike one-time diagnostic tools, Connection Monitor runs synthetic tests on a configurable schedule and records latency, packet loss percentage, and reachability over time.
+
+Sources can be Azure VMs or on-premises machines with the Network Watcher extension. Destinations can be IP addresses, FQDNs, or Azure resources. Results are stored in a Log Analytics workspace, enabling alerts on connectivity degradation and trend analysis over time.
+
+Connection Monitor is appropriate for monitoring critical application paths — for example, continuously testing that web servers in one VNet can reach database servers in another, or that an ExpressRoute-connected on-premises application can reach its Azure backend with acceptable latency.
+
+### VPN Diagnostics
+
+VPN Diagnostics runs a diagnostic against a VPN Gateway or a specific VPN connection. It captures log data from the gateway during the diagnostic period, analyses common failure modes, and returns a result that identifies known issues — such as IKE negotiation failures, mismatched pre-shared keys, or incompatible cipher suites. The diagnostic data is stored in a storage account specified at runtime.
+
+### Topology
+
+The Topology view generates a visual diagram of all network resources within a resource group — virtual machines, NICs, NSGs, public IPs, VNets, and subnets — and draws the connections between them. It provides an at-a-glance map of the network structure that is particularly useful when inheriting an unfamiliar environment or auditing network configuration.
+
+## Packet Capture
+
+Packet capture allows administrators to record network traffic flowing to and from a VM's NIC directly within Azure — without installing Wireshark or any additional software on the VM. The Network Watcher extension on the VM handles the capture; the extension must be installed on the VM (it is installed automatically when packet capture is initiated if not already present).
+
+Filters limit the capture to specific traffic: by local IP, remote IP, local port, remote port, or protocol (TCP, UDP, any). This prevents captures from being swamped by background traffic when investigating a specific flow.
+
+Capture sessions can be stopped by:
+- **Time limit** — capture for a maximum duration (up to 5 hours).
+- **Size limit** — stop when the capture file reaches a specified size.
+- Either limit, whichever is reached first.
+
+Captured packets are stored in a storage account as `.cap` files, downloadable and openable in Wireshark or any compatible packet analyser. Alternatively, files can be saved to the VM's local disk for immediate access.
+
+Packet capture is the right tool when IP Flow Verify confirms that traffic is allowed and Next Hop confirms routing is correct, but the application still reports a connectivity problem — because the issue may be at the TCP layer or above, visible only in the actual packet exchange.
+
+## NSG Flow Logs
+
+NSG flow logs record metadata about every IP flow that traverses an NSG — whether the traffic was allowed or denied, the direction (inbound or outbound), source and destination IP addresses, source and destination ports, and the protocol. They provide a historical record of all traffic flows through the Azure network.
+
+Flow logs are stored in a storage account as JSON files organised by date, hour, and NSG. Two versions exist:
+
+| Version | Data Captured |
+|---------|---------------|
+| Version 1 | Source/dest IP, port, protocol, direction, allow/deny |
+| Version 2 | All of v1 + byte count and packet count per flow |
+
+Version 2 is preferred for all new deployments as the additional byte and packet count data is useful for identifying high-volume flows and bandwidth consumers.
+
+Retention is configurable between 1 and 90 days directly on the NSG flow log resource. Data older than the retention period is automatically deleted from the storage account.
+
+Flow logs are disabled by default on all NSGs and must be explicitly enabled. Each NSG has its own flow log configuration. The storage account receiving the logs must be in the same region as the NSG.
+
+## Traffic Analytics
+
+Traffic Analytics processes NSG flow log data — stored in the storage account — and analyses it using a Log Analytics workspace to surface actionable insights. Rather than parsing raw JSON files, Traffic Analytics provides:
+
+- **Top talkers** — which VMs, subnets, or external IPs generate the most traffic.
+- **Geographic distribution** — where external traffic originates, visualised on a world map.
+- **Blocked flows** — which flows are being denied by NSGs and by which rules.
+- **Open ports** — which ports are receiving unexpected traffic.
+- **Anomalous flows** — unusual traffic patterns that may indicate a security issue.
+
+Traffic Analytics processes flow log data at either a **10-minute** or **60-minute** interval (configurable). More frequent processing provides more timely insights at higher cost due to increased Log Analytics query processing.
+
+Traffic Analytics queries are executed in the `NetworkWatcherFlowLog` table in the linked Log Analytics workspace, making the raw flow data available for custom KQL queries alongside other Azure Monitor data.
+
+## Putting the Tools Together
+
+Network Watcher's tools are most powerful when used in sequence during a troubleshooting investigation. A typical workflow for a VM connectivity problem:
+
+1. **IP Flow Verify** — confirm whether NSG rules allow the traffic. If denied, the rule identified is the fix.
+2. **Next Hop** — if NSG allows it, confirm routing. If the next hop type is `None` or points to the wrong destination, investigate UDRs.
+3. **Effective Security Rules** — review the full ruleset if IP Flow Verify shows an unexpected allow or deny.
+4. **Connection Monitor** — if the issue is intermittent, deploy Connection Monitor to capture latency and packet loss over time.
+5. **Packet Capture** — if layers 3 and 4 look correct but the application still fails, capture packets and inspect the TCP handshake and application payload.
+6. **NSG Flow Logs / Traffic Analytics** — for security and capacity investigations, use flow logs to understand historical traffic patterns and identify unexpected flows.
+
+## Summary
+
+Azure Network Watcher provides a comprehensive diagnostic and monitoring toolkit for Azure network infrastructure. Its diagnostic tools — IP Flow Verify, Next Hop, Effective Security Rules, Connection Monitor, and VPN Diagnostics — address the most common network troubleshooting scenarios with targeted, fast answers. Packet capture enables deep protocol-level analysis without modifying VMs. NSG flow logs and Traffic Analytics provide the network-wide visibility needed to understand traffic patterns, identify security anomalies, and plan capacity. Together, these capabilities give network and cloud administrators the means to investigate, understand, and resolve Azure network issues methodically.

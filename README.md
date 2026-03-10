@@ -27,7 +27,7 @@ A protocol library covering how networking actually works — from the physics o
 ### The Engine Room (`/engine-room/`)
 Vendor-focused platform coverage — what each vendor's technology stack is, why it exists, and how it works conceptually. Organised by vendor rather than function.
 
-**Current coverage — 56 articles (Microsoft):**
+**Current coverage — 91 articles (Microsoft):**
 
 | Topic area | Articles |
 |------------|----------|
@@ -39,6 +39,13 @@ Vendor-focused platform coverage — what each vendor's technology stack is, why
 | Monitoring | Azure Monitor & Log Analytics |
 | M365 Administration | M365 DNS & Domains, M365 Admin Roles, Privileged Identity Management, Administrative Units, Conditional Access, MFA & SSPR, Identity Protection, Entra Password Protection, Microsoft Defender XDR, Microsoft Purview |
 | Modern Endpoint Management | Windows Autopilot, Windows Update for Business, Intune Enrollment, Intune Compliance, Intune App Deployment, Defender Antivirus, BitLocker, Windows Hello for Business, Defender for Endpoint, Endpoint Analytics |
+| Azure Governance & Storage | Subscriptions & Governance, RBAC, Azure Policy, Storage Accounts, Blob Storage, Azure Files, Storage Security |
+| Azure Compute | Virtual Machines, VM Scale Sets, Container Instances & ACR, App Service |
+| Azure Networking | Virtual Networks, Network Security (NSGs & Firewall), Azure DNS, Load Balancing, VPN Gateway & ExpressRoute |
+| Azure Monitoring & DR | Azure Monitor, Application Insights, Network Watcher, Azure Backup & Site Recovery |
+| Windows Client Deployment | Windows Deployment & Activation, Windows Imaging & DISM, Local Accounts & UAC, Device Join Models, NTFS Permissions |
+| Windows Client Security | EFS, Windows Networking, Wireless Networking, Remote Access & VPN, Windows Defender Firewall |
+| Windows Client Management | Group Policy (Client), Windows Recovery Environment, Windows Update (Client), Performance Monitoring, AppLocker |
 
 **Planned vendors (coming soon):** VMware, Linux, Google, Proxmox
 

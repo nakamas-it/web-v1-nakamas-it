@@ -1,0 +1,94 @@
+---
+title: "Azure Storage Accounts — Types, Replication, and Access Tiers"
+category: "microsoft"
+topic: "azure-storage"
+summary: "How Azure Storage accounts work — choosing between Standard and Premium account types, selecting the right data redundancy option from LRS to GZRS, and using access tiers and lifecycle management policies to balance performance against cost."
+tags: ["azure", "storage", "blob", "replication", "access-tiers", "az-104"]
+order: 60
+draft: false
+---
+
+## Overview
+
+An Azure Storage account is the top-level namespace for Azure's managed storage services. It provides a single administrative boundary — one set of credentials, one firewall configuration, one replication setting — under which blobs, files, queues, and tables coexist. Every storage operation, whether reading a VM disk image from a page blob or streaming log entries into an append blob, is routed through a storage account. The choice of account type, redundancy tier, and access tier made at provisioning time determines performance, availability, and cost for everything stored inside.
+
+## Storage Account Types
+
+Azure offers four distinct storage account types, each optimised for a different workload profile:
+
+| Account Type | Supported Services | Performance | Best Use Case |
+|-------------|-------------------|-------------|---------------|
+| **Standard General-Purpose v2 (GPv2)** | Blob, File, Queue, Table | Standard (HDD-backed) | Default choice — supports all services and all replication options |
+| **Premium Block Blobs** | Block blobs and append blobs only | Premium (SSD-backed) | High-transaction, low-latency blob workloads |
+| **Premium File Shares** | Azure Files only | Premium (SSD-backed) | Enterprise SMB/NFS file shares requiring high IOPS |
+| **Premium Page Blobs** | Page blobs only | Premium (SSD-backed) | Unmanaged VM disks and VHD workloads |
+
+Standard GPv2 is the recommended default. It supports all four storage services, all six replication options, and all blob access tiers. Legacy account types — GPv1 and BlobStorage — are superseded by GPv2 and should be upgraded where possible. Premium account types trade replication flexibility for consistent low latency: Premium Block Blobs and Premium Page Blobs only support LRS and ZRS; Premium File Shares support LRS and ZRS as well.
+
+Storage account names must be 3–24 characters, lowercase letters and numbers only, and globally unique across all of Azure — the name becomes part of the storage endpoint hostname.
+
+## Replication Options
+
+Azure Storage replicates data automatically to protect against hardware failures. The six replication options span a spectrum from single-datacenter protection to cross-region resilience with read access to the secondary:
+
+| Option | Copies | Scope | Secondary Read Access |
+|--------|--------|-------|-----------------------|
+| **LRS** (Locally Redundant) | 3 | Single datacenter | No |
+| **ZRS** (Zone Redundant) | 3 | 3 availability zones, same region | No |
+| **GRS** (Geo-Redundant) | 6 | Primary datacenter + secondary region | No (only after failover) |
+| **GZRS** (Geo-Zone Redundant) | 6 | 3 AZs in primary + secondary region | No (only after failover) |
+| **RA-GRS** | 6 | Primary datacenter + secondary region | Yes, always |
+| **RA-GZRS** | 6 | 3 AZs in primary + secondary region | Yes, always |
+
+**LRS** writes three synchronous copies within a single datacenter. It is the least expensive option and provides no protection against datacenter-level failures. Suitable for data that can be easily reconstructed or is not business-critical.
+
+**ZRS** writes synchronously across three availability zones in the same region. A zone failure — an entire datacenter going offline — does not interrupt access. ZRS is the recommended option for high-availability workloads within a single region.
+
+**GRS and GZRS** add asynchronous replication to a Microsoft-paired secondary region, typically hundreds of miles away. The secondary copy is not readable unless a manual account failover is initiated. The replication lag is typically less than 15 minutes, though no formal RPO SLA is guaranteed for the replication lag itself.
+
+**RA-GRS and RA-GZRS** add read access to the secondary endpoint at all times, without requiring a failover. The secondary read endpoint follows the pattern `<accountname>-secondary.<service>.core.windows.net`. This is appropriate for globally distributed read workloads that can tolerate eventually consistent data from the secondary.
+
+## Blob Access Tiers
+
+For blob data stored in Standard GPv2 accounts, Azure provides four access tiers that trade storage cost against retrieval cost and minimum storage duration:
+
+| Tier | Storage Cost | Access Cost | Retrieval Time | Minimum Duration |
+|------|-------------|-------------|----------------|------------------|
+| **Hot** | Highest | Lowest | Immediate | None |
+| **Cool** | Lower | Higher | Immediate | 30 days |
+| **Cold** | Lower still | Higher still | Immediate | 90 days |
+| **Archive** | Lowest | Highest | Hours | 180 days |
+
+**Hot** is designed for data accessed frequently — active application data, recently uploaded files, content serving. **Cool** suits data accessed less than once per month — backups, older media, compliance data that must be retained but is rarely read. **Cold** extends the pattern further for data accessed even less frequently. All three tiers provide immediate access when data is requested.
+
+**Archive** is fundamentally different. An archived blob is offline — it is not stored on spinning media at all. To read it, the blob must first be **rehydrated** back to Hot or Cool tier. Rehydration priority is either Standard (up to 15 hours) or High priority (under 1 hour, at higher cost). Early deletion fees apply if a blob is moved out of Archive before 180 days have elapsed.
+
+The account-level default tier (Hot or Cool) applies to blobs without an explicit tier set. Archive cannot be set as an account-level default — it must be set per blob.
+
+## Lifecycle Management Policies
+
+Lifecycle management policies automate tier transitions and deletion based on blob age and access patterns, eliminating the need for manual monitoring and tier adjustment. Each policy contains rules with two parts: a **filter** (which blobs the rule applies to, based on prefix, blob type, or index tags) and an **action** (what to do when the condition is met).
+
+Common actions include:
+
+- `tierToCool`, `tierToCold`, `tierToArchive` — transition blobs to a lower tier
+- `delete` — permanently delete blobs
+- Snapshot-level equivalents of the above
+
+Conditions are time-based: `daysAfterModificationGreaterThan`, `daysAfterCreationGreaterThan`, `daysAfterLastAccessTimeGreaterThan` (requires last access time tracking to be enabled on the account), and `daysAfterLastTierChangeGreaterThan`. Lifecycle policies are evaluated once daily.
+
+A representative rule might archive blobs that have not been modified in 90 days and delete blobs that have not been accessed in 365 days — all without manual intervention.
+
+## Storage Firewall and Network Access
+
+By default, storage accounts accept traffic from all public networks. The storage firewall restricts this to approved sources:
+
+- **IP firewall rules**: Allow specific public IP address ranges
+- **Service endpoints**: Add the storage service endpoint to an Azure VNet subnet; add the subnet to the storage account's network rules. Traffic routes over the Microsoft backbone rather than the public internet.
+- **Private endpoints**: Deploy a private NIC with a private IP address in a VNet for the storage account. All access flows over the VNet's private address space. Requires a private DNS zone (`privatelink.blob.core.windows.net` for blobs, with equivalents for other services).
+
+Service endpoints and private endpoints serve different needs. Service endpoints keep traffic on the Microsoft backbone but the storage account still has a public endpoint. Private endpoints remove the public endpoint entirely from the access path, providing the strongest network isolation.
+
+## Summary
+
+Azure Storage accounts are the foundational resource for durable storage in Azure. Choosing between Standard GPv2 and the Premium account types determines the performance tier and which services are available. The six replication options provide a graduated spectrum of redundancy — from single-datacenter LRS to cross-region, always-readable RA-GZRS — with cost and RPO tradeoffs at each step. Blob access tiers and lifecycle management policies are the primary cost optimisation levers, automatically moving data from expensive high-access tiers to low-cost archive storage as it ages. Combined with the storage firewall and endpoint controls, these settings give administrators precise control over both the economics and the security posture of stored data.

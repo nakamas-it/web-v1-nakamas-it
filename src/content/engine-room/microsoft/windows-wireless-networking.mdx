@@ -1,0 +1,110 @@
+---
+title: "Windows Wireless — 802.11 Standards, WPA3, and Wireless Profiles"
+category: "microsoft"
+topic: "windows-wireless"
+summary: "How Windows manages wireless network connections — the 802.11 standards from a to ax and their frequency and throughput characteristics, the WPA2/WPA3 security modes, how wireless profiles are created and prioritised, and the netsh wlan commands used to manage wireless connections from the command line."
+tags: ["windows", "wireless", "wifi", "wpa3", "802.11", "md-100"]
+order: 84
+draft: false
+---
+
+## Overview
+
+Wireless networking on Windows is managed through the same network stack as wired Ethernet, but with an additional layer of radio management, security negotiation, and profile-based connection preference. Windows stores the configuration for every network a device has connected to as a wireless profile — an XML document containing the SSID, security type, authentication method, and optionally the passphrase in encrypted form. These profiles allow Windows to automatically reconnect to known networks in priority order without user interaction.
+
+For administrators, understanding the 802.11 standards and their frequency characteristics is necessary for diagnosing performance issues and advising on hardware selection. Understanding the wireless security standards is essential for configuring corporate networks correctly and for the MD-100 exam.
+
+---
+
+## 802.11 Standards
+
+The IEEE 802.11 family of standards defines wireless LAN operation. Each generation has increased throughput and in many cases changed the supported frequency bands:
+
+| Standard | Common Name | Frequency | Maximum Throughput | Year |
+|---|---|---|---|---|
+| 802.11a | — | 5 GHz | 54 Mbps | 1999 |
+| 802.11b | — | 2.4 GHz | 11 Mbps | 1999 |
+| 802.11g | — | 2.4 GHz | 54 Mbps | 2003 |
+| 802.11n | Wi-Fi 4 | 2.4 GHz and 5 GHz | Up to 600 Mbps | 2009 |
+| 802.11ac | Wi-Fi 5 | 5 GHz only | Up to ~3.5 Gbps | 2013 |
+| 802.11ax | Wi-Fi 6 / Wi-Fi 6E | 2.4, 5, and 6 GHz | Up to ~9.6 Gbps | 2019 / 2021 |
+
+The 2.4 GHz band has longer range and better wall penetration but provides fewer non-overlapping channels (three in most regions: 1, 6, and 11) and is more congested due to legacy device support and overlap with microwave ovens and Bluetooth. The 5 GHz band offers more channels and is less congested but has shorter range. The 6 GHz band (Wi-Fi 6E) is the newest addition and provides the cleanest spectrum with no legacy devices — but requires Wi-Fi 6E-capable hardware on both the access point and client.
+
+802.11n introduced **MIMO (Multiple Input Multiple Output)**, using multiple antennas to transmit and receive simultaneously, significantly increasing throughput over previous generations. 802.11ac added **MU-MIMO** (Multi-User MIMO), allowing the access point to serve multiple clients simultaneously rather than sequentially. 802.11ax introduced **OFDMA (Orthogonal Frequency Division Multiple Access)** and **TWT (Target Wake Time)**, the latter allowing IoT devices to schedule their radio wakeup times and sleep the rest of the time to conserve battery.
+
+---
+
+## Wireless Security Standards
+
+Wireless security has evolved substantially from the broken WEP standard to the current WPA3:
+
+| Standard | Authentication | Encryption | Status |
+|---|---|---|---|
+| WEP | Pre-shared key | RC4 (broken) | Deprecated — never use |
+| WPA | PSK or 802.1X | TKIP (RC4-based) | Deprecated |
+| WPA2-Personal | Pre-shared key (passphrase) | AES-CCMP | Suitable for home and small business |
+| WPA2-Enterprise | 802.1X with RADIUS | AES-CCMP | Required for corporate environments |
+| WPA3-Personal | SAE (Simultaneous Authentication of Equals) | AES-GCMP-256 | Current standard for personal networks |
+| WPA3-Enterprise | 802.1X with RADIUS | AES-GCMP-256 (192-bit mode) | Current standard for corporate environments |
+
+**WPA2-Personal** uses a shared passphrase (PSK) that is the same for all clients on the network. If the passphrase is captured in a handshake and an attacker performs an offline dictionary attack, all traffic from devices using that passphrase can potentially be decrypted. This is acceptable for home use but insufficient for corporate environments because there is no per-user credential — if a user leaves the organisation, the entire passphrase must be rotated for all devices.
+
+**WPA2-Enterprise** uses **802.1X** with a RADIUS server for authentication. Each user or device authenticates individually using EAP methods such as PEAP (with username and password) or EAP-TLS (with certificates). This provides per-user authentication, granular access control, and the ability to revoke an individual user's access without changing credentials for everyone. This is the required configuration for any corporate wireless network.
+
+**WPA3-Personal** replaces the PSK mechanism with **SAE (Simultaneous Authentication of Equals)**, also called Dragonfly. SAE is resistant to offline dictionary attacks because the authentication is interactive — an attacker cannot capture a handshake and brute-force it offline. WPA3-Personal also provides **forward secrecy**: each session uses a unique encryption key, so capturing past traffic and later obtaining the passphrase does not allow decryption of previously captured sessions.
+
+---
+
+## Wireless Profiles
+
+Each time a Windows device connects to a wireless network, it creates a wireless profile storing the connection parameters. Profiles are stored locally and persist across reboots.
+
+When Windows is in range of multiple known networks, it connects to the network with the highest profile priority. Profiles are ordered by preference, with priority 1 being the highest. This ordering can be important when a device roams between sites — a corporate SSID should take higher priority than a guest SSID to ensure domain connectivity is preferred.
+
+---
+
+## Managing Wireless Profiles with `netsh wlan`
+
+The `netsh wlan` context provides complete command-line management of wireless profiles, replacing what would otherwise require navigating GUI menus:
+
+| Command | Purpose |
+|---|---|
+| `netsh wlan show profiles` | List all saved wireless profiles on the device |
+| `netsh wlan show profile name="SSID" key=clear` | Show full profile details including the passphrase in plaintext — requires administrator rights |
+| `netsh wlan export profile name="SSID" folder=C:\` | Export a wireless profile to an XML file for backup or deployment |
+| `netsh wlan add profile filename=wifi.xml` | Import a wireless profile from an XML file |
+| `netsh wlan delete profile name="SSID"` | Remove a saved wireless profile |
+| `netsh wlan connect name="SSID"` | Connect to a saved wireless profile |
+| `netsh wlan disconnect` | Disconnect from the current wireless network |
+| `netsh wlan set profileorder name="SSID" interface="Wi-Fi" priority=1` | Set the connection priority for a profile |
+
+Exporting and importing profiles via XML is the standard method for deploying wireless configurations to many devices. In a managed environment this is typically handled by Group Policy (Wireless Network Policies) or Intune (Wi-Fi device configuration profiles), but the `netsh wlan` approach is useful for manual deployment or troubleshooting.
+
+---
+
+## Hidden SSIDs
+
+An access point can be configured to not broadcast its SSID in beacon frames — this is sometimes called a hidden SSID or a non-broadcasting network. Clients must already know the network name and configure the connection manually by typing the SSID.
+
+Hidden SSIDs provide minimal security benefit. While a passive observer cannot discover the network from beacon frames alone, the SSID becomes visible in the probe request frames that Windows clients send when actively scanning for the network. Any wireless capture tool can see the SSID in probe requests. The only meaningful effect is that unsophisticated attackers cannot trivially discover the network.
+
+When Windows connects to a hidden SSID, the wireless profile is created with a non-broadcasting flag. Windows then actively probes for the SSID name rather than waiting for a beacon — which can slightly increase connection time and reveals the SSID in wireless captures.
+
+---
+
+## Wireless Group Policy
+
+In a domain environment, wireless network profiles and security settings can be deployed centrally via Group Policy rather than configuring each machine individually. The relevant policy location is:
+
+**Computer Configuration > Windows Settings > Security Settings > Wireless Network (IEEE 802.11) Policies**
+
+From here, administrators can create wireless network policies that define which SSIDs clients should connect to, the required security settings, and whether clients are permitted to connect to networks not defined in policy. This prevents users from connecting corporate devices to unauthorised or insecure wireless networks.
+
+For Intune-managed devices outside a domain, the equivalent is a Wi-Fi device configuration profile in the Intune admin centre, which deploys the same information via MDM.
+
+---
+
+## Summary
+
+Windows wireless networking is governed by stored profiles that define SSID, security type, and authentication credentials for each known network. The 802.11 standard in use determines throughput ceilings and frequency band behaviour — 5 GHz provides more channels and less congestion at the cost of range, while 2.4 GHz reaches further but is more congested. WPA2-Enterprise with 802.1X and RADIUS authentication is the required configuration for corporate environments, providing per-user credentials and the ability to revoke access individually. The `netsh wlan` command set provides complete command-line profile management, from listing and exporting profiles to setting connection priority order.

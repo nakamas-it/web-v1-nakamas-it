@@ -1,0 +1,151 @@
+---
+title: "Windows Defender Firewall — Profiles, Rules, and Connection Security"
+category: "microsoft"
+topic: "windows-firewall"
+summary: "How Windows Defender Firewall controls inbound and outbound network traffic through a profile-based rule system — applying different rule sets depending on whether the device is on a domain, private, or public network — and how connection security rules use IPsec to authenticate and encrypt traffic between specific endpoints."
+tags: ["windows", "firewall", "network-security", "connection-security", "md-100"]
+order: 86
+draft: false
+---
+
+## Overview
+
+Windows Defender Firewall is the host-based stateful packet filter built into every edition of Windows 10 and 11. It controls which network traffic is permitted to reach applications and services on the device, operating independently of any external network firewall. The host firewall provides a last line of defence: even if traffic passes through perimeter security controls, the host firewall determines whether that traffic can reach a specific application.
+
+The firewall is profile-based. Windows automatically detects the type of network the device is connected to and applies a corresponding set of rules. This allows the same device to have different effective security postures depending on whether it is connected to a trusted corporate domain, a home network, or an untrusted public network — without any manual intervention from the user.
+
+Windows Defender Firewall with Advanced Security (`wf.msc`) is the full management interface. The Windows Security app provides a simplified view suitable for end users. Group Policy and PowerShell provide centralised and scriptable management.
+
+---
+
+## Network Profiles
+
+Windows Defender Firewall maintains three profiles simultaneously. Each adapter is associated with exactly one profile at any point in time, and all three sets of rules are always loaded — only the rules for the active profile on each adapter are applied to traffic entering or leaving through that adapter.
+
+**Domain profile** is applied automatically when Windows detects that the connected network provides access to a domain controller for the machine's domain. This detection is performed by the Network Location Awareness (NLA) service, which queries the domain during the network connection process. Because the domain controller's presence is used as a signal of a trusted corporate network, the Domain profile typically carries the most permissive rules — for example, allowing inbound file and printer sharing, WMI queries, and WinRM connections that would be inappropriate on public networks.
+
+**Private profile** is applied when the user designates a network as private. This is appropriate for home networks and small-office networks where the connected devices are known and trusted. The Private profile allows more inbound traffic than Public but less than Domain.
+
+**Public profile** is the default for any new network connection that has not been explicitly designated. It is the most restrictive profile and blocks most inbound connection attempts. This is correct behaviour for coffee shops, hotel networks, and any environment where other connected machines cannot be trusted.
+
+On a multi-homed machine — a server with multiple network adapters connected to different networks — each adapter independently holds its own profile. It is valid and common for the Domain profile to be active on an internal adapter while the Public profile is active on a perimeter or DMZ-facing adapter simultaneously.
+
+---
+
+## Firewall Rule Types
+
+Windows Defender Firewall processes two categories of rules:
+
+**Inbound rules** control traffic arriving at the device. The default behaviour for inbound traffic is to block anything that does not match an explicit allow rule. This default-deny-inbound posture means that any service that needs to accept inbound connections — a web server, a file share, an RDP listener — requires an explicit allow rule.
+
+**Outbound rules** control traffic leaving the device. The default behaviour for outbound traffic is to allow everything that does not match an explicit block rule. This default-allow-outbound posture reflects that most client workstations initiate connections to servers rather than accepting them, and blocking outbound traffic by default would break normal browser, update, and application behaviour.
+
+Rules are evaluated in order of specificity. An explicit block rule takes precedence over an explicit allow rule for the same traffic. If no matching rule exists, the default action for that traffic direction and profile applies.
+
+---
+
+## Rule Properties
+
+Each firewall rule can be configured with the following properties, allowing highly granular control:
+
+| Property | Description |
+|---|---|
+| Program | Path to the executable that must be the source or destination of the traffic |
+| Protocol | TCP, UDP, ICMPv4, ICMPv6, or any |
+| Local port | The port on this device |
+| Remote port | The port on the remote device |
+| Local IP address | Restrict to traffic arriving at or leaving from specific local IPs |
+| Remote IP address | Restrict to traffic from or to specific remote IPs or subnets |
+| Interface type | LAN, wireless, or remote access (VPN) — apply rule only on specific adapter types |
+| Profile | Domain, Private, Public — apply rule only on specific profiles |
+| Users | Apply rule only to traffic associated with specific domain user accounts |
+| Computers | Apply rule only to traffic from specific domain computers |
+
+The Users and Computers conditions require the firewall to work with IPsec authentication to identify the account associated with a connection — they are most useful in combination with connection security rules.
+
+---
+
+## Pre-Defined and Built-in Rules
+
+Windows ships with a large set of pre-defined rules for common Windows services and features. These rules exist in the firewall but are disabled by default; they are automatically enabled when the corresponding Windows feature is turned on.
+
+Examples of pre-defined rule groups:
+- **File and Printer Sharing** — SMB (TCP 445), NetBIOS (UDP 137, 138, TCP 139)
+- **Remote Desktop** — TCP 3389 inbound (Domain and Private profiles)
+- **Windows Management Instrumentation (WMI)** — DCOM and WMI service ports
+- **Windows Remote Management** — TCP 5985 (HTTP) and 5986 (HTTPS)
+- **Network Discovery** — SSDP, WS-Discovery, LLMNR, NetBIOS
+
+When a Windows feature is disabled, its pre-defined firewall rules are automatically disabled as well, reducing the attack surface without requiring manual rule management.
+
+---
+
+## Configuring Rules
+
+**GUI (`wf.msc`)**: Windows Defender Firewall with Advanced Security provides the full rule management interface. The New Rule Wizard walks through rule type, program or port, protocol and ports, scope, action, profile, and name. Rules can be sorted, filtered, and exported.
+
+**`netsh advfirewall` (command line)**:
+
+```
+netsh advfirewall show allprofiles
+netsh advfirewall firewall add rule name="Allow RDP" dir=in action=allow protocol=tcp localport=3389 profile=domain,private
+netsh advfirewall firewall add rule name="Block Telnet" dir=in action=block protocol=tcp localport=23
+netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound
+```
+
+**PowerShell**:
+
+```
+New-NetFirewallRule -DisplayName "Allow RDP" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -Profile Domain,Private
+Get-NetFirewallRule -DisplayName "Allow RDP"
+Set-NetFirewallRule -DisplayName "Allow RDP" -Enabled False
+Remove-NetFirewallRule -DisplayName "Allow RDP"
+```
+
+PowerShell cmdlets provide tab-completion, pipeline support, and the ability to script complex rule sets for deployment.
+
+---
+
+## Connection Security Rules
+
+Connection security rules are distinct from the standard inbound and outbound firewall rules. They do not control whether traffic is allowed or blocked — regular firewall rules do that. Instead, connection security rules use **IPsec** to authenticate the parties involved in a connection and optionally encrypt the traffic.
+
+The key distinction is that a connection security rule requiring authentication does not block unauthenticated traffic by itself. A regular firewall rule must also be configured to block traffic that is not IPsec-authenticated. Both layers must be aligned for the configuration to enforce authentication.
+
+| Connection Security Rule Type | Purpose |
+|---|---|
+| Isolation | Require authenticated connections from domain members; block unauthenticated machines |
+| Authentication Exemption | Exclude specific hosts from IPsec requirements — typically used for DCs and DHCP servers |
+| Server-to-Server | Authenticate all traffic between two specific machines or subnets |
+| Tunnel | Create an IPsec site-to-site tunnel between gateway machines |
+| Custom | Define all IPsec parameters manually |
+
+Connection security rules are configured in `wf.msc` under the Connection Security Rules node, or via `New-NetIPsecRule` in PowerShell. They are commonly used in environments that implement server isolation — a security design where servers only accept connections from domain-joined, authenticated machines, preventing rogue or compromised endpoints from reaching sensitive servers even if they are on the same network segment.
+
+---
+
+## Firewall Logging
+
+Windows Defender Firewall can log dropped packets and successful connections for auditing and troubleshooting purposes. Logging is configured per-profile in the firewall properties (right-click "Windows Defender Firewall with Advanced Security" in `wf.msc` > Properties > select profile tab > Logging).
+
+The default log location is `%SystemRoot%\System32\LogFiles\Firewall\pfirewall.log`. The log records the date, time, action (allow or drop), protocol, source IP, destination IP, source port, and destination port for each logged connection. The log file is in W3C format and can be parsed by log analysis tools.
+
+Logging is disabled by default for performance reasons. It should be enabled selectively when diagnosing connectivity issues — for example, to confirm whether a firewall rule is dropping traffic that should be permitted.
+
+---
+
+## Group Policy Management
+
+In a domain environment, Windows Defender Firewall rules and settings are deployed centrally via Group Policy, replacing any locally configured rules with policy-defined rules for managed machines.
+
+The relevant GPO path is: **Computer Configuration > Windows Settings > Security Settings > Windows Defender Firewall with Advanced Security**
+
+From here, administrators can define inbound rules, outbound rules, connection security rules, and per-profile default settings (firewall state, default inbound and outbound actions, logging configuration). Rules deployed via GPO take precedence over locally created rules by default, though the "Allow local firewall rules" setting in the profile properties controls whether locally created rules are merged with policy rules or overridden by them.
+
+For Intune-managed devices, equivalent configuration is available through Endpoint Security > Firewall in the Intune admin centre, which deploys firewall rules via MDM using the Windows Firewall CSP.
+
+---
+
+## Summary
+
+Windows Defender Firewall applies profile-appropriate rules automatically based on network type: Domain for corporate networks, Private for trusted home or small-office networks, and Public (most restrictive) as the default for unknown networks. The default posture — block inbound, allow outbound — means inbound access requires explicit allow rules, while outbound blocking requires explicit block rules. Connection security rules add IPsec authentication and encryption between specific endpoints but must be paired with matching firewall rules to enforce authentication requirements. Centralised management via Group Policy or Intune ensures consistent firewall configuration across all managed devices without relying on per-device local configuration.

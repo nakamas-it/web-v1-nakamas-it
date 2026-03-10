@@ -1,0 +1,97 @@
+---
+title: "Azure Virtual Networks — Subnets, Peering, and Private Connectivity"
+category: "microsoft"
+topic: "azure-vnets"
+summary: "How Azure Virtual Networks provide isolated private network space for Azure resources — covering address space planning, subnet design, service endpoints versus private endpoints for PaaS connectivity, and VNet peering for connecting networks across regions."
+tags: ["azure", "vnet", "subnets", "vnet-peering", "private-endpoints", "az-104"]
+order: 68
+draft: false
+---
+
+## Overview
+
+An Azure Virtual Network (VNet) is a software-defined private network that provides isolation, segmentation, and routing for Azure resources. Every VM, managed service with VNet integration, and private endpoint exists within a VNet. Unlike on-premises networks where routing hardware dictates what can communicate with what, a VNet is a logical construct defined entirely in software — you specify address ranges, subnets, and routing policies as configuration objects, and Azure enforces them at the hypervisor level. This article covers the structural elements of a VNet, how to connect Azure PaaS services into a VNet securely, and how to extend connectivity between VNets using peering.
+
+## VNet Fundamentals
+
+A VNet is scoped to a single Azure region. It cannot span regions — a VNet in East US is a separate network from one in West Europe, even if they share the same subscription. Within a region, a VNet can span all availability zones, so VM NICs in zone 1, 2, and 3 can all belong to the same VNet and subnet.
+
+**Address space** is defined using CIDR notation. A VNet can have multiple address ranges — for example, `10.0.0.0/16` and `192.168.0.0/24` — as long as the ranges do not overlap with each other, with peered VNets, or with on-premises networks connected via VPN or ExpressRoute. RFC 1918 private ranges are strongly recommended; using public IP ranges in a VNet creates routing ambiguity.
+
+Address ranges can be added to a VNet after creation. Shrinking or removing a range that is already in use by a subnet is not permitted.
+
+## Subnets
+
+A subnet is a subdivision of the VNet address space. Each subnet represents a logical segment that can be associated with separate NSG rules, route tables, and service delegations. Subnets allow you to enforce different security policies on different tiers of an application — for example, a web subnet with an NSG allowing port 443 from the internet, an application subnet allowing traffic only from the web subnet, and a database subnet allowing traffic only from the application subnet.
+
+Azure reserves five IP addresses in every subnet regardless of size:
+
+| Reserved Address | Purpose |
+|-----------------|---------|
+| x.x.x.0 | Network address |
+| x.x.x.1 | Default gateway (Azure reserved) |
+| x.x.x.2 | Azure DNS mapping |
+| x.x.x.3 | Azure DNS mapping |
+| x.x.x.255 | Broadcast address |
+
+A `/29` subnet yields 8 addresses total and 3 usable host addresses — the practical minimum for most purposes. When sizing subnets, plan for future growth and for Azure-reserved resources: Application Gateway requires its own subnet and consumes multiple IPs per instance, Azure Bastion requires a `/26` minimum, and VPN Gateway requires a dedicated `GatewaySubnet`.
+
+## System Routes
+
+Azure automatically installs system routes in every subnet routing table. These cover three fundamental traffic flows without any manual configuration:
+
+- **Within the VNet**: Traffic between subnets in the same VNet is routed automatically. No gateway or NAT is involved.
+- **To peered VNets**: When VNet peering is configured, system routes for the peered VNet's address space are injected automatically.
+- **To the internet**: Azure VMs with a public IP or a NAT Gateway can reach the internet via the `0.0.0.0/0` system route pointing to the internet.
+
+System routes cannot be deleted, but they can be overridden by user-defined routes with more specific prefixes.
+
+## User-Defined Routes
+
+A route table is a resource containing custom routing rules that override system routes. You associate a route table with one or more subnets. Common uses:
+
+**Routing through a Network Virtual Appliance (NVA)**: If you have an Azure Firewall or a third-party firewall VM, you can force all internet-bound traffic through it by creating a UDR with destination `0.0.0.0/0` and next hop set to the firewall's private IP. Without this UDR, VMs bypass the firewall and route directly to the internet via the system route.
+
+**Forced tunneling**: A UDR with `0.0.0.0/0` pointing to a VPN Gateway sends all internet-bound traffic back to on-premises, where it can be inspected by corporate security controls before exiting.
+
+Note: The `GatewaySubnet` itself cannot have a UDR applied — doing so breaks VPN gateway functionality.
+
+## Service Endpoints
+
+A service endpoint extends your VNet's private identity to a specific Azure PaaS service. When you enable a service endpoint on a subnet (for example, `Microsoft.Storage`), Azure configures the subnet's routing so that traffic to that service leaves via the Microsoft backbone rather than the public internet. The PaaS service then sees the VNet's private IP address range as the source, allowing you to configure the service's firewall to accept traffic only from that subnet.
+
+Service endpoints are straightforward to configure: enable the endpoint type on the subnet, then add the subnet to the PaaS service's firewall rules. The important caveat is that the PaaS service still has a public endpoint — you are not removing it, you are controlling who can reach it. Traffic from on-premises does not benefit from service endpoints unless it enters Azure through a VPN or ExpressRoute.
+
+## Private Endpoints
+
+A private endpoint creates a network interface with a private IP address from your subnet and connects that NIC directly to a specific PaaS resource instance. From the VNet's perspective, the PaaS service behaves like any other resource with a private IP. Traffic to the private endpoint stays entirely within the VNet and the Azure backbone — it never reaches the service's public endpoint.
+
+The key operational requirement of private endpoints is DNS. The service's public FQDN (for example, `myaccount.blob.core.windows.net`) must resolve to the private endpoint's IP rather than the public IP. Azure creates private DNS zones for each service type (`privatelink.blob.core.windows.net`, `privatelink.database.windows.net`, `privatelink.vaultcore.azure.net`, etc.) that return the private IP for linked VNets. If you manage your own DNS or have on-premises clients that need to resolve private endpoint names, you must ensure those DNS resolvers either host or forward to the appropriate private DNS zone.
+
+| Comparison | Service Endpoints | Private Endpoints |
+|------------|-------------------|-------------------|
+| PaaS public endpoint | Still exists; firewall rules restrict access | Can be disabled entirely |
+| Private IP in VNet | No | Yes |
+| DNS change required | No | Yes (private DNS zone) |
+| On-premises access | No (VPN/ER traffic not covered) | Yes (if DNS is configured) |
+| Cost | Free | Per-hour NIC charge + data processing |
+
+## VNet Peering
+
+VNet peering connects two VNets so that resources in each can communicate using private IP addresses, with traffic routed over the Microsoft backbone rather than the public internet. Peering is configured as two separate peering links — one on each VNet — and both must be created for the connection to be active.
+
+**Local peering** connects VNets in the same region. **Global peering** connects VNets in different regions. Both provide low-latency, high-bandwidth connectivity without encryption overhead (traffic stays on Microsoft's private backbone).
+
+The critical characteristic of VNet peering is that it is **non-transitive**. If VNet A is peered with VNet B, and VNet B is peered with VNet C, resources in VNet A cannot by default reach resources in VNet C through VNet B. Each pair of VNets that needs to communicate must have its own peering link, or you must use a hub-and-spoke design with an NVA or Azure Firewall that explicitly routes and forwards traffic between spoke VNets.
+
+**Gateway transit** is an exception to the non-transitive rule for on-premises connectivity. If a hub VNet has a VPN Gateway or ExpressRoute Gateway, spoke VNets peered to the hub can use the hub's gateway to reach on-premises networks. The peering from hub to spoke must have "Allow gateway transit" enabled, and the peering from spoke to hub must have "Use remote gateways" enabled. This allows many spoke VNets to share a single gateway in the hub without requiring a gateway in every spoke.
+
+## Forced Tunneling
+
+Forced tunneling is the pattern of routing all internet-bound traffic from Azure VMs through an on-premises network or firewall, rather than letting VMs reach the internet directly. This is implemented via a UDR on each subnet with a `0.0.0.0/0` route pointing to a VPN Gateway or NVA. Traffic reaches the on-premises network through the VPN tunnel, exits through the corporate internet breakout, and returns the same way.
+
+Forced tunneling is common in regulated industries where compliance mandates that all internet traffic pass through corporate inspection and logging infrastructure. The tradeoff is increased latency for any internet-bound traffic and dependency on the VPN tunnel's availability for internet access.
+
+## Summary
+
+Azure VNets provide the isolation boundary for all Azure network traffic. Subnet design determines the granularity of security policy enforcement, and the five reserved IPs per subnet are a constant to factor into address planning. Service endpoints and private endpoints both solve the problem of connecting to PaaS services securely, but private endpoints go further by removing the public attack surface entirely at the cost of a DNS configuration requirement. VNet peering connects networks at low latency across regions, but its non-transitive nature means large multi-VNet environments require deliberate hub-and-spoke topology design to avoid a combinatorial explosion of peering links.

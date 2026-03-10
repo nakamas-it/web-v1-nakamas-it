@@ -1,0 +1,84 @@
+---
+title: "Azure RBAC — Role-Based Access Control for Resources"
+category: "microsoft"
+topic: "azure-rbac"
+summary: "How Azure RBAC assigns permissions to identities at a specific scope — distinguishing Azure resource roles from Entra ID directory roles, how role assignments work, what the key built-in roles cover, and when to create custom roles."
+tags: ["azure", "rbac", "roles", "access-control", "az-104"]
+order: 58
+draft: false
+---
+
+## Overview
+
+Azure Role-Based Access Control (RBAC) is the authorisation system that governs who can do what with Azure resources. It operates on a simple model: assign a role to a security principal at a specific scope, and that principal gains the permissions defined by the role at that scope and all child scopes below it. Understanding RBAC is inseparable from understanding what it is not — Azure RBAC controls the resource plane, while Entra ID roles govern the directory plane. The two systems are parallel and separate.
+
+## Azure RBAC vs Entra ID Roles
+
+This distinction causes persistent confusion. **Azure RBAC** controls operations on Azure resources — creating virtual machines, reading storage accounts, managing virtual networks. **Entra ID roles** control directory objects — managing users, groups, applications, and Entra ID-specific settings like conditional access policies.
+
+A user can be a Global Administrator in Entra ID (full directory control) and have no Azure RBAC permissions at all, meaning they cannot create or view any Azure resources. Conversely, a user can be a Contributor on an Azure subscription and have no Entra ID role, meaning they can deploy resources but cannot manage directory identities. The two planes are independent, and assigning a role in one has no effect on the other.
+
+## Role Assignment Structure
+
+Every RBAC permission grant consists of three components:
+
+- **Security principal**: The identity receiving the permission — a user, a group, a service principal, or a managed identity. Assigning roles to groups rather than individual users is the recommended practice for maintainability.
+- **Role definition**: The set of allowed and denied operations. Built-in role definitions are managed by Microsoft; custom role definitions can be created per tenant.
+- **Scope**: The Azure resource boundary at which the assignment takes effect. The scope hierarchy from broadest to narrowest is: Management Group → Subscription → Resource Group → Resource.
+
+A role assigned at a broader scope automatically applies to all child scopes. A Contributor assignment at the subscription level grants Contributor permissions across every resource group and resource in that subscription.
+
+## Built-in Roles
+
+Microsoft provides hundreds of built-in roles. The four fundamental roles apply across all resource types:
+
+| Role | Permissions |
+|------|-------------|
+| **Owner** | Full control over resources, including the right to assign RBAC roles to others |
+| **Contributor** | Create and manage all resources; cannot grant access to others |
+| **Reader** | View resources and their configuration; no write access |
+| **User Access Administrator** | Manage user access to Azure resources; cannot perform resource operations |
+
+Beyond these, service-specific built-in roles scope permissions to a single service:
+
+| Role | Scope |
+|------|-------|
+| **Virtual Machine Contributor** | Manage VMs but not the VNet or storage account they depend on |
+| **Storage Blob Data Contributor** | Read, write, and delete blob containers and data |
+| **Key Vault Secrets Officer** | Perform any action on secrets, excluding management plane operations |
+| **Network Contributor** | Manage all networking resources |
+
+The distinction between roles like **Storage Blob Data Contributor** (DataActions) and **Storage Account Contributor** (Actions) matters: one controls access to the data inside the account, the other controls the management of the storage account resource itself.
+
+## Actions, NotActions, DataActions, and NotDataActions
+
+Role definitions contain four permission arrays:
+
+| Field | Meaning |
+|-------|---------|
+| **Actions** | Control plane operations permitted — ARM resource management |
+| **NotActions** | Operations subtracted from Actions — not a true deny |
+| **DataActions** | Data plane operations permitted — reading/writing data within a resource |
+| **NotDataActions** | Operations subtracted from DataActions — not a true deny |
+
+`NotActions` and `NotDataActions` do not create deny assignments. They merely subtract from the permissions granted by `Actions` and `DataActions`. If another role assignment grants the subtracted operation, the principal can still perform it. True denials come only from deny assignments, which override everything.
+
+## Role Assignment Evaluation
+
+Azure RBAC uses an additive model: a principal's effective permissions are the union of all role assignments across all scopes that apply to them. There is no role precedence — Reader at the subscription level plus Contributor on a specific resource group means the principal has read access everywhere and full contributor access within that resource group.
+
+**Deny assignments** are the exception. They explicitly block specific operations regardless of what any role assignment grants. A deny assignment wins over everything. Critically, deny assignments cannot be created directly by users — they are only created by Azure Blueprints and Azure Managed Applications as part of their managed resource protection model.
+
+## Custom Roles
+
+When no built-in role provides the right permission set, administrators can define custom roles. Custom roles are scoped to a tenant and can be assigned at the same scopes as built-in roles. Each tenant supports up to **5,000 custom role definitions**.
+
+Custom roles are defined in JSON and contain the same four permission arrays as built-in roles, plus an `AssignableScopes` array that specifies where the role can be assigned. A common workflow is to export an existing built-in role as JSON using `Get-AzRoleDefinition | ConvertTo-Json`, modify the permissions and name, and create the new role with `New-AzRoleDefinition`. Custom roles can be managed through the portal, PowerShell, Azure CLI, or the REST API.
+
+## Effective Permissions
+
+A principal's effective permissions at any point are the union of all role assignments that apply — either directly or through group membership — at the resource scope and all parent scopes, **minus** any operations blocked by deny assignments. Deny assignments, when they exist, take absolute precedence over any role grants. This makes the evaluation model predictable: start with the union of all grants, subtract the deny assignments, and the result is what the identity can actually do.
+
+## Summary
+
+Azure RBAC is the access control layer for the Azure resource plane, separate from and parallel to Entra ID's directory roles. Role assignments combine a security principal, a role definition, and a scope to produce inherited, additive permissions. The four fundamental built-in roles — Owner, Contributor, Reader, and User Access Administrator — cover most administrative scenarios, with service-specific roles and custom role definitions handling the remainder. Deny assignments, exclusively created by Azure-managed services, provide the only mechanism for true permission overrides, making the additive model straightforward to reason about in practice.

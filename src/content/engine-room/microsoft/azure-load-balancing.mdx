@@ -1,0 +1,118 @@
+---
+title: "Azure Load Balancing — Load Balancer, Application Gateway, Traffic Manager, and Front Door"
+category: "microsoft"
+topic: "azure-load-balancing"
+summary: "How Azure's four load-balancing services split traffic across backends — from the regional L4 Azure Load Balancer for TCP/UDP workloads, to the L7 Application Gateway for HTTP routing and WAF, to the global Traffic Manager for DNS-based routing, and Azure Front Door for global HTTP acceleration with caching and WAF."
+tags: ["azure", "load-balancer", "application-gateway", "traffic-manager", "front-door", "az-104"]
+order: 71
+draft: false
+---
+
+## Overview
+
+Azure provides four distinct load-balancing services, each targeting a different combination of scope (regional vs. global) and protocol layer (L4 TCP/UDP vs. L7 HTTP/HTTPS). Choosing the wrong service for a workload creates either unnecessary cost and complexity or gaps in capability. The decision framework maps cleanly along two axes: whether you need to load-balance within a single region or across multiple regions, and whether the traffic is generic TCP/UDP or HTTP/HTTPS that benefits from application-layer inspection. This article covers each service, its architecture, and the scenarios that make it the appropriate choice.
+
+## Decision Framework
+
+| | Regional | Global |
+|-|----------|--------|
+| **L4 (TCP/UDP)** | Azure Load Balancer | Azure Traffic Manager (DNS-based) |
+| **L7 (HTTP/HTTPS)** | Application Gateway | Azure Front Door |
+
+Traffic Manager occupies an unusual position: it is DNS-based and therefore global, but it does not proxy any application traffic — it only returns DNS answers that steer clients to the appropriate endpoint. Front Door is the true global L7 service that proxies HTTP/HTTPS through Microsoft's edge PoP network.
+
+## Azure Load Balancer
+
+Azure Load Balancer is a regional Layer 4 service. It distributes TCP and UDP flows across a backend pool of VMs or Virtual Machine Scale Set instances within the same region. The forwarding decision is based on a 5-tuple hash (source IP, source port, destination IP, destination port, protocol), which distributes connections across backends without any application-layer inspection.
+
+**SKU comparison:**
+
+| Feature | Basic | Standard |
+|---------|-------|---------|
+| SLA | None | 99.99% |
+| Backend pool scope | VMs in same availability set or VMSS | Any VM or VMSS in the same VNet |
+| Zone redundancy | No | Yes (zone-redundant frontend IP) |
+| Health probe protocols | HTTP, TCP | HTTP, HTTPS, TCP |
+| Outbound rules | No | Yes |
+| Multiple frontends | Limited | Yes |
+| Retirement | September 2025 | Current standard |
+
+The Basic SKU is retired and should not be used for new deployments. Standard Load Balancer is the only supported option and provides a 99.99% SLA with zone-redundant frontend IPs.
+
+**Components:**
+
+- **Frontend IP**: The entry point for traffic. Can be a public IP (internet-facing) or a private IP from a VNet subnet (internal load balancer). An internal load balancer is used for distributing traffic between tiers within the same VNet — for example, between a web tier and an application tier.
+- **Backend pool**: The set of VM NICs or VMSS instances that receive traffic. Standard Load Balancer accepts any VM or VMSS within the same VNet, regardless of availability set membership.
+- **Health probe**: Periodically tests each backend on a specified port and protocol. An HTTP 200 response marks the backend as healthy; a TCP connection success does the same. Unhealthy backends are removed from the rotation until probes succeed again.
+- **Load balancing rule**: Maps a frontend IP:port to a backend pool:port with a specified protocol. Session persistence (affinity) can be set to None (default 5-tuple hash), Client IP (2-tuple: source IP + protocol), or Client IP and Protocol (3-tuple).
+- **Inbound NAT rule**: Forwards a specific frontend port to a specific backend VM port. Used for direct management access to individual VMs without assigning them public IPs.
+- **Outbound rule**: Standard SKU only. Defines SNAT configuration for internet-bound traffic from VMs that do not have public IPs. Specifies which frontend IPs to use for SNAT and how many ports to allocate per backend instance.
+
+## Application Gateway
+
+Application Gateway is a regional Layer 7 load balancer for HTTP and HTTPS traffic. Unlike Azure Load Balancer, Application Gateway terminates the HTTP connection at the gateway and establishes a new connection to the backend — making it a reverse proxy with full visibility into the HTTP request.
+
+**Components:**
+
+- **Frontend IP**: Public, private, or both. A single Application Gateway can serve both internet-facing and internal traffic simultaneously.
+- **Listener**: Defines what the gateway listens for. A basic listener handles a single hostname. A multi-site listener routes based on the HTTP `Host` header, allowing one Application Gateway to front multiple domains.
+- **Routing rule**: Connects a listener to a backend pool and HTTP settings. Two types: basic (all traffic to one backend) and path-based (route by URL path — `/api/*` to an API backend, `/static/*` to a storage backend).
+- **Backend pool**: Can contain VMs, VMSS instances, App Service, or any reachable IP/FQDN. This flexibility allows Application Gateway to front non-Azure workloads or hybrid environments.
+- **HTTP settings**: Define the protocol, port, and behavior for the connection from the gateway to the backend. Options include cookie-based session affinity (the gateway inserts a cookie to route a client's subsequent requests to the same backend server), custom health probe, connection draining (gracefully remove a backend from rotation), and request timeout.
+
+**SSL offload and end-to-end SSL**: Application Gateway decrypts HTTPS at the gateway by default (SSL termination), forwarding HTTP to the backend. For compliance scenarios requiring encryption all the way to the backend, end-to-end SSL re-encrypts the forwarded connection. In this mode the backend must present a certificate that the gateway trusts.
+
+**WAF (Web Application Firewall)**: The `WAF_v2` SKU adds a WAF based on OWASP Core Rule Sets. WAF runs in Detection mode (log only) or Prevention mode (block and log). Detection mode is useful during initial deployment to review what would be blocked before committing to Prevention. Custom rules can allow or deny specific conditions in addition to the OWASP rule set.
+
+**Autoscaling**: The v2 SKU (both Standard_v2 and WAF_v2) supports autoscaling based on traffic volume, with configurable minimum and maximum instance counts. The v1 SKU is retired.
+
+## Azure Traffic Manager
+
+Traffic Manager is a DNS-based global load balancing service. It does not sit in the data path — no traffic flows through Traffic Manager. Instead, it responds to DNS queries with the name of the healthiest, most appropriate endpoint based on the configured routing method and health probe results. Clients connect directly to the returned endpoint.
+
+**Routing methods:**
+
+| Method | Logic |
+|--------|-------|
+| Priority | Route all traffic to the primary endpoint. Fail over to secondary if primary health probe fails. |
+| Weighted | Distribute traffic proportionally by assigned weights (e.g., 70% to region A, 30% to region B). Useful for gradual traffic migration. |
+| Performance | Route each client to the endpoint with the lowest latency based on Internet latency measurements. |
+| Geographic | Route based on the client's geographic location. Used for data residency compliance (EU clients always reach EU endpoint). |
+| Multivalue | Return multiple healthy endpoint IPs in a single DNS response (A/AAAA records only). Client picks randomly. Useful for redundancy without failover latency. |
+| Subnet | Map source IP address ranges to specific endpoints. Useful for routing corporate office traffic to an on-premises endpoint. |
+
+**Endpoint types**: Azure endpoints reference Azure resources (App Service, public IP, cloud service). External endpoints reference non-Azure FQDNs or IPs. Nested endpoints reference child Traffic Manager profiles, enabling hierarchical routing strategies.
+
+**Health probes**: Traffic Manager probes each endpoint on a configurable path, protocol (HTTP, HTTPS, TCP), port, and interval. When an endpoint fails probes, Traffic Manager stops returning it in DNS responses. The profile TTL determines how quickly clients stop using a failed endpoint after DNS updates — lower TTL means faster failover but higher DNS query rates.
+
+The DNS-based mechanism has an inherent limitation: if an endpoint fails after the client has already received a DNS answer, the client continues to attempt connections to the failed endpoint until the DNS TTL expires and the client re-queries. Traffic Manager cannot force an already-connected client to switch.
+
+## Azure Front Door
+
+Azure Front Door is Microsoft's global L7 CDN and load-balancing service, operated at edge Points of Presence (PoPs) worldwide. Unlike Traffic Manager, Front Door proxies traffic — client connections terminate at the nearest Front Door PoP, and Front Door establishes a new connection to the origin backend over the optimized Microsoft global WAN. This architecture provides SSL offload at the edge, TCP connection optimization, caching, and WAF — capabilities that Traffic Manager's DNS-only model cannot provide.
+
+**Standard vs Premium SKU:**
+
+| Feature | Standard | Premium |
+|---------|----------|---------|
+| CDN and static caching | Yes | Yes |
+| Custom WAF rules | Yes | Yes |
+| WAF managed rule sets (OWASP) | No | Yes |
+| Bot protection | No | Yes |
+| Private Link origin support | No | Yes |
+| Security reports | No | Yes |
+
+**Components:**
+
+- **Origins**: The backend servers or services receiving traffic. Can be App Service, Storage, public IP, or any FQDN. Premium SKU supports private link origins — origins without public IPs, reached via private link through the Front Door PoP.
+- **Origin groups**: Collections of origins with configured load balancing (Priority, Weighted, Latency) and health probe settings. Front Door selects the healthiest origin within the group.
+- **Routes**: Map incoming domain names and URL paths to origin groups. A route specifies the domain, path pattern, allowed HTTP methods, caching configuration, and URL rewrite/redirect rules.
+- **WAF policy**: Attached to the Front Door profile or to specific routes. Supports OWASP CRS managed rule sets (Premium), custom allow/deny rules based on IP, geography, headers, or query parameters, and rate limiting rules. WAF at Front Door filters traffic at the edge before it reaches your origins, reducing load on backends and blocking attacks geographically close to the attacker.
+
+**Caching**: Configure per route. Front Door caches static responses at edge PoPs and serves subsequent requests from cache without forwarding to the origin. Cache behavior is controlled by HTTP cache headers from the origin. Cached content can be purged on demand across all PoPs.
+
+**URL rewrite and redirect**: Front Door can rewrite the incoming URL (path, query string, host header) before forwarding to the origin, or redirect clients to a different URL with a specified HTTP status code. Common use: redirect HTTP to HTTPS at the edge, or redirect legacy URL paths to new paths without changes to origin code.
+
+## Summary
+
+Azure Load Balancer is the foundation for distributing any TCP or UDP workload across a regional pool of VMs with high throughput and no application-layer overhead. Application Gateway adds HTTP routing intelligence, WAF, and SSL termination for regional web workloads. Traffic Manager provides global DNS steering with flexible routing policies but without data-plane involvement. Front Door combines global edge presence with L7 proxying, caching, and WAF for HTTP/HTTPS workloads that need the full stack of edge acceleration and security. In practice, these services are often layered: Traffic Manager routing clients to a regional Front Door instance, which forwards to an Application Gateway, which distributes to a backend pool behind an internal Azure Load Balancer.

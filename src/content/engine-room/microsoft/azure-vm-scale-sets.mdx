@@ -1,0 +1,117 @@
+---
+title: "Azure VM Scale Sets — Autoscaling and Orchestration"
+category: "microsoft"
+topic: "azure-vmss"
+summary: "How Azure Virtual Machine Scale Sets deploy and manage a group of identical VMs as a single resource — supporting manual scaling, metric-based autoscaling, and two orchestration modes that trade between strict uniformity and flexibility for mixing VM sizes and images."
+tags: ["azure", "vmss", "autoscale", "scale-sets", "az-104"]
+order: 65
+draft: false
+---
+
+## Overview
+
+Azure Virtual Machine Scale Sets (VMSS) solve the problem of managing a dynamically sized fleet of compute nodes as a single resource rather than as a collection of individually managed VMs. A scale set defines the base image, VM size, network configuration, and load balancer integration once; Azure then handles the provisioning, configuration, and decommissioning of individual instances as the fleet grows and shrinks.
+
+VMSS is the foundation for horizontally scalable stateless workloads in Azure — web front ends, API tiers, batch processing clusters, and any application layer where capacity should track demand rather than remain static. Understanding the two orchestration modes and how autoscale rules behave is central to designing reliable scale-out architectures.
+
+## Orchestration Modes
+
+Scale sets operate in one of two orchestration modes selected at creation time. The mode cannot be changed afterwards.
+
+**Uniform orchestration** — All VMs in the scale set are identical: same size, same image, same configuration. This mode is optimised for large-scale stateless workloads and supports automatic instance repair, rolling upgrades, and the tightest autoscale integration. The maximum instance count is 1,000 when using Azure Marketplace or Azure Compute Gallery images.
+
+**Flexible orchestration** — VMs in the scale set can vary in size and can use different images. The scale set manages grouping and availability zone distribution, but individual VMs behave more like standalone VMs and support the full range of individual VM management operations. The maximum instance count is also 1,000. Flexible mode integrates with availability zones and fault domains without requiring a separate availability set resource.
+
+| Feature | Uniform | Flexible |
+|---|---|---|
+| VM homogeneity | Identical instances required | Different sizes and images allowed |
+| Max instances | 1,000 (gallery images) / 600 (custom) | 1,000 |
+| Rolling upgrade support | Yes | Limited |
+| Instance repair | Automatic with health probe | Manual trigger |
+| Use case | Stateless scale-out, autoscale | Mixed-size clusters, flexible VM management |
+
+## Scaling Types
+
+Three scaling mechanisms control the instance count of a scale set:
+
+**Manual scaling** — The administrator sets the target instance count directly. Azure provisions or removes VMs to reach the specified count. Useful during planned events (batch job start, scheduled traffic spike) where the scaling trigger is known in advance.
+
+**Schedule-based autoscale** — A profile defines a specific instance count or minimum/maximum range for a configured time window (day of week, time of day). The schedule profile overrides the default profile during its active window. Useful for predictable load patterns such as business-hours traffic.
+
+**Metric-based autoscale** — Rules watch a metric — CPU percentage, memory, queue depth, or a custom metric emitted by the application — and trigger scale-out or scale-in actions when the metric crosses configured thresholds.
+
+## Autoscale Rules and Settings
+
+A complete autoscale configuration consists of:
+
+**Instance limits** — A minimum count (scale set will never go below this), a maximum count (scale set will never exceed this), and a default count (used if metric data is unavailable).
+
+**Scale-out rule** — Defines the metric, the aggregation period (for example, average CPU over five minutes), the threshold that triggers scaling (for example, CPU above 70%), and the action (increase instance count by N or to N). The action can be to add a fixed number of instances, to add a percentage of the current count, or to set a specific total count.
+
+**Scale-in rule** — Mirrors the scale-out rule for reducing capacity. For example: decrease by 1 instance when average CPU drops below 30% for ten minutes.
+
+**Cooldown period** — After any scale action completes, autoscale waits for the cooldown period before evaluating rules again. This prevents oscillation — rapid alternating scale-out and scale-in — when a metric is hovering near a threshold. The default cooldown is 300 seconds (five minutes) and applies independently to scale-out and scale-in actions.
+
+Example rule set for a web tier:
+
+| Setting | Value |
+|---|---|
+| Minimum instances | 2 |
+| Maximum instances | 20 |
+| Default instances | 2 |
+| Scale-out trigger | Average CPU > 70% over 5 minutes |
+| Scale-out action | Add 2 instances |
+| Scale-in trigger | Average CPU < 30% over 10 minutes |
+| Scale-in action | Remove 1 instance |
+| Cooldown | 300 seconds |
+
+## Scale-In Policy
+
+When autoscale removes instances, the scale-in policy controls which VMs are selected for deletion:
+
+**Default** — Balance instance removal across availability zones and fault domains, then delete the instance with the highest instance ID. This preserves the zone distribution established at scale-out.
+
+**NewestVM** — Always delete the most recently created VM. Useful when newer instances represent a different configuration version that should be rolled back.
+
+**OldestVM** — Always delete the oldest VM. Useful when older instances should be replaced with newer ones as the fleet naturally scales down.
+
+Instance protection can be applied to individual VMs within a scale set to exclude them from scale-in or from automated update actions. Protected instances persist through scale-in events until their protection is removed or the instance is manually deleted.
+
+## Load Balancer Integration
+
+Scale sets integrate directly with Azure Load Balancer (Standard SKU required for production deployments) or Azure Application Gateway. The load balancer backend pool is automatically updated as instances are added and removed — no manual pool management is required.
+
+For Standard Load Balancer integration, the scale set NIC configuration references the backend pool. Health probes on the load balancer are used by VMSS instance repair to identify unhealthy instances that should be replaced automatically.
+
+## VM Images and Azure Compute Gallery
+
+Scale set instances are deployed from an image source, which can be:
+
+- Azure Marketplace platform images (Windows Server, Ubuntu, etc.)
+- Custom images stored in Azure Compute Gallery (formerly Shared Image Gallery)
+
+**Azure Compute Gallery** provides a managed repository for custom VM images with versioning, regional replication, and access control. Key characteristics:
+
+| Feature | Detail |
+|---|---|
+| Image definition | Metadata — publisher, offer, SKU, OS type, security type |
+| Image version | Actual image content (e.g., version 1.0.0, 2.0.0) |
+| Replication regions | Up to 10 regions per image version |
+| Replication count | Up to 50 replicas per region |
+| Sharing | Share gallery across subscriptions and tenants |
+
+Image versions replicated to multiple regions allow scale sets in different regions to pull the same image locally, reducing pull times and cross-region egress costs. Versioning allows gradual rollout of new images by updating the scale set image reference to a new version and triggering a rolling upgrade.
+
+## Update Policies
+
+When a scale set image or configuration is updated, the update policy controls how running instances receive the change:
+
+**Automatic** — Azure upgrades all instances in a rolling batch without manual intervention. Instances in each batch are taken offline, upgraded, and returned to service before the next batch begins.
+
+**Rolling** — Similar to automatic but with configurable batch sizes and pause between batches. Allows health verification between upgrade waves.
+
+**Manual** — Instances are only upgraded when explicitly triggered (per instance or as a bulk operation). Gives maximum control but requires active management.
+
+## Summary
+
+VM Scale Sets abstract a VM fleet into a single managed resource, with Uniform mode providing strict instance homogeneity and tight autoscale integration for stateless workloads, and Flexible mode allowing size and image variation where individual VM management behaviour is still needed. Metric-based autoscale rules with configurable cooldown periods drive elastic scaling, while scale-in policies and instance protection provide control over which VMs are removed during contraction. Azure Compute Gallery underpins the image management lifecycle for custom images distributed across regions and replicated at scale.

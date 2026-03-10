@@ -1,0 +1,86 @@
+---
+title: "Azure Policy — Enforcing Compliance at Scale"
+category: "microsoft"
+topic: "azure-policy"
+summary: "How Azure Policy evaluates resources against defined rules and automatically enforces compliance — from simple tag-enforcement to deploying missing configurations — and how policy initiatives bundle related policies for assignment at scale."
+tags: ["azure", "policy", "governance", "compliance", "az-104"]
+order: 59
+draft: false
+---
+
+## Overview
+
+Azure Policy is the compliance enforcement engine for Azure resource deployments. Where RBAC answers "who can do this?", Azure Policy answers "what is allowed to be done?". A policy definition describes a rule — a condition that resources must satisfy — and an effect that determines what happens when a resource violates that rule. Effects range from passive logging to active blocking to automatic remediation. Policy assignments attach these rules to a scope in the management hierarchy, and every resource in that scope is evaluated against them.
+
+## Policy Definition Structure
+
+A policy definition is a JSON document containing two key elements: a **condition** (the `if` clause) and an **effect** (the `then` clause). The condition evaluates resource properties using logical operators and comparison functions — checking whether a tag is present, whether a location is in an approved list, whether a specific resource property matches an expected value. When the condition evaluates to true, the effect is applied.
+
+Policy definitions can be parameterised to make them reusable. A single definition for "allowed VM SKUs" can accept a parameter array of permitted sizes, making it applicable across different environments with different approved SKU lists without duplicating the definition itself.
+
+## Policy Effects
+
+Effects determine what Azure Policy does when a resource matches the condition. They are evaluated in a specific order — important when multiple policies apply to the same resource:
+
+| Effect | Behavior |
+|--------|----------|
+| **Disabled** | Policy rule is ignored; no evaluation occurs |
+| **Append** | Adds fields or values to the resource (e.g., adds a tag without overwriting existing ones) |
+| **Modify** | Adds, updates, or removes resource properties or tags; requires a managed identity for the policy assignment |
+| **Deny** | Blocks the ARM request that would create or update a non-compliant resource |
+| **Audit** | Allows the operation but writes a compliance event to the activity log; does not block |
+| **AuditIfNotExists** | Audits the triggering resource if a specified related resource does not exist |
+| **DeployIfNotExists** | Deploys a related resource if it does not exist; requires a managed identity |
+| **Manual** | Marks resources for manual review; no automated action |
+
+The evaluation order matters: Disabled is checked first (no action taken), then Append and Modify (pre-create modifications), then Deny (block or allow), then Audit (log). AuditIfNotExists and DeployIfNotExists fire after the resource has been created or updated.
+
+## Deny vs Audit
+
+The choice between `Deny` and `Audit` defines whether a policy is a hard gate or a soft signal.
+
+**Deny** is enforced at the Azure Resource Manager layer — the ARM request is rejected before the resource is created or updated. A resource that would violate a Deny policy simply cannot be deployed. This is appropriate for security-critical rules such as blocking public IP assignments on sensitive subnets or disallowing resources in unapproved regions.
+
+**Audit** allows the non-compliant resource to be created but records the violation in the compliance report. This is appropriate when onboarding new policies gradually — audit mode lets teams identify existing violations without disrupting ongoing work, before switching to Deny once the environment is clean.
+
+Crucially, neither Deny nor Audit deletes or modifies existing non-compliant resources. Azure Policy does not retroactively destroy resources that existed before the policy was assigned.
+
+## DeployIfNotExists
+
+The `DeployIfNotExists` effect is the automation-forward option. When a resource is created or updated, and a specified related resource does not exist, Azure Policy automatically deploys that missing resource. A classic use case is ensuring every virtual machine has the Azure Monitor Agent installed: a DeployIfNotExists policy triggers on VM creation and deploys the AMA extension if it is absent.
+
+DeployIfNotExists assignments require a **managed identity** associated with the policy assignment. This managed identity is the execution context for the deployment — it must have sufficient RBAC permissions (typically Contributor or a custom role) to deploy the related resource.
+
+## AuditIfNotExists
+
+`AuditIfNotExists` works similarly but without the automatic remediation step. When the triggering resource exists but the related resource does not, the triggering resource is flagged as non-compliant in the compliance report. It does not block the original operation or deploy anything — it simply marks the resource for follow-up.
+
+## Policy Initiatives
+
+A **policy initiative** (formerly called a policy set) is a group of policy definitions bundled together for assignment as a unit. Rather than assigning 20 individual policies to enforce a compliance framework, an administrator assigns a single initiative containing all 20. Initiatives reduce assignment overhead and provide a single compliance score for the entire group.
+
+Microsoft provides built-in initiatives corresponding to major compliance frameworks — ISO 27001, NIST SP 800-53, CIS Benchmarks, PCI DSS — each containing dozens to hundreds of individual policy definitions. Custom initiatives can be created to bundle organisation-specific policies.
+
+## Assignment and Scope
+
+Policy assignments attach a definition or initiative to a scope — management group, subscription, resource group, or individual resource. Assignments inherit downward through the scope hierarchy. A policy assigned at the management group level applies to every subscription, resource group, and resource below it.
+
+**Exclusions** allow specific child scopes to be exempted from an assignment. An exemption does not delete the assignment — the policy continues to apply everywhere except the excluded scope. Exclusions are useful for sandbox subscriptions, legacy resources that cannot be immediately remediated, or testing environments.
+
+## Compliance Evaluation
+
+Resources are evaluated against assigned policies in two ways. New and updated resources are evaluated in real time at the point of creation or modification — Deny effects fire immediately. Existing resources are scanned on a recurring cycle, by default every **24 hours**. A compliance trigger can also be initiated manually for an on-demand scan.
+
+The compliance view in the Azure portal shows each policy assignment's compliance state — the percentage of resources that meet the policy condition — broken down by resource and resource type.
+
+## Remediation Tasks
+
+For `DeployIfNotExists` and `Modify` policies, existing non-compliant resources are not automatically fixed when the policy is first assigned. Instead, a **remediation task** must be created. The remediation task iterates over non-compliant resources and applies the policy effect to each. Remediation tasks run under the managed identity associated with the assignment and can be monitored for progress and failures in the portal.
+
+## Policy vs RBAC
+
+Azure Policy controls **what** can be deployed and how resources must be configured. Azure RBAC controls **who** can perform operations. They are complementary: RBAC prevents an unauthorised user from deploying a resource at all, while Policy ensures that users who do have RBAC permission to deploy resources can only deploy compliant configurations. Together they form the governance layer for Azure environments at scale.
+
+## Summary
+
+Azure Policy is the rule engine that makes Azure governance scalable and enforceable. Policy definitions express compliance rules as conditions and effects; initiatives bundle related policies for efficient assignment; and the scope hierarchy ensures policies flow downward through the management group tree without per-resource configuration. The choice of effect — Deny for hard enforcement, Audit for visibility, DeployIfNotExists for automatic remediation — determines how aggressively a policy responds to violations, making Azure Policy flexible enough to support both strict production environments and gradual compliance onboarding.
