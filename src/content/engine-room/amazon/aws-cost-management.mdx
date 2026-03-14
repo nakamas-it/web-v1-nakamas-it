@@ -1,9 +1,9 @@
 ---
-title: "AWS Cost Management — Pricing, Optimization, and Billing"
+title: "AWS Cost Management & Optimization"
 category: "amazon"
 topic: "aws-cost-management"
-summary: "AWS pricing models, Reserved Instances vs Savings Plans, and the tools that help you monitor, forecast, and optimize cloud spending."
-tags: ["aws", "cost", "billing", "savings-plans", "reserved-instances", "cost-explorer", "trusted-advisor"]
+summary: "Understanding and controlling AWS spending — how AWS pricing works, purchasing model trade-offs, visibility tools, and the architectural patterns that reduce waste."
+tags: ["aws", "cost", "pricing", "savings-plans", "cost-explorer", "optimization"]
 order: 20
 draft: false
 ---
@@ -12,300 +12,390 @@ import FlowDiagram from '../../../components/FlowDiagram.astro';
 
 ## Overview
 
-Cloud economics require active management. AWS charges for usage, and usage can grow in unexpected ways — an autoscaling group that never scales down, snapshots accumulating for years, data transfer between availability zones adding up invisibly. Without deliberate monitoring and optimization, cloud spending grows faster than the workloads that generate it.
+Cloud costs are not fixed. AWS charges based on what you provision and consume. A well-architected environment running the same workload as a poorly architected one might cost 30–60% less — not from negotiation, but from engineering decisions.
 
-AWS provides a complete set of tools for understanding where money is going, forecasting future spend, and taking action to reduce it. This article covers the pricing model fundamentals, the EC2 purchasing option landscape, and the tools for ongoing cost governance.
+Unmanaged cloud spending grows in two ways: proportionally (more usage, more cost) and superlinearly (poor architectural choices amplify cost faster than usage grows). A team that sends all inter-AZ traffic through a NAT Gateway, stores cold data in S3 Standard, and runs oversized On-Demand instances will pay dramatically more than a team that addresses each of these individually.
+
+Cost optimization is not a one-time activity performed before a launch. It is an ongoing engineering discipline — measure, right-size, select the right purchasing model, eliminate waste, repeat.
 
 ---
 
 ## AWS Pricing Fundamentals
 
-AWS pricing follows three fundamental dimensions for most services:
+AWS pricing operates across three cost dimensions for almost every service:
 
-| Dimension | What You Pay For | Notes |
-|-----------|-----------------|-------|
-| **Compute time** | Hours or seconds of running resources | EC2 instances, Lambda execution time, RDS instance hours, ECS Fargate vCPU-seconds |
-| **Storage** | GB stored per month | EBS volumes, S3 buckets, RDS storage, EFS, Glacier |
-| **Data transfer OUT** | GB transferred out of AWS | Varies by destination; inbound from internet is free |
+| Dimension | Description | Examples |
+|-----------|-------------|---------|
+| **Compute** | Instance hours, vCPU-seconds, request counts | EC2 instance-hours, Lambda GB-seconds, API Gateway requests |
+| **Storage** | GB-month stored, IOPS provisioned, requests made | S3 GB-month, EBS GB-month, EBS provisioned IOPS |
+| **Data transfer** | Bytes moved between services, regions, or the internet | EC2 egress to internet, cross-region replication, cross-AZ traffic |
 
-### Data Transfer Pricing
+These three dimensions interact. An architecture that minimizes compute might increase data transfer costs. Understanding all three before making design decisions prevents cost surprises.
 
-Data transfer costs are one of the most commonly underestimated AWS cost drivers. The pricing hierarchy:
+### Pricing Models
 
-| Transfer Type | Cost |
-|---------------|------|
-| **Into AWS from the internet** | Free |
-| **Within the same AZ** (using private IPs) | Free |
-| **Between AZs in the same region** | Charged both ways (~$0.01/GB each way) |
-| **Between regions** | Charged (~$0.02–$0.09/GB depending on regions) |
-| **Internet egress** (out to the internet) | $0.09/GB for first 10 TB/month (us-east-1), decreasing tiers |
-| **Through CloudFront** | Lower egress rate than direct; CloudFront has its own data transfer pricing |
+AWS offers five pricing models for compute. Most workloads use a combination:
 
-The practical implication: deploy resources in the same AZ when they communicate heavily, use VPC Gateway Endpoints for S3 and DynamoDB (free — eliminates NAT Gateway data charges for those services), and use CloudFront to reduce origin egress.
+| Model | Discount vs On-Demand | Commitment | Use Case |
+|-------|-----------------------|-----------|----------|
+| **On-Demand** | 0% — baseline price | None | Unpredictable workloads, short experiments, initial sizing |
+| **Savings Plans** | 20–66% | 1 or 3 year $/hr commitment | Predictable baseline — most common choice |
+| **Reserved Instances** | 40–72% | 1 or 3 year instance commitment | Predictable workloads requiring a specific instance type |
+| **Spot Instances** | Up to 90% | None (interruptible) | Fault-tolerant batch, stateless workers, CI/CD |
+| **Free Tier** | 100% up to limits | None | Exploration, learning, small projects |
 
 ### AWS Free Tier
 
-New AWS accounts receive 12 months of free tier eligibility for commonly used services:
+Two categories of free tier exist:
 
-| Duration | Examples |
-|----------|---------|
-| **12-month free** (new accounts) | 750 hours/month EC2 t2.micro or t3.micro, 5 GB S3 Standard, 750 hours/month RDS db.t2.micro or db.t3.micro, 30 GB EBS |
-| **Always free** | 1 million Lambda requests/month + 400,000 GB-seconds execution, 25 GB DynamoDB storage, 10 GB Glacier retrieval/month |
-| **Short-term trials** | SageMaker, Comprehend, Rekognition — time-limited trial allowances |
+**12-month free tier** (expires 12 months after account creation):
+- EC2: 750 hours/month of t2.micro or t3.micro
+- S3: 5 GB of storage + 20,000 GET requests + 2,000 PUT requests
+- RDS: 750 hours/month of db.t2.micro or db.t3.micro, 20 GB storage
 
-Free Tier usage is tracked in the Billing console. Set a Free Tier Usage Alert in AWS Budgets to get notified before you exceed free limits.
+**Always-free** (never expires, regardless of account age):
+- Lambda: 1 million requests/month + 400,000 GB-seconds compute
+- DynamoDB: 25 GB storage + 25 WCU + 25 RCU (provisioned)
+- CloudFront: 1 TB data transfer out + 10 million HTTP/HTTPS requests
+- CloudWatch: 10 custom metrics + 10 alarms + 1 million API requests
+
+Always-free tiers make Lambda, DynamoDB, and CloudFront genuinely free for low-traffic applications — not just during a trial period.
 
 ---
 
-## EC2 Purchasing Options
+## Data Transfer Costs — The Hidden Expense
 
-EC2 offers multiple purchasing models with dramatically different prices and commitment levels. Matching the right model to each workload is the single highest-leverage cost optimization action available.
+Data transfer is frequently the most surprising AWS cost. The rules are asymmetric and non-obvious:
+
+| Traffic Path | Cost |
+|-------------|------|
+| Inbound (ingress) from internet to AWS | **Free** |
+| Outbound (egress) from EC2/S3 to internet | **Charged per GB** — first 100 GB/month free, then tiered |
+| Between AWS regions | **Charged per GB** in both directions |
+| Between AZs in the same region | **Charged per GB** ($0.01/GB each direction) |
+| Within the same AZ (private IP) | **Free** |
+| CloudFront to internet (egress) | **Charged per GB** — cheaper rate than EC2 direct egress |
+| S3 to CloudFront in same region | **Free** (CloudFront origin fetch from S3 is free) |
+
+The cross-AZ charge catches many teams off guard. An EC2 instance in `us-east-1a` querying an RDS instance in `us-east-1b` pays $0.01/GB in each direction — $0.02/GB round trip. For a high-throughput database application, this adds up quickly. Solutions:
+
+- Deploy EC2 and RDS in the same AZ for latency-sensitive applications (accept the reduced fault tolerance, or replicate to another AZ and use read replicas locally)
+- Use a Multi-AZ RDS with the writer in the same AZ as the primary application tier
+- Cache aggressively with ElastiCache deployed in the same AZ as the application
+
+**CloudFront reduces egress costs**: CloudFront's per-GB egress rate is lower than EC2 direct egress. For high-traffic content (static assets, APIs, downloads), serving through CloudFront reduces both latency and cost simultaneously. S3 → CloudFront → internet is typically the cheapest path for static content delivery.
+
+---
+
+## EC2 Purchasing Options in Depth
 
 ### On-Demand
 
-Pay for compute capacity by the hour or second (Linux: per second, Windows: per hour) with no upfront commitment. Stop the instance and billing stops.
+Highest per-hour price. No commitment, no interruption risk. On-Demand is the right choice for:
+- Workloads where duration or instance type is unknown
+- Short-lived experiments or proof-of-concept
+- Burst capacity above committed baseline
+- Any workload running less than the break-even period for a Savings Plan commitment (~30–40% of the year)
 
-- Full list price — typically the most expensive option
-- No minimum commitment
-- Use for: truly unpredictable workloads, short-term experiments, workloads that might be cancelled
+### Savings Plans (Preferred Over Reserved Instances for Most Use Cases)
+
+Savings Plans commit to a consistent dollar-per-hour spend in exchange for a discount. They are more flexible than Reserved Instances because they apply automatically to matching usage — you do not commit to a specific instance type.
+
+**Compute Savings Plans**:
+- Applies to EC2 (any instance family, any size, any region, any OS), AWS Fargate, and Lambda
+- Maximum flexibility — a commitment made for x86 instances automatically covers ARM (Graviton) instances
+- Discount: approximately 54% off On-Demand for a 3-year no-upfront commitment
+
+**EC2 Instance Savings Plans**:
+- Applies to a specific instance family in a specific region (e.g., m5 in us-east-1)
+- Covers all sizes (m5.large through m5.24xlarge) and all OS within that family
+- Higher discount: approximately 66% off On-Demand for 3-year no-upfront
+- Less flexible than Compute Savings Plans — does not cover Fargate or Lambda
+
+**Payment options**: No Upfront (monthly payments, smallest commitment, smallest discount), Partial Upfront (some paid upfront, rest monthly, medium discount), All Upfront (full 1 or 3 year commitment paid upfront, maximum discount).
 
 ### Reserved Instances
 
-Reserved Instances (RIs) provide a billing discount (up to 72%) in exchange for a commitment to a consistent amount of compute usage over 1 or 3 years. You are not reserving a specific instance — you are committing to a usage level and receiving a discount when you use matching instances.
+Reserved Instances (RIs) commit to a specific instance configuration in exchange for a significant discount. Two types:
 
 | RI Type | Flexibility | Discount | Notes |
-|---------|------------|---------|-------|
-| **Standard RI** | Fixed instance family, size, region, OS | Up to 72% | Can sell unused Standard RIs on the Reserved Instance Marketplace |
-| **Convertible RI** | Can modify instance family, size, tenancy, OS | Up to 66% | Cannot be sold; more flexible to adjust as your needs change |
+|---------|-------------|---------|-------|
+| **Standard RI** | Locked to family, size, region, OS, tenancy | Up to 72% | Can be listed on the RI Marketplace to sell unused capacity |
+| **Convertible RI** | Can exchange for different family/size/OS/region | Up to 54% | Cannot sell on Marketplace |
 
-**Payment options** (higher upfront = greater discount):
-- **All Upfront**: Pay the entire RI cost upfront. Maximum discount.
-- **Partial Upfront**: Pay a portion upfront; rest monthly. Moderate discount.
-- **No Upfront**: Pay entirely monthly. Smallest discount of the three, still significantly below On-Demand.
+RIs are most valuable for:
+- Specific instance types that you know will run continuously (e.g., a dedicated database server)
+- Situations where you need the ability to sell unused capacity (Standard RI Marketplace)
+- Older accounts or tooling that manages RIs specifically
 
-**Scope**:
-- **Regional RI**: Discount applies to any instance of the matching family/OS in the region, regardless of AZ. Capacity reservation not included.
-- **Zonal RI**: Discount applies to the specific AZ only. Includes a capacity reservation in that AZ — AWS guarantees capacity exists for your reserved instance count.
-
-### Savings Plans
-
-Savings Plans provide a discount (up to 72%) in exchange for a commitment to a **minimum hourly spend in $/hour** over 1 or 3 years. More flexible than RIs because the commitment is financial, not tied to specific instance attributes.
-
-| Plan Type | Flexibility | Discount | Applies To |
-|-----------|------------|---------|-----------|
-| **EC2 Savings Plans** | Specific instance family + region; any size, AZ, OS | Up to 72% | EC2 only, within committed family/region |
-| **Compute Savings Plans** | Any instance family, size, AZ, region, OS | Up to 66% | EC2, Lambda, Fargate — most flexible |
-
-**Savings Plans vs Reserved Instances**:
-
-| Aspect | Reserved Instances | Savings Plans |
-|--------|------------------|--------------|
-| Commitment unit | Specific instance (family, region, OS) | $/hour spend |
-| Flexibility | Lower — locked to instance attributes | Higher — applies wherever you spend |
-| Discount | Up to 72% | Up to 72% (EC2 SP) or 66% (Compute SP) |
-| Resale | Standard RIs can be sold | Cannot be sold |
-| Coverage | EC2 only | EC2, Lambda, Fargate (Compute SP) |
-| Recommended for | Stable, well-understood instance configuration | Most organizations — covers diverse and changing fleet |
+For most greenfield workloads, Savings Plans are preferred because they automatically apply across instance families, regions, and services as your architecture evolves.
 
 ### Spot Instances
 
-Spot Instances provide access to AWS's unused EC2 capacity at discounts of up to 90% off On-Demand. AWS can reclaim Spot capacity with a **2-minute warning** when it is needed elsewhere.
+Spot Instances use AWS's spare EC2 capacity at up to 90% discount. The trade-off: AWS can reclaim a Spot Instance with a 2-minute warning when the capacity is needed for On-Demand customers.
 
-Spot is appropriate only for **interruption-tolerant** workloads:
-- Batch data processing (Hadoop, Spark, EMR)
-- Rendering and encoding
-- CI/CD build agents
-- Stateless web tier (when behind a load balancer that can reroute)
-- ML training jobs with checkpointing
+**Designing for Spot**:
 
-**Spot Fleet**: A group of Spot Instance requests across multiple instance types and AZs. Diversifying across many instance pools reduces the probability of simultaneous interruption — if one pool's price spikes, the Fleet uses another. Configure mix of Spot and On-Demand (base capacity on On-Demand, burst on Spot).
+| Design Principle | Implementation |
+|----------------|----------------|
+| Stateless workers | Store state in S3, DynamoDB, or SQS — not on the instance |
+| Diversification | Request multiple instance types and AZs via Spot Fleet — if one pool is reclaimed, others continue |
+| Interruption handling | Use the 2-minute notice (available via instance metadata) to checkpoint state and drain gracefully |
+| Spot Advisor | Use the Spot Instance Advisor to select pools with < 5% interruption frequency |
+| Mixed fleets | Combine On-Demand base capacity with Spot for burst — Auto Scaling Group with mixed instance policies |
 
-**Spot Instance Advisor**: AWS tool showing historical interruption frequency and average discount by instance type and region. Use it to select pools with low interruption rates (typically 5% or less per month) for workloads that restart slowly.
-
-### Dedicated Hosts
-
-A Dedicated Host is an entire physical server dedicated to your use — no other AWS customer's instances share the hardware.
-
-Use cases:
-- **BYOL (Bring Your Own License)**: Oracle Database and Windows Server licensing that requires licensing per-socket or per-core on dedicated hardware. Placing instances on a Dedicated Host gives you visibility into physical socket and core counts.
-- **Compliance**: Regulations requiring physical isolation of workloads.
-- **Most expensive EC2 option** — pay for the entire host regardless of utilization.
-
-### EC2 Purchasing Summary
-
-| Option | When to Use | Discount vs On-Demand |
-|--------|------------|----------------------|
-| On-Demand | Unpredictable, short-term, testing | Baseline price |
-| Savings Plans (Compute) | Stable, long-term, mixed workloads | Up to 66% |
-| Reserved Instances (Standard) | Fixed, known instance configuration | Up to 72% |
-| Spot | Fault-tolerant, batch, flexible | Up to 90% |
-| Dedicated Host | BYOL, compliance | Varies; often more expensive |
+Spot is ideal for: batch data processing, CI/CD build workers, ML training jobs, rendering farms, large-scale testing.
 
 ---
 
-## Cost Management Tools
+## Right-Sizing
 
-### AWS Cost Explorer
-
-Cost Explorer is the primary tool for visualizing and analyzing historical AWS costs. It provides:
-
-- **Cost and usage charts**: Filter and group by service, account, region, tag, instance type, usage type, purchase option
-- **Forecasting**: Project costs for the next 12 months based on historical usage
-- **Rightsizing recommendations**: Analyze EC2 CPU and memory utilization over 14 days and recommend smaller instance types that would satisfy the workload's actual resource usage
-- **RI utilization and coverage reports**: Identify underused Reserved Instances (paying for capacity you don't use) and uncovered On-Demand usage that would benefit from RI purchase
-- **Savings Plans recommendations**: Based on your usage patterns, recommend Savings Plans commitment levels and estimate savings
-
-### AWS Budgets
-
-Budgets let you define spending limits and receive alerts **before** you overspend — proactive, not reactive.
-
-| Budget Type | Monitors |
-|-------------|---------|
-| **Cost budget** | Total AWS spending in dollars |
-| **Usage budget** | Consumption of a specific service unit (EC2 instance-hours, S3 GB-months) |
-| **RI utilization budget** | Alert when RI utilization falls below threshold (e.g., below 80% utilized) |
-| **RI coverage budget** | Alert when eligible usage not covered by RIs exceeds threshold |
-| **Savings Plans budget** | Monitor SP utilization and coverage |
-
-Alerts trigger at actual or forecasted percentage of the budget (e.g., alert at 80% and 100% of actual, and at 100% of forecasted).
-
-**Budget Actions**: Beyond notifications, Budgets can take automated actions when a threshold is reached:
-- Apply an SCP to restrict or deny further resource provisioning
-- Apply an IAM policy to limit permissions
-- Target EC2 or RDS instances for stop/termination
-
-Budget Actions are useful in sandbox or development accounts where you want hard spending limits that prevent runaway costs.
-
-### AWS Cost and Usage Report (CUR)
-
-The CUR is the most granular billing dataset available. It includes every resource and every line item for every hour (or day or month, configurable), covering:
-
-- Every service, resource ARN, and usage type
-- List price and actual (post-discount) price
-- Reservation and Savings Plans amortization
-- Tags (cost allocation tags must be activated first)
-
-CUR is delivered as compressed CSV files to an S3 bucket. Query it with Athena (SQL) or visualize with QuickSight. The CUR is the foundation for any serious FinOps or cost chargeback implementation.
-
-### AWS Pricing Calculator
-
-Before you build, estimate costs with the Pricing Calculator. Configure your planned architecture — instance types, storage volumes, data transfer, additional services — and receive a monthly cost estimate. Export estimates as PDF or share a link.
-
-Useful for:
-- Comparing architectural options (Fargate vs EC2, RDS vs DynamoDB)
-- Presenting cloud cost projections to finance
-- Validating that a planned deployment fits a budget before committing
-
-### AWS Trusted Advisor
-
-Trusted Advisor inspects your AWS environment and provides recommendations across five categories:
-
-| Category | Examples of Checks |
-|----------|------------------|
-| **Cost Optimization** | Idle EC2 instances (low CPU/network), underutilized RDS instances, unassociated Elastic IPs, old EBS snapshots, underused Reserved Instances |
-| **Performance** | Overutilized EC2 instances, EBS volume throughput limits, CloudFront header forwarding configuration |
-| **Security** | MFA on root account, S3 bucket public access, security groups with unrestricted ports, exposed access keys |
-| **Fault Tolerance** | RDS Multi-AZ, EC2 not in ASGs, S3 bucket versioning, ELB targets in multiple AZs |
-| **Service Limits** | Resources approaching service quotas (EC2 instances, VPCs, security groups) |
-| **Operational Excellence** | CloudTrail not enabled, service health events |
-
-**Support plan access**:
-- Basic and Developer support: 7 core checks (including MFA on root, S3 public access, EBS snapshots)
-- Business and Enterprise support: Full suite of 100+ checks + API access + CloudWatch integration for check result monitoring
+Over-provisioned instances are the single most common source of EC2 waste. CPU utilization averaging 5–10% on a large instance means you are paying for 90–95% of the instance's capacity without using it.
 
 ### AWS Compute Optimizer
 
-Compute Optimizer uses machine learning to analyze **14 days of CloudWatch metrics** and recommends optimal resource configurations:
+Compute Optimizer analyzes CloudWatch metrics (CPU, network, disk I/O, and memory if the CloudWatch Agent is installed) over a 14-day window and recommends right-sized alternatives:
 
-| Resource | What It Optimizes |
-|----------|-----------------|
-| EC2 instances | Instance type and size based on CPU, memory, network utilization |
-| Auto Scaling Groups | Instance type/size for ASG launch configurations |
-| EBS volumes | Volume type (gp2 → gp3 for cost savings) and provisioned IOPS |
-| Lambda functions | Memory allocation (often over- or under-provisioned) |
+- Recommends same or smaller instance types with equivalent or better performance
+- Flags over-provisioned and under-provisioned instances
+- Covers EC2 instances, Auto Scaling groups, ECS tasks on Fargate, Lambda functions, and EBS volumes
+- Available at no additional cost (CloudWatch metrics are the input — standard monitoring costs apply)
 
-Compute Optimizer shows the current instance's utilization percentile, the recommended instance, and the estimated monthly savings or performance improvement. It also flags instances that are over-provisioned (savings opportunity) and under-provisioned (performance risk).
+**Memory data requires the CloudWatch Agent.** Without it, Compute Optimizer cannot see memory utilization and may miss over-provisioned instances where CPU is low but memory is high (common for Java applications).
 
-### Cost Visualization Pipeline
+### Graviton Instances
+
+AWS Graviton (ARM-based) processors deliver 20–40% better price/performance than equivalent x86 instances for most general-purpose workloads:
+
+| x86 Instance | Graviton Equivalent | Typical Savings |
+|-------------|--------------------|-----------------|
+| m5.large | m6g.large | ~20% |
+| c5.xlarge | c6g.xlarge | ~20–30% |
+| r5.2xlarge | r6g.2xlarge | ~20% |
+
+Migration requires the application to build for ARM64. AWS-managed runtimes (Lambda, ECS on Fargate, RDS, ElastiCache) support Graviton natively with no code change — selecting a Graviton instance type in the console is sufficient. For custom application code, recompile for ARM64.
+
+### Storage Right-Sizing
+
+EBS volume right-sizing is frequently overlooked:
+
+| Action | Savings |
+|--------|---------|
+| Migrate gp2 → gp3 | gp3 is cheaper than gp2 at the same size. gp3 IOPS and throughput are configurable independently — no need to over-size volume to get IOPS. |
+| Delete unattached EBS volumes | Unattached volumes continue to accrue storage charges. Snapshot first, then delete. |
+| Rightsize provisioned IOPS (io1/io2) | io1 and io2 charge per provisioned IOPS regardless of actual IOPS consumed. Right-size to actual peak IOPS. |
+| EBS Snapshot lifecycle policies | Old snapshots accumulate at $0.05/GB/month. Implement Data Lifecycle Manager policies to expire snapshots. |
+
+---
+
+## Cost Visibility Tools
+
+### AWS Cost Explorer
+
+Cost Explorer is the primary cost analysis tool. It provides:
+
+- **Spend by dimension**: Break down costs by service, account, region, availability zone, instance type, purchase option, or resource tag
+- **Time granularity**: Daily, monthly, or hourly views (hourly costs available for the last 14 days)
+- **Forecasting**: ML-based cost forecasting for the next 12 months based on historical patterns
+- **RI/SP coverage reports**: What percentage of your EC2 usage is covered by Savings Plans or RIs? Identify uncovered usage that is paying full On-Demand rates.
+- **RI/SP utilization reports**: Are you fully utilizing the commitments you purchased? Low utilization means wasted commitment spend.
+
+Cost Explorer data is available within 24 hours of incurring charges. It is the right tool for trend analysis, cost attribution, and planning purchasing commitments.
+
+### AWS Budgets
+
+Budgets set spending thresholds and alert when actual or forecasted costs approach or exceed the threshold:
+
+| Budget Type | What It Tracks |
+|-------------|---------------|
+| Cost budget | Total spend in dollars |
+| Usage budget | Quantity consumed (e.g., EC2 hours, S3 GB) |
+| RI utilization budget | Alert when RI utilization drops below a threshold |
+| Savings Plans utilization budget | Alert when SP utilization drops below a threshold |
+| Savings Plans coverage budget | Alert when covered usage drops below a threshold |
+
+**Budget Actions**: When a budget threshold is crossed, Budgets can automatically apply an IAM policy or SCP to restrict further spending. Example: when a developer sandbox account exceeds $500 for the month, automatically attach an SCP that prevents launching new EC2 instances. This enforces cost accountability without requiring manual intervention.
+
+### AWS Cost and Usage Report (CUR)
+
+The CUR is the most detailed billing data source available:
+
+- **Line-item granularity**: Every usage line item — individual EC2 instance-hours, S3 GET requests, data transfer GB
+- **Resource-level attribution**: Link charges to specific resource IDs (not just service averages)
+- **Delivery**: Delivered to an S3 bucket in Parquet or CSV format, updated multiple times daily
+- **Analysis**: Query with Athena (for ad-hoc SQL) or load into Redshift (for complex reporting). Most third-party cost management platforms ingest the CUR as their primary data source.
+
+CUR is the foundation for serious cost analytics. Cost Explorer is convenient but has limits on granularity and filtering. CUR has none of those limits — you can run any SQL query against the full billing data.
+
+### AWS Cost Anomaly Detection
+
+Cost Anomaly Detection uses ML to establish a baseline spending pattern for each service, account, or tag and alerts when actual spending deviates unexpectedly:
+
+- **Monitors continuously** — not threshold-based like Budgets
+- **Alerts on unexpected spikes** before end-of-month when a manual review would catch them
+- **Configurable monitors**: by service (e.g., monitor EC2 separately from S3), by account, by cost allocation tag (e.g., monitor each team's tagged resources independently)
+- **Alert delivery**: SNS, email, or Slack via SNS integration
+- Example: a misconfigured Auto Scaling group launches 500 instances instead of 5 — Anomaly Detection fires within hours, long before end-of-month billing review
+
+---
+
+## AWS Trusted Advisor
+
+Trusted Advisor checks your AWS environment against best practices across five categories: cost optimization, performance, security, fault tolerance, and service quotas.
+
+**Cost optimization checks**:
+
+| Check | What It Finds |
+|-------|--------------|
+| Idle EC2 instances | Instances with < 10% average CPU for 4 days and low network traffic |
+| Underutilized EBS volumes | Volumes with < 1 IOPS/day for 7 days — likely unused |
+| Unassociated Elastic IP addresses | EIPs not attached to any running instance — charged at $0.005/hr |
+| RIs expiring soon | Reserved Instances expiring in the next 30 days — renew or allow to revert to On-Demand |
+| Low RI utilization | RIs used < 80% over the past 30 days — potential waste |
+
+**Security checks** (relevant to cost — a compromised account often drives unexpected spend):
+
+| Check | What It Finds |
+|-------|--------------|
+| Security groups with unrestricted access | Ports open to 0.0.0.0/0 |
+| MFA on root account | Root account without MFA |
+| S3 bucket permissions | Buckets with public access |
+| Public RDS snapshots | Snapshots accessible to any AWS account |
+
+Full Trusted Advisor access (all checks, programmatic access) requires a Business or Enterprise Support plan. The Developer Support plan and free tier provide access to a limited subset of checks.
+
+---
+
+## Architectural Cost Patterns
+
+Architectural decisions have more impact on cost than purchasing model choices. Choosing the wrong architecture and then buying Savings Plans for it still leaves substantial waste.
+
+### Use Managed Services (Total Cost of Ownership)
+
+Self-managed EC2 databases appear cheaper per hour but require:
+- Manual backup configuration, testing, and monitoring
+- OS and database engine patching
+- Multi-AZ replication setup and failover testing
+- Scaling — add read replicas, resize instances, storage auto-scaling
+- Expert operational knowledge
+
+Amazon RDS costs more per hour than an equivalent EC2 instance. But it delivers automated backups, Multi-AZ failover, read replica provisioning, storage auto-scaling, and engine patching. For most organizations, the total cost of ownership including engineering time and operational risk favors RDS.
+
+The same logic applies to ElastiCache vs self-managed Redis/Memcached, MSK vs self-managed Kafka, and OpenSearch Service vs self-managed Elasticsearch.
+
+### S3 Storage Lifecycle Management
+
+S3 Standard charges for every byte stored every month. Not all data is accessed every month:
+
+| S3 Storage Class | Use Case | Cost vs Standard |
+|-----------------|----------|-----------------|
+| S3 Standard | Frequently accessed (daily) | Baseline |
+| S3 Standard-IA | Infrequent access (monthly) | ~60% cheaper storage, retrieval fee applies |
+| S3 Glacier Instant Retrieval | Archive accessed occasionally (quarterly) | ~80% cheaper, millisecond retrieval |
+| S3 Glacier Flexible Retrieval | Archive, retrieval in minutes to hours | ~90% cheaper |
+| S3 Glacier Deep Archive | Long-term archive, 12-hour retrieval | ~95% cheaper |
+
+**S3 Intelligent-Tiering**: Automatically moves objects between Standard and Infrequent Access tiers based on access patterns. Small monthly monitoring fee per object. Eliminates the need to predict access patterns — suitable for data lakes and application storage where access patterns are unpredictable.
+
+**Lifecycle rules**: Explicit time-based transitions without the monitoring fee:
+- Day 0: Upload to S3 Standard
+- Day 30: Transition to Standard-IA
+- Day 90: Transition to Glacier Instant Retrieval
+- Day 365: Transition to Glacier Deep Archive
+- Day 2555 (7 years): Expire (delete)
+
+### Layered Purchasing Model for Auto Scaling Workloads
+
+A common pattern for variable workloads:
+
+```
+Total capacity = Savings Plan baseline + On-Demand burst + Spot for batch
+
+Example: a web application that needs 20 instances at night and 80 instances midday
+- Purchase Savings Plans covering 20 instances (always running)
+- On-Demand covers midday burst from 20 to 80 instances (no commitment, flexible)
+- Spot Fleet runs nightly batch processing jobs (not the web tier — Spot is for fault-tolerant work)
+```
+
+This approach maximizes savings on the predictable portion while retaining flexibility for the variable portion and using Spot for appropriate batch work.
+
+### Eliminate Waste
+
+| Waste Type | Detection | Remediation |
+|-----------|-----------|-------------|
+| Unattached EBS volumes | Trusted Advisor, Config rule | Snapshot + delete |
+| Idle EC2 instances | Trusted Advisor, Compute Optimizer | Terminate or stop |
+| Unassociated Elastic IPs | Trusted Advisor | Release |
+| Old EBS snapshots | Cost Explorer, DLM audit | Expire via DLM lifecycle policy |
+| Idle RDS instances | Trusted Advisor, CloudWatch (0 connections) | Stop (temporary) or delete |
+| Large EC2 instances doing small work | Compute Optimizer | Right-size |
+| Cross-AZ data transfer | VPC Flow Logs analysis | Collocate compute and data in same AZ |
+
+### Tagging Strategy for Cost Attribution
+
+Without resource tags, you cannot attribute spending to business units, teams, products, or environments. Cost Explorer can break down by service but not by "which team caused this EC2 spend."
+
+Mandatory tag strategy:
+
+| Tag Key | Example Values | Purpose |
+|---------|---------------|---------|
+| `Environment` | prod, staging, dev, sandbox | Separate production vs non-production costs |
+| `Team` | platform, data, frontend, backend | Attribute spending to engineering teams |
+| `Project` | project-x, project-y | Track project-specific costs |
+| `CostCenter` | 1001, 1002, 1003 | Finance attribution for chargeback or showback |
+
+Enable cost allocation tags in the Billing console after applying tags to resources. Tags appear in Cost Explorer breakdowns and in the CUR within 24 hours of activation.
+
+Enforce tagging compliance with AWS Config custom rules — flag any EC2 instance, RDS instance, or S3 bucket missing required tags as NON_COMPLIANT. Combine with Budget Actions to stop non-tagged instances.
+
+---
+
+## Cost Optimization Framework
+
+The AWS Cost Optimization Pillar from the Well-Architected Framework defines five practices:
+
+1. **Practice Cloud Financial Management**: Establish a cloud cost function, define ownership, implement chargeback or showback, hold teams accountable.
+2. **Expenditure and usage awareness**: Tag resources, use Cost Explorer and CUR, set Budgets, review regularly.
+3. **Cost-effective resources**: Select the right service and instance type. Match compute to workload characteristics. Use Graviton where applicable.
+4. **Manage demand and supply resources**: Auto Scaling matches supply to demand. Avoid over-provisioning for peak — scale instead.
+5. **Optimize over time**: As AWS releases new services and instance types, evaluate whether migrating reduces cost. Revisit purchasing model commitments annually.
+
+Applied as a cycle:
+
+```
+Measure: CloudWatch → Cost Explorer → CUR → Trusted Advisor
+Identify: Over-provisioned resources, unoptimized purchasing, architectural waste
+Act: Right-size, purchase Savings Plans, apply lifecycle policies, eliminate unused resources
+Verify: Measure again — confirm cost reduction without performance impact
+Repeat: Cost optimization never ends; AWS releases better options continuously
+```
+
+---
+
+## Cost Management Flow
 
 <FlowDiagram
-  parties={["Billing Data", "Analytics Layer"]}
+  parties={["Finance", "Cost Explorer", "Compute Optimizer", "Engineering", "AWS Budgets"]}
   steps={[
-    { from: "Billing Data", to: "Analytics Layer", label: "CUR delivered to S3", sub: "Hourly/daily CSV files per account" },
-    { from: "Billing Data", to: "Analytics Layer", label: "AWS Glue crawler catalogs data", sub: "Schema auto-detected, partitions by date/account" },
-    { from: "Analytics Layer", to: "Billing Data", label: "Athena SQL query", sub: "SELECT service, SUM(cost) GROUP BY service, month" },
-    { from: "Analytics Layer", to: "Billing Data", label: "QuickSight dashboard", sub: "Cost by team (via tags), trend lines, anomaly alerts" },
-    { from: "Analytics Layer", to: "Billing Data", label: "Finance + Engineering visibility", sub: "Chargeback reports, savings tracking, budget vs actual" },
+    { from: "Finance", to: "Cost Explorer", label: "Monthly cost review — EC2 over-spend identified", sub: "EC2 costs up 40% vs prior month — no corresponding traffic increase" },
+    { from: "Cost Explorer", to: "Engineering", label: "Right-sizing report: 12 instances over-provisioned", sub: "Compute Optimizer: m5.4xlarge → m5.xlarge recommended (avg CPU 6%)" },
+    { from: "Engineering", to: "Compute Optimizer", label: "Apply right-sizing recommendations", sub: "Resize 12 instances; migrate 8 x86 instances to Graviton equivalents" },
+    { from: "Engineering", to: "AWS Budgets", label: "Purchase Compute Savings Plans for new baseline", sub: "Commit to $8/hr (covers ~40 m6g.xlarge equivalent) — 54% discount" },
+    { from: "Engineering", to: "AWS Budgets", label: "Deploy Spot Fleet for nightly batch jobs", sub: "Batch processing: 90% discount; stateless workers, S3 checkpointing" },
+    { from: "AWS Budgets", to: "Finance", label: "Budget alert configured at 110% of forecast", sub: "SNS alert if monthly EC2 spend exceeds forecast — catch anomalies early" },
   ]}
 />
 
 ---
 
-## Cost Optimization Best Practices
-
-### Right-Sizing
-
-Right-sizing is the process of matching instance size to actual workload requirements, not projected peaks. Common patterns:
-
-- Start with Compute Optimizer recommendations — they are data-driven and show estimated savings
-- Use t3 or t4g instances for burstable workloads (web servers, development, microservices with variable load)
-- Graduate to m6i/m7i (general purpose) if CPU consistently runs above 80% baseline
-- Use c6i/c7i (compute optimized) for CPU-intensive tasks, r6i/r7i (memory optimized) for in-memory databases and analytics
-
-### Commitment Purchasing Strategy
-
-A practical approach:
-1. Measure baseline usage over 4–8 weeks
-2. Purchase Compute Savings Plans for ~70% of that baseline (lower commitment in case usage drops)
-3. Let Spot cover burst capacity
-4. Review quarterly and purchase additional plans as baseline grows
-
-Do not purchase RIs or Savings Plans for workloads that might be decommissioned — the commitment continues regardless.
-
-### Eliminate Idle Resources
-
-Trusted Advisor and Cost Explorer surface the most common idle resources:
-
-| Resource Type | Common Cause | Action |
-|---------------|-------------|--------|
-| Unattached EBS volumes | Instance terminated, volume left behind | Snapshot and delete |
-| Stopped EC2 instances | "I'll start it again later" | Terminate if not needed; EBS volumes still charged |
-| Idle RDS instances | Forgotten development databases | Snapshot and delete |
-| Unassociated Elastic IPs | Released instance, EIP not released | Release EIP |
-| Unused load balancers | Application decommissioned | Delete; ELB charges hourly |
-| Old EBS snapshots | Automated backup retention not configured | Delete snapshots older than retention window |
-
-### S3 Storage Optimization
-
-S3 storage costs accumulate silently. Optimization strategies:
-
-- **S3 Intelligent-Tiering**: Automatically moves objects between frequent, infrequent, and archive tiers based on access patterns. No retrieval fee for frequent/infrequent tiers. Suitable for unpredictable access patterns.
-- **Lifecycle policies**: Transition objects to cheaper storage classes after defined periods (e.g., move to IA after 30 days, Glacier after 90 days) or expire (delete) old objects entirely.
-- **S3 Storage Lens**: Account-wide and organization-wide analytics on S3 usage — identifies buckets with growth anomalies, unversioned buckets, incomplete multipart uploads consuming space.
-
-### Use Graviton
-
-AWS Graviton (ARM-based) instances provide 20–40% better price/performance than equivalent x86 instances:
-
-- Available for EC2 (t4g, m7g, c7g, r7g families), RDS, ElastiCache, Lambda, ECS/EKS Fargate
-- Workloads must be compatible with ARM architecture (most modern Linux applications compile without code changes)
-- Graviton2/3 available in all major regions
-
-### Optimize Data Transfer
-
-- Use **VPC Gateway Endpoints** for S3 and DynamoDB — traffic stays on the AWS network, eliminating NAT Gateway processing charges and internet egress costs for these services. Gateway endpoints are free.
-- Deploy resources in the **same AZ** for components that transfer high volumes of data (application tier ↔ cache, application tier ↔ database) to eliminate cross-AZ charges.
-- Use **CloudFront** to cache and serve frequently accessed content — reduces origin egress costs and lowers per-GB transfer cost through CloudFront's pricing.
-- Use **S3 Transfer Acceleration** only when users are geographically distributed and upload performance is critical — it adds cost.
-
----
-
 ## References
 
-- [AWS Pricing documentation](https://aws.amazon.com/pricing/)
-- [EC2 On-Demand pricing](https://aws.amazon.com/ec2/pricing/on-demand/)
+- [AWS Pricing overview](https://aws.amazon.com/pricing/)
 - [AWS Savings Plans documentation](https://docs.aws.amazon.com/savingsplans/latest/userguide/what-is-savings-plans.html)
+- [Spot Instance best practices](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-best-practices.html)
 - [AWS Cost Explorer documentation](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html)
-- [AWS Compute Optimizer documentation](https://docs.aws.amazon.com/compute-optimizer/latest/ug/what-is-compute-optimizer.html)
-- [AWS Trusted Advisor documentation](https://docs.aws.amazon.com/awssupport/latest/user/trusted-advisor.html)
+- [AWS Budgets documentation](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html)
 - [AWS Cost and Usage Report](https://docs.aws.amazon.com/cur/latest/userguide/what-is-cur.html)
+- [AWS Compute Optimizer](https://docs.aws.amazon.com/compute-optimizer/latest/ug/what-is-compute-optimizer.html)
+- [AWS Trusted Advisor](https://docs.aws.amazon.com/awssupport/latest/user/trusted-advisor.html)
+- [Cost Optimization Pillar — AWS Well-Architected Framework](https://docs.aws.amazon.com/wellarchitected/latest/cost-optimization-pillar/welcome.html)
