@@ -1,0 +1,202 @@
+---
+title: "Cisco FTD — VPN Configuration"
+category: "cisco"
+topic: "vpn"
+summary: "Site-to-site and remote access VPN on Cisco FTD — IKEv2 IPsec tunnels configured via FMC, AnyConnect RA-VPN with RADIUS authentication, and NAT exemption."
+tags: ["cisco", "ftd", "vpn", "ipsec", "ikev2", "anyconnect", "ra-vpn", "fmc"]
+order: 16
+draft: false
+---
+
+## Overview
+
+Firepower Threat Defense supports two distinct VPN use cases. **Site-to-site VPN** connects branch offices or partner networks to headquarters through encrypted IPsec tunnels. **Remote access VPN** connects individual users working off-site back to the corporate network using the AnyConnect client. Both are configured through FMC and both use the IPsec/IKE framework for the underlying cryptography — but they differ significantly in how they are set up, how traffic is steered, and what licences they require.
+
+A correct VPN deployment on FTD requires understanding not just the tunnel configuration itself but also the NAT interaction: traffic destined for a VPN peer must be excluded from any PAT rule that would otherwise translate it, or the VPN negotiation and traffic matching will fail.
+
+---
+
+## Site-to-Site VPN
+
+### Configuration in FMC
+
+Site-to-site VPN on FTD is configured under **Devices → VPN → Site to Site → Add**.
+
+The wizard proceeds through these stages:
+
+**Step 1 — Topology Type**
+
+| Type | Use Case |
+|---|---|
+| **Point-to-Point (P2P)** | Two FTD devices (or FTD and a third-party peer) connected directly |
+| **Hub-and-Spoke** | Multiple branch FTDs connecting to a central hub FTD; branch-to-branch traffic routes through the hub |
+| **Full Mesh** | Every site has a tunnel to every other site; no hub required |
+
+**Step 2 — Endpoints**
+
+For each endpoint, select:
+- The FTD device (or enter the IP of a non-FMC-managed peer)
+- The outside interface that the tunnel will terminate on
+- For VTI-based (route-based) VPN: the virtual tunnel interface
+
+**Step 3 — IKE Settings**
+
+FTD supports both IKEv1 and IKEv2. IKEv2 is strongly preferred for new deployments:
+
+| Attribute | IKEv1 | IKEv2 |
+|---|---|---|
+| Authentication modes | Pre-shared key, RSA signatures | Pre-shared key, RSA signatures, EAP |
+| Phase negotiation | Phase 1 (ISAKMP SA) + Phase 2 (IPsec SA) | IKE_SA_INIT + IKE_AUTH (combined, more efficient) |
+| Reliability | UDP 500/4500; no built-in retry | Built-in reliability; supports asymmetric authentication |
+| MOBIKE | Not supported | Supported (re-keying after IP change) |
+
+Authentication methods:
+- **Pre-shared key**: simpler to configure; less scalable; same key on both sides
+- **Certificate (PKI)**: more scalable; each side presents a certificate signed by a common CA; preferred for large or inter-organisation VPNs
+
+**Step 4 — IPsec Proposals**
+
+The IPsec proposal defines the encryption and integrity algorithms for the data tunnel:
+
+| Parameter | Common Choices |
+|---|---|
+| **Encryption** | AES-GCM-256 (preferred; AEAD, no separate integrity needed), AES-CBC-256, AES-CBC-128 |
+| **Integrity (non-AEAD only)** | SHA-256, SHA-384, SHA-512 |
+| **DH Group (PFS)** | Group 14 (2048-bit), Group 19 (256-bit ECP), Group 20 (384-bit ECP) |
+| **SA Lifetime** | IKE SA: 86400 seconds (24 hours); IPsec SA: 3600 seconds (1 hour) |
+
+**Step 5 — Protected Networks (Policy-Based) or VTI (Route-Based)**
+
+**Policy-based VPN**: defines specific source and destination subnets that trigger the tunnel (crypto ACL). Traffic from 10.1.0.0/24 to 192.168.10.0/24 is encrypted; anything else is not. Policy-based is simpler but rigid — the selectors must match exactly on both peers.
+
+**Route-based VPN (VTI)**: creates a virtual tunnel interface. Any traffic routed via that interface is automatically encrypted. Supports dynamic routing protocols (OSPF, BGP) over the tunnel, making it far more flexible for topologies that change over time or require failover routing.
+
+---
+
+## NAT Exemption for VPN
+
+This is one of the most common VPN misconfiguration points. If an FTD device is also performing PAT for internet access (translating 10.1.0.0/24 to the outside interface IP), then traffic destined for the VPN peer's remote networks will also be PATted — and the VPN will break because the NAT-translated source address will not match the IPsec traffic selector.
+
+The fix is an **Identity NAT rule** — sometimes called a NAT exemption rule:
+
+```
+FMC NAT configuration:
+Rule Type: Manual NAT (Section 1 — runs before auto NAT)
+Type: Static
+Source Interface: inside
+Destination Interface: outside
+Original Source: INSIDE_NET (10.1.0.0/24)
+Original Destination: REMOTE_VPN_NET (192.168.10.0/24)
+Translated Source: INSIDE_NET (same — no translation)
+Translated Destination: REMOTE_VPN_NET (same — no translation)
+```
+
+This tells FTD: "when traffic from the inside network is going toward the VPN remote network, do not translate it." The identity NAT rule in Section 1 takes precedence over the PAT rule in Section 2, so VPN traffic bypasses PAT.
+
+---
+
+## AnyConnect Remote Access VPN
+
+AnyConnect is Cisco's SSL/TLS and IKEv2-based remote access VPN client. It is the only supported RA-VPN client for FTD. Clientless SSL VPN (browser-based, no client) is not supported on FTD — that feature remains exclusive to ASA.
+
+### Licence Requirement
+
+Remote access VPN requires an **AnyConnect Plus or AnyConnect Apex** licence in addition to the FTD Base and RA VPN licences. The AnyConnect licence controls which features the client can use:
+
+| Licence | Key Features |
+|---|---|
+| **AnyConnect Plus** | SSL and IKEv2 VPN, basic posture assessment |
+| **AnyConnect Apex** | All Plus features plus advanced posture, Network Access Manager, ISE posture |
+
+### Configuration in FMC
+
+RA-VPN is configured under **Devices → VPN → Remote Access → Add**.
+
+The wizard configures these components:
+
+**Connection Profile (Tunnel Group)**
+
+The connection profile is the primary configuration object. It defines:
+- **Name**: what users select in the AnyConnect client (e.g., "Corporate VPN")
+- **Authentication method**: RADIUS server group, AAA, or certificate
+- **Address pool**: the IP range assigned to VPN clients (e.g., 172.16.100.0/24 — must not overlap with existing subnets)
+- **Group policy**: applied to sessions matching this connection profile
+
+**Group Policy**
+
+Group policy controls per-session behaviour:
+- **DNS servers**: pushed to the client while connected
+- **Split tunnelling**: which subnets go through the VPN vs. over the local internet connection
+- **Idle timeout**: how long an inactive session is kept open
+- **AnyConnect profile**: XML file pushed to the client defining server list, certificate behaviour, and UI preferences
+- **Banner**: message displayed to users when they connect
+
+**Authentication — RADIUS**
+
+FTD authenticates AnyConnect users against a RADIUS server. In most enterprise deployments this is Cisco ISE or a Windows NPS server:
+
+```
+FMC → Objects → RADIUS Server Group
+Add RADIUS servers with: IP address, shared secret, timeout, retries
+
+In Connection Profile: set Authentication to the RADIUS server group
+```
+
+For MFA (multi-factor authentication), the RADIUS server proxies the authentication to a second factor provider such as Cisco Duo or RSA SecurID. From FTD's perspective, this is transparent — it sends the RADIUS authentication request and receives an accept or reject.
+
+**Outside Interface Assignment**
+
+The connection profile is assigned to the FTD's outside interface — the interface that AnyConnect clients connect to. This is typically the internet-facing interface. FTD listens for AnyConnect HTTPS connections on TCP 443 and for IKEv2 connections on UDP 500/4500.
+
+---
+
+## Split Tunnelling vs Full Tunnel
+
+This is a significant design decision that affects both security and user experience:
+
+**Full Tunnel (All Traffic Through VPN)**
+
+All of the user's internet traffic is routed through the corporate VPN and exits through the corporate internet connection. This ensures that all remote traffic passes through corporate security controls (proxy, firewall, DLP). The downside is increased latency for internet browsing and additional load on the corporate internet connection.
+
+**Split Tunnelling (Specific Subnets Through VPN)**
+
+Only traffic destined for defined corporate subnets is encrypted and sent through the VPN. All other traffic (Netflix, general browsing) goes directly out the user's local internet connection. This reduces VPN load and improves performance for internet applications, but means that internet traffic from remote users bypasses corporate security controls.
+
+FMC group policy split tunnelling options:
+- **Exclude networks from tunnel** (exclude list): everything goes through VPN except the listed subnets
+- **Include networks in tunnel** (include list): only the listed subnets go through VPN — all else is direct
+
+---
+
+## Verifying VPN Status
+
+### CLI Commands on FTD
+
+```
+show crypto ikev2 sa
+  — Lists all active IKEv2 security associations
+  — Shows local/remote IP, negotiated algorithms, SA lifetime remaining
+
+show crypto ipsec sa
+  — Lists all IPsec SAs with traffic counters
+  — Verify encaps/decaps counters are incrementing (tunnel passing traffic)
+  — Check for "pkts decap'd" increasing — inbound traffic decrypted
+  — Check for "pkts encap'd" increasing — outbound traffic encrypted
+
+show vpn-sessiondb anyconnect
+  — Lists active AnyConnect sessions
+  — Shows username, assigned IP, bytes in/out, session duration
+
+show vpn-sessiondb summary
+  — Quick count of active VPN sessions by type
+```
+
+### FMC Event Verification
+
+For remote access VPN, FMC shows active sessions and authentication events:
+
+- **Analysis → Unified Events**: filter for VPN connection events; shows user, assigned IP, connection duration, bytes transferred
+- **Analysis → Users**: shows which users are actively connected via RA-VPN
+- FMC → Devices → VPN → Remote Access: shows active session count per connection profile
+
+A common troubleshooting flow for a failing S2S VPN: check `show crypto ikev2 sa` first — if the IKE SA is not up, the problem is in Phase 1 (mismatched IKE proposals, authentication failure, or connectivity). If the IKE SA is up but the IPsec SA is not, the problem is in Phase 2 (mismatched IPsec proposals or mismatched traffic selectors). If both are up but traffic is not flowing, check the NAT exemption and routing table.

@@ -1,0 +1,228 @@
+---
+title: "Cisco Firepower — Policy Architecture"
+category: "cisco"
+topic: "firepower-policies"
+summary: "Cisco Firepower's layered policy model — Access Control Policy, IPS, malware and file inspection, SSL decryption, identity, and DNS policies — and how they stack."
+tags: ["cisco", "ftd", "fmc", "acp", "ips", "malware", "ssl", "firepower"]
+order: 15
+draft: false
+---
+
+## Overview
+
+Firepower does not have a single monolithic policy. It has a **stack of specialised policies** that each handle one dimension of security inspection, applied in a defined sequence. A packet arriving on an FTD interface passes through up to seven distinct policy stages before a final forwarding decision is made. Understanding the order and purpose of each stage is essential both for designing effective security policies and for troubleshooting why a connection is behaving unexpectedly.
+
+The policies are authored separately in FMC, linked together, and deployed as a coordinated set to each FTD device. Changes to any individual policy require a deployment to take effect.
+
+---
+
+## Policy Processing Order
+
+When a packet arrives on an FTD interface, it is evaluated in this sequence:
+
+1. **Prefilter Policy** — fast-path trusted traffic or handle encapsulated tunnels before full inspection
+2. **Security Intelligence** — block known-bad IPs, URLs, and DNS before any rules are evaluated
+3. **SSL Policy** — decrypt TLS-encrypted traffic so downstream policies can see plaintext
+4. **Identity Policy** — determine which Active Directory user is associated with the connection
+5. **DNS Policy** — intercept malicious DNS queries and sinkhole C2 domains
+6. **Access Control Policy** — main allow/block/IPS/malware/URL policy with per-rule actions
+7. **QoS / NAT** — rate limiting and address translation (applied in the context of the forwarding decision)
+
+First match in each policy wins. A packet that is blocked or fast-pathed in an early stage never reaches the later stages, which is both a performance optimisation and a security design choice.
+
+---
+
+## Access Control Policy (ACP)
+
+The ACP is the central policy. Every connection eventually reaches the ACP unless it was already fast-pathed or blocked by an earlier stage.
+
+### Rule Actions
+
+| Action | Behaviour |
+|---|---|
+| **Allow** | Permit the connection; can attach IPS policy, file/malware policy, and URL inspection |
+| **Block** | Drop the connection; no inspection |
+| **Block with Reset** | Drop and send TCP RST to both client and server |
+| **Trust** | Permit without any deep inspection — bypasses IPS and file inspection; use for high-trust internal traffic where inspection overhead is not justified |
+| **Monitor** | Log the connection event; continue evaluating subsequent rules (does not make a final permit/deny decision) |
+| **Interactive Block** | Display a block warning page; user can click through to proceed (useful for risky but not forbidden sites) |
+
+### Rule Match Criteria
+
+ACP rules can match on any combination of:
+
+- **Zones**: source and destination security zone
+- **Networks**: source and destination IP address objects (host, subnet, range, FQDN)
+- **Ports**: destination TCP/UDP port objects
+- **Applications**: Layer 7 application identity (from Snort's application detection engine — Facebook, Netflix, BitTorrent, Dropbox, etc.)
+- **URLs**: URL category and reputation (requires URL Filtering licence)
+- **Users**: Active Directory user or group (requires Identity Policy and realm configuration)
+- **SGT**: Cisco ISE Scalable Group Tags (requires ISE integration)
+- **Time Range**: schedule-based rules that activate only during defined windows
+- **VLAN tags**: 802.1Q VLAN ID
+
+The first rule in the ACP that matches all specified criteria wins. Rules that are not matched continue to the next rule. If no rule matches, the **Default Action** applies — which can be Block All Traffic, Trust All Traffic, or Intrusion Prevention (allow with IPS).
+
+### Security Intelligence
+
+Security Intelligence runs before the ACP rules and blocks connections to or from known-malicious IPs, URLs, or DNS names using Talos threat intelligence feeds. Categories include: Attackers, Bogon addresses, Botnets, Command-and-Control servers, Exploit kits, Malware distribution, Open proxies, Phishing, Spam sources, and Tor exit nodes.
+
+A separate Do-Not-Block list acts as an override whitelist for hosts that appear in threat feeds but are known-safe in the environment (for example, a security research IP that is listed as a scanner).
+
+---
+
+## IPS Policy
+
+The IPS policy uses the **Snort** engine to inspect traffic for attack signatures and protocol anomalies. An IPS policy is attached to an ACP **Allow** rule and applies to traffic that the ACP permits — you must allow traffic to inspect it.
+
+### Base Policies
+
+Cisco provides built-in base policies tuned for different environments:
+
+| Base Policy | Characteristic |
+|---|---|
+| **Connectivity over Security** | Fewest rules enabled; minimal false positives; optimised for high-throughput networks where disruption must be avoided |
+| **Balanced** | Cisco's general-purpose recommendation; moderate rules enabled; reasonable false positive rate |
+| **Security over Connectivity** | More rules enabled; accepts higher false positive rate in exchange for better detection |
+| **Maximum Detection** | All rules enabled; very high false positive rate; use only in passive/detection mode for testing |
+
+### Snort Variables
+
+IPS rules use variables so they apply correctly to your specific environment:
+
+| Variable | Purpose |
+|---|---|
+| `$HOME_NET` | Your internal networks (e.g., 10.0.0.0/8, 192.168.0.0/16) |
+| `$EXTERNAL_NET` | Everything that is not `$HOME_NET` (typically `!$HOME_NET`) |
+| `$HTTP_SERVERS` | Hosts running web servers in your network |
+| `$HTTP_PORTS` | Ports used for HTTP (typically 80, 8080, 8000) |
+
+Defining `$HOME_NET` accurately is important — many Snort rules use the attack direction (external to internal) as a match criterion. Rules with incorrectly defined variables will either miss attacks or generate excessive noise.
+
+### Inline vs Passive IPS Mode
+
+- **Inline mode**: traffic physically passes through FTD; Snort can **drop** packets matching attack signatures in real time — this is prevention mode
+- **Passive / Inline Tap mode**: traffic is copied to FTD; Snort can only **alert** but cannot block — this is detection mode
+
+Most perimeter firewall deployments use inline mode. Passive mode is used for sensor deployments inside the network without disrupting existing traffic paths, or during an evaluation period to understand the false positive rate before moving to prevention.
+
+---
+
+## File and Malware Policy
+
+File and malware inspection is attached to ACP Allow rules and inspects file transfers in transit. It requires the **Malware licence**.
+
+### Inspection Flow
+
+1. FTD detects a file being transferred (in HTTP, SMTP, IMAP, FTP, SMB, or other supported protocols)
+2. The file is identified by magic bytes — the actual file type regardless of extension
+3. FTD computes the **SHA-256 hash** of the file and queries the **AMP Cloud** for a disposition
+
+### AMP Cloud Dispositions
+
+| Disposition | Meaning |
+|---|---|
+| **Clean** | File is known-safe; permit |
+| **Malware** | File is known malware; block if Block Malware action is configured |
+| **Unknown** | File not seen before; no verdict yet; disposition may change later |
+| **Unavailable** | AMP Cloud unreachable; disposition cannot be determined |
+
+### Retrospective Alerts
+
+One of the more powerful features of AMP integration is **retrospective analysis**. If a file is seen as Unknown at the time of transfer and is later identified as Malware by Talos (perhaps hours or days later), AMP sends a retrospective alert back to FMC. This allows the security team to identify which hosts downloaded the file and respond accordingly — even though the file was not blocked at the time.
+
+### Dynamic Analysis (Threat Grid)
+
+Files with an Unknown disposition can optionally be submitted to **Cisco Threat Grid**, a cloud sandbox that detonates the file in a virtual environment and returns a behavioural threat score. This is especially useful for executable files and documents where static hash lookup is insufficient.
+
+File policy is configured under **Policies → Access Control → Malware and File**, and attached to Allow rules in the ACP — it cannot be attached to Block or Trust rules.
+
+---
+
+## SSL Policy (TLS Inspection)
+
+Most enterprise internet traffic is HTTPS-encrypted. Without SSL inspection, FTD cannot apply URL category filtering, AMP malware inspection, or application detection to HTTPS connections — the payload is opaque. The SSL Policy enables FTD to decrypt, inspect, and re-encrypt TLS sessions.
+
+### Decryption Modes
+
+| Mode | Use Case |
+|---|---|
+| **Decrypt - Resign** | FTD decrypts the connection by generating a new certificate signed by its own internal CA, presents it to the client, and re-encrypts the traffic toward the server. Used for outbound HTTPS from internal users to internet sites. Requires the re-signing CA to be trusted by all clients (deployed via GPO or MDM). |
+| **Decrypt - Known Key** | FTD holds the server's private key and can decrypt inbound HTTPS without impersonation. Used for DMZ servers managed by the organisation — FTD decrypts inbound traffic from the internet for inspection. |
+| **Do Not Decrypt** | Skip inspection for this traffic class. Used for banking applications, certificate-pinning apps, or high-sensitivity traffic where decryption is undesirable or technically impossible. |
+| **Block** | Terminate the encrypted session outright without decryption. |
+
+### Certificate Pinning Problem
+
+Some applications (mobile banking apps, corporate single sign-on clients, update services) use certificate pinning — they check that the server certificate matches a specific expected value or CA. When FTD's Decrypt-Resign mode intercepts these connections, the certificate presented to the client does not match the pinned value, and the application refuses to connect. The solution is a **Do Not Decrypt** rule for the relevant destinations.
+
+SSL rules match on zone, network, port, URL category, certificate common name, certificate issuer, and certificate status (expired, untrusted, self-signed). This allows precise targeting — for example, decrypt all HTTPS from inside-zone to outside-zone, except for banking category URLs.
+
+---
+
+## Identity Policy
+
+The Identity Policy maps network connections to Active Directory users, enabling user-based ACP rules such as "allow Finance group to access the accounting server" or "block Social Media category for Contractors."
+
+### Identity Sources
+
+| Method | Mechanism |
+|---|---|
+| **Passive (ISE)** | ISE authenticates users via 802.1X and publishes user-to-IP mappings to FMC via pxGrid |
+| **Passive (AD Agent / TS Agent)** | A lightweight agent installed on a Windows server monitors AD security event logs for logon events and maps usernames to IP addresses |
+| **Active (Captive Portal)** | FTD redirects unauthenticated users to a browser-based login page; user supplies AD credentials to gain access |
+| **RA-VPN** | AnyConnect authenticated users are automatically known to FTD by username |
+
+Once identity is established, ACP rules can reference AD users or security groups directly. FMC queries the configured **realm** (an LDAP connection to Active Directory) to resolve group memberships.
+
+---
+
+## DNS Policy
+
+The DNS Policy intercepts DNS queries and blocks resolution of malicious domain names before any connection to the destination is attempted. This is faster than blocking at the ACP level because the C2 connection never starts — the DNS query itself is the intervention point.
+
+### Sinkhole
+
+The primary DNS policy action for threat response is **sinkhole**:
+
+- FTD intercepts the DNS query for a C2 domain and responds with the **sinkhole IP address** instead of the real IP
+- The infected host then tries to connect to the sinkhole IP — a non-routable address or a controlled host
+- FTD logs this connection attempt, identifying the internal host as potentially compromised
+- The security team can investigate the flagged host
+
+DNS rules use the same Talos threat intelligence feeds as Security Intelligence — specifically the DNS intelligence category, which includes known C2 domains, malware download domains, and DGA (Domain Generation Algorithm) domains.
+
+---
+
+## Prefilter Policy
+
+The Prefilter Policy runs before any other inspection and is designed for two purposes:
+
+1. **Fast-path trusted traffic**: bypass Snort IPS inspection for known-safe bulk traffic. For example, backup jobs between internal servers generate enormous byte volumes that do not need deep inspection. Fast-pathing this traffic reduces IPS load without reducing security for internet-bound flows.
+2. **Tunnel handling**: classify GRE tunnels, IP-in-IP encapsulation, Teredo, and other encapsulated traffic so that the inner payload can be inspected appropriately by downstream policies.
+
+Prefilter rule actions:
+
+| Action | Effect |
+|---|---|
+| **Fastpath** | Skip all remaining inspection; allow immediately |
+| **Block** | Drop without further processing |
+| **Analyze** | Continue to full ACP inspection (default if no prefilter rule matches) |
+
+Fast-pathing should be used conservatively. Traffic that is fast-pathed is completely invisible to IPS, malware, and URL inspection. The justification must be that the traffic source and destination are both fully trusted and the performance benefit is significant.
+
+---
+
+## Policy Summary Table
+
+| Policy | Licence Required | Attached To |
+|---|---|---|
+| Prefilter | Base | Standalone; linked via ACP |
+| Security Intelligence | Threat | ACP (enabled within ACP settings) |
+| SSL | Base | Standalone; linked via ACP |
+| Identity | Base | Standalone; linked via ACP |
+| DNS | Threat | Standalone; linked via ACP |
+| Access Control Policy (ACP) | Base | Device |
+| IPS (Intrusion Policy) | Threat | ACP Allow rules |
+| File/Malware | Malware | ACP Allow rules |
+| URL Category/Reputation | URL Filtering | ACP rules (URL condition) |

@@ -1,0 +1,366 @@
+---
+title: "Cisco IOS — CLI and Device Fundamentals"
+category: "cisco"
+topic: "ios-cli"
+summary: "Navigating the Cisco IOS command-line interface — exec modes, configuration hierarchy, help system, show commands, and saving configuration."
+tags: ["cisco", "ios", "cli", "switch", "router"]
+order: 1
+draft: false
+---
+
+## Overview
+
+The Cisco IOS command-line interface is the primary tool for configuring and troubleshooting Cisco routers and switches. Whether you are working on a Catalyst switch in a wiring closet or an ISR router at a branch office, the CLI behaves the same way — same mode hierarchy, same help system, same command structure. Mastering it means you can operate any IOS or IOS XE device with confidence.
+
+This article covers the mode hierarchy, navigation commands, the help system, essential show commands, saving configuration, and initial device hardening.
+
+---
+
+## CLI Modes
+
+IOS uses a layered mode hierarchy. Each mode restricts which commands are available, and the prompt changes to tell you where you are.
+
+### User EXEC Mode
+
+The first mode you enter when you connect to a device. The prompt shows the hostname followed by `>`.
+
+```
+Switch>
+Router>
+```
+
+User EXEC is read-only and very limited. You can run a handful of show commands and ping, but you cannot view the running configuration or make any changes. It exists as a safe starting point for operators who do not need full access.
+
+### Privileged EXEC Mode
+
+Also called "enable mode." Enter it by typing `enable` (or just `en`) from User EXEC. The prompt changes to `#`.
+
+```
+Switch> enable
+Switch#
+```
+
+Privileged EXEC gives you full read access — you can view the running configuration, the startup configuration, and all show command output. You can also copy files and reload the device. Configuration changes are not made here, but this is the gateway to all configuration modes.
+
+### Global Configuration Mode
+
+Enter with `configure terminal` (abbreviated `conf t`) from Privileged EXEC. The prompt shows `(config)`.
+
+```
+Switch# configure terminal
+Switch(config)#
+```
+
+Global config is where you set device-wide parameters: hostname, domain name, enable password, banners, routing protocols. From here you can drop into sub-modes.
+
+### Interface Configuration Mode
+
+Enter from Global config by specifying an interface.
+
+```
+Switch(config)# interface GigabitEthernet0/1
+Switch(config-if)#
+```
+
+All interface-specific settings — IP addresses, switchport mode, speed, duplex, description, shutdown/no shutdown — are configured here.
+
+### Other Sub-modes
+
+```
+Switch(config-vlan)#    # VLAN configuration (enter with: vlan 10)
+Switch(config-line)#    # Line configuration (enter with: line console 0, line vty 0 4)
+Switch(config-router)#  # Routing protocol (enter with: router ospf 1)
+```
+
+---
+
+## Navigating Between Modes
+
+| Command | From | To |
+|---|---|---|
+| `enable` | User EXEC | Privileged EXEC |
+| `disable` | Privileged EXEC | User EXEC |
+| `configure terminal` | Privileged EXEC | Global config |
+| `interface <type/num>` | Global config | Interface config |
+| `line console 0` | Global config | Line config |
+| `vlan <id>` | Global config | VLAN config |
+| `exit` | Any sub-mode | One level up |
+| `end` or `Ctrl+Z` | Any config mode | Privileged EXEC |
+
+The `end` command and `Ctrl+Z` are shortcuts that jump directly back to Privileged EXEC from any configuration depth — useful when you are nested several levels deep.
+
+The `do` command lets you run Privileged EXEC commands without leaving config mode:
+
+```
+Switch(config)# do show ip interface brief
+```
+
+---
+
+## The Help System
+
+IOS has a built-in context-sensitive help system. The `?` character is your best tool when you are unsure of syntax.
+
+### List all commands available in current mode
+
+```
+Switch# ?
+```
+
+### List subcommands for a partial command
+
+```
+Switch# show ?
+Switch# show ip ?
+```
+
+### Get syntax help mid-command (space before ?)
+
+```
+Switch# show interfaces ?
+```
+
+### Verify a partial command (no space before ?)
+
+```
+Switch# sh?
+```
+This shows all commands that begin with `sh`, confirming whether `show` is a valid command.
+
+### Tab completion
+
+Press `Tab` to complete a partial command when it is unambiguous:
+
+```
+Switch# conf<Tab>
+Switch# configure
+```
+
+### Abbreviated commands
+
+IOS accepts the shortest unambiguous abbreviation of any command:
+
+```
+Switch# sh run          # short for show running-config
+Switch# conf t          # short for configure terminal
+Switch# int Gi0/1       # short for interface GigabitEthernet0/1
+```
+
+If your abbreviation is ambiguous, IOS responds with `% Ambiguous command`.
+
+---
+
+## Show Commands
+
+Show commands are the primary troubleshooting tools in IOS. They are available in Privileged EXEC (or in config mode with `do`).
+
+### View the active configuration
+
+```
+show running-config
+```
+
+Shows the configuration currently in RAM (what the device is actively using). This is your ground truth for what is configured right now.
+
+### View the saved configuration
+
+```
+show startup-config
+```
+
+Shows the configuration stored in NVRAM (what the device will load after a reload). If running-config and startup-config differ, unsaved changes will be lost on reload.
+
+### View interface status — brief
+
+```
+show ip interface brief
+```
+
+The most-used show command. Displays all interfaces with their IP addresses, line status (physical), and protocol status (data link). Status codes:
+
+| Status | Protocol | Meaning |
+|---|---|---|
+| up | up | Fully operational |
+| administratively down | down | Shut down with `shutdown` command |
+| down | down | No cable or connected device is off |
+| up | down | Layer 1 OK, Layer 2 problem |
+
+### View detailed interface statistics
+
+```
+show interfaces
+show interfaces GigabitEthernet0/1
+```
+
+Includes input/output error counters, bandwidth, encapsulation, last input/output times, and queue statistics. Useful for spotting duplex mismatches (input errors, CRC errors) and congestion (output drops).
+
+### View IOS version and hardware
+
+```
+show version
+```
+
+Shows the IOS version, feature set, device model, processor, total/available RAM and flash, uptime, reason for last reload, and the configuration register value.
+
+### View flash storage contents
+
+```
+show flash
+```
+
+Lists files stored in flash memory — IOS image files, VLAN database files, and other stored data.
+
+---
+
+## Saving Configuration
+
+Changes made in Global config mode go into running-config (RAM) immediately but are lost on reload unless explicitly saved.
+
+### Save running-config to NVRAM
+
+```
+copy running-config startup-config
+```
+
+The standard save command. Prompts you to confirm the destination filename (just press Enter to accept the default `startup-config`).
+
+### Shortcut
+
+```
+write memory
+```
+
+Equivalent to `copy running-config startup-config`. Both are widely used — `write memory` is older but still valid on all IOS versions.
+
+### Load startup-config into running-config
+
+```
+copy startup-config running-config
+```
+
+Merges (not replaces) the saved config into the running config. Note: this does not revert the device — it merges, so previously configured items not in startup-config remain active.
+
+---
+
+## Initial Device Hardening
+
+### Hostname and Domain Name
+
+```
+hostname SW1
+ip domain-name nakamas.local
+```
+
+The domain name is required for SSH key generation.
+
+### Enable Secret and Password Encryption
+
+```
+enable secret cisco123
+```
+
+`enable secret` stores the password as an MD5 hash and is strongly preferred over `enable password` (which stores plaintext). If both are configured, `enable secret` takes precedence.
+
+```
+service password-encryption
+```
+
+Encrypts all plaintext passwords in the configuration using a weak Type 7 cipher. This prevents casual shoulder-surfing of the config but is not cryptographically strong — use strong passwords regardless.
+
+### Console Line Configuration
+
+```
+line console 0
+ password console123
+ login
+ exec-timeout 5 0
+```
+
+`exec-timeout 5 0` logs out the session after 5 minutes of inactivity (0 seconds). Set to `0 0` to disable timeout (not recommended on production equipment).
+
+### VTY Lines (Telnet/SSH)
+
+```
+line vty 0 4
+ password vty123
+ login
+ transport input ssh
+ exec-timeout 5 0
+```
+
+`transport input ssh` restricts remote access to SSH only — disables Telnet, which sends all data including passwords in cleartext.
+
+### SSH Configuration
+
+SSH requires a hostname, a domain name, and an RSA key pair.
+
+```
+ip domain-name nakamas.local
+crypto key generate rsa modulus 2048
+ip ssh version 2
+username admin secret password123
+line vty 0 4
+ login local
+ transport input ssh
+```
+
+`login local` tells IOS to authenticate against the local username database (username/password pairs configured with `username`). This is preferable to a shared line password.
+
+### Banner MOTD
+
+```
+banner motd #
+Authorized access only. Disconnect immediately if you are not an authorized user.
+#
+```
+
+The character after `motd` is the delimiter — IOS reads banner text until it sees that character again. Display this banner before users authenticate to meet legal requirements for unauthorized access warnings.
+
+### Clock
+
+```
+clock set 14:30:00 14 Mar 2026
+```
+
+Sets the hardware clock. Accurate time is important for log correlation and certificate validation.
+
+---
+
+## Interface Activation
+
+By default, router interfaces are administratively shut down. Switch interfaces are up by default but should be explicitly configured.
+
+```
+interface GigabitEthernet0/0
+ no shutdown
+```
+
+`no shutdown` removes the administrative shutdown, allowing the interface to come up if a cable is connected and the remote device is on.
+
+---
+
+## Factory Reset
+
+To completely erase configuration and start fresh:
+
+```
+erase startup-config
+reload
+```
+
+`erase startup-config` clears NVRAM. `reload` reboots the device — since NVRAM is empty, the device enters the setup wizard (or boots with a blank config if the wizard is skipped). The running-config is not changed until the reload occurs.
+
+---
+
+## Key Verification Commands Summary
+
+| Command | What it shows |
+|---|---|
+| `show running-config` | Active configuration in RAM |
+| `show startup-config` | Saved configuration in NVRAM |
+| `show ip interface brief` | All interfaces: IP, line status, protocol |
+| `show interfaces` | Detailed interface counters and stats |
+| `show version` | IOS version, hardware, uptime |
+| `show flash` | Flash memory contents |
+| `show users` | Active console and VTY sessions |
+| `show history` | Command history for this session |

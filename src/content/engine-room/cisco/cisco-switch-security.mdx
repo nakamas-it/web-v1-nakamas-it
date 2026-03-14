@@ -1,0 +1,345 @@
+---
+title: "Cisco IOS — Switch Security Features"
+category: "cisco"
+topic: "switch-security"
+summary: "Layer 2 security on Cisco IOS switches — port security, DHCP snooping, Dynamic ARP Inspection, and 802.1X port authentication."
+tags: ["cisco", "ios", "port-security", "dhcp-snooping", "dai", "802.1x", "security"]
+order: 9
+draft: false
+---
+
+## Overview
+
+The switching layer is a common attack surface. Threats at Layer 2 include MAC address table flooding (forcing a switch to behave like a hub), rogue DHCP servers assigning incorrect gateway and DNS information, ARP spoofing redirecting traffic through an attacker's host, and unauthorised devices connecting to access ports. Cisco IOS provides a layered set of switch security features that, when combined, make these attacks significantly harder to execute.
+
+This article covers port security, DHCP snooping, Dynamic ARP Inspection (DAI), storm control, 802.1X port authentication, and VLAN hopping prevention.
+
+---
+
+## Port Security
+
+Port security limits which MAC addresses are allowed to send frames on a switchport. It prevents two categories of attack: unauthorised devices connecting to an access port, and MAC flooding attacks where an attacker floods the CAM table with fake MAC addresses to force the switch into hub-like promiscuous forwarding.
+
+### Prerequisites
+
+Port security requires the interface to be a static access or trunk port. It cannot be configured on dynamic (DTP-negotiated) ports:
+
+```
+interface GigabitEthernet0/1
+ switchport mode access
+```
+
+### Enabling Port Security
+
+```
+interface GigabitEthernet0/1
+ switchport mode access
+ switchport port-security
+```
+
+With defaults: maximum 1 MAC, violation action shutdown.
+
+### Maximum MAC Addresses
+
+```
+switchport port-security maximum 2
+```
+
+Allows up to 2 MAC addresses on the port simultaneously. Useful for ports where an IP phone passes data through to a PC — two MACs are expected.
+
+### Sticky MAC Learning
+
+```
+switchport port-security mac-address sticky
+```
+
+Sticky learning causes the switch to dynamically learn the first MAC addresses seen on the port and store them in the running configuration as if they were statically configured. Copy the running config to startup config to persist them across reboots:
+
+```
+copy running-config startup-config
+```
+
+### Static MAC Address
+
+```
+switchport port-security mac-address 0050.7966.6800
+```
+
+For environments where specific devices are permanently assigned to specific ports, static MAC binding provides the strongest guarantee.
+
+### Violation Modes
+
+When a frame arrives from a MAC address that exceeds the maximum or is not in the allowed list, the configured violation action triggers:
+
+| Mode | Drops Frames | Syslog/SNMP Alert | Shuts Down Port | Increments Counter |
+|------|-------------|-------------------|-----------------|-------------------|
+| `protect` | Yes | No | No | No |
+| `restrict` | Yes | Yes | No | Yes |
+| `shutdown` | Yes (port err-disabled) | Yes | Yes | Yes |
+
+The default is `shutdown`. Protect is the least disruptive but also the least visible — a silently dropped frame provides no indication of a problem.
+
+```
+switchport port-security violation restrict
+```
+
+### Verification
+
+```
+show port-security
+show port-security interface GigabitEthernet0/1
+show port-security address
+```
+
+---
+
+## ErrDisable and Recovery
+
+When a port violation with `shutdown` mode triggers, the port enters err-disabled state. The interface shows as `err-disabled` in `show interfaces status`. To bring it back manually:
+
+```
+interface GigabitEthernet0/1
+ shutdown
+ no shutdown
+```
+
+For environments where automatic recovery is preferred (such as when a user accidentally connects via the wrong NIC and the legitimate device needs to reconnect), configure the err-disable recovery timer:
+
+```
+errdisable recovery cause psecure-violation
+errdisable recovery interval 300
+```
+
+This automatically reenables the port after 300 seconds (5 minutes). Check recovery settings with:
+
+```
+show errdisable recovery
+```
+
+Other causes that can trigger err-disable (each can be enabled for auto-recovery individually): BPDU Guard, UDLD, DAI rate violations, and DHCP snooping rate violations.
+
+---
+
+## DHCP Snooping
+
+DHCP snooping prevents rogue DHCP servers from responding to client DISCOVER messages. A rogue DHCP server can assign incorrect default gateways and DNS servers, redirecting all traffic through an attacker's machine.
+
+DHCP snooping classifies switch ports as **trusted** or **untrusted**:
+- **Trusted ports**: connected to legitimate DHCP servers or uplinks to the distribution/core layer. DHCP server messages (OFFER, ACK) are forwarded normally.
+- **Untrusted ports**: client-facing access ports. DHCP server messages received on untrusted ports are silently dropped.
+
+### Configuration
+
+```
+ip dhcp snooping
+ip dhcp snooping vlan 10
+!
+interface GigabitEthernet0/24
+ description Uplink-to-distribution
+ ip dhcp snooping trust
+!
+interface range GigabitEthernet0/1 - 20
+ description Access-ports
+ ip dhcp snooping limit rate 15
+```
+
+The `limit rate 15` restricts DHCP traffic to 15 packets per second on client-facing ports. This prevents DHCP starvation attacks where an attacker floods DISCOVER messages to exhaust the DHCP pool.
+
+### Option 82 (DHCP Relay Agent Information)
+
+Some switches automatically insert Option 82 (relay agent information) into DHCP requests. If the DHCP server is not configured to accept packets with Option 82, it may drop them. Disable insertion on access switches when the DHCP server does not support it:
+
+```
+no ip dhcp snooping information option
+```
+
+### DHCP Binding Table
+
+DHCP snooping builds a binding table that maps: MAC address → IP address → VLAN → interface → lease expiry. This table is the source of truth for DAI (Dynamic ARP Inspection) in the next section:
+
+```
+show ip dhcp snooping binding
+```
+
+Sample output:
+```
+MacAddress         IpAddress    Lease(sec) Type     VLAN Interface
+00:50:79:66:68:00  10.10.10.5   86372      dhcp-snooping  10  Gi0/1
+```
+
+---
+
+## Dynamic ARP Inspection (DAI)
+
+ARP spoofing (ARP poisoning) is a man-in-the-middle attack where an attacker sends gratuitous ARP replies claiming that the default gateway's IP address maps to the attacker's MAC. Hosts update their ARP caches and begin sending all traffic to the attacker.
+
+DAI validates ARP packets against the DHCP snooping binding table. If the sender MAC and IP in an ARP packet do not match a binding table entry, the packet is dropped.
+
+### Configuration
+
+```
+ip arp inspection vlan 10
+!
+interface GigabitEthernet0/24
+ description Uplink-trusted
+ ip arp inspection trust
+!
+interface range GigabitEthernet0/1 - 20
+ ip arp inspection limit rate 100
+```
+
+The rate limit on untrusted ports (100 ARP packets/second is typical) protects against ARP flooding. Exceeding the rate triggers err-disable on the port by default.
+
+### Hosts with Static IPs
+
+DAI relies on the DHCP snooping binding table. Hosts configured with static IP addresses will not have binding entries, so their ARP packets will be dropped. Use an ARP ACL to create static entries for these hosts:
+
+```
+arp access-list STATIC_HOSTS
+ permit ip host 10.10.10.1 mac host 0050.7966.0001
+!
+ip arp inspection filter STATIC_HOSTS vlan 10
+```
+
+### Verification
+
+```
+show ip arp inspection
+show ip arp inspection vlan 10
+show ip arp inspection interfaces
+```
+
+The output shows forwarded and dropped ARP counts per VLAN and per interface, making it straightforward to identify suspicious behaviour.
+
+---
+
+## Storm Control
+
+Broadcast storms and multicast floods can saturate switch uplinks and destabilise a network. Storm control monitors the rate of broadcast, multicast, and unicast traffic on an interface and takes action when traffic exceeds a configured threshold.
+
+```
+interface GigabitEthernet0/1
+ storm-control broadcast level 20
+ storm-control multicast level 30
+ storm-control action shutdown
+```
+
+The level value is expressed as a percentage of interface bandwidth. At 20%, if broadcast traffic exceeds 20% of the link capacity, the configured action triggers. Actions are:
+- `shutdown` — err-disables the port
+- `trap` — sends SNMP trap but does not block traffic
+
+A stricter option uses absolute packet-per-second thresholds instead of percentages:
+
+```
+storm-control broadcast level pps 1000 500
+```
+
+This permits up to 1000 broadcast packets/second, with a rising threshold of 1000 and a falling threshold of 500 (traffic must drop below 500 pps before storm control deactivates).
+
+---
+
+## 802.1X Port Authentication
+
+802.1X provides port-based network access control. Before a device is allowed to pass data, it must authenticate to a RADIUS server (such as Cisco ISE or Microsoft NPS). Unauthenticated devices are placed in an unauthorised state and cannot communicate.
+
+### Components
+
+- **Supplicant**: the client device (Windows, macOS, Linux with 802.1X client software)
+- **Authenticator**: the switch port — passes EAP messages between supplicant and auth server
+- **Authentication Server**: RADIUS server (Cisco ISE, FreeRADIUS, Windows NPS)
+
+### Switch Configuration
+
+```
+aaa new-model
+aaa authentication dot1x default group radius
+aaa authorization network default group radius
+!
+dot1x system-auth-control
+!
+radius server ISE
+ address ipv4 192.168.100.10 auth-port 1812 acct-port 1813
+ key Str0ngSecret
+!
+interface GigabitEthernet0/1
+ switchport mode access
+ dot1x pae authenticator
+ authentication port-control auto
+ spanning-tree portfast
+```
+
+`authentication port-control auto` is the standard mode: the port is unauthorised by default and transitions to authorised only after successful 802.1X authentication.
+
+### Fallback Options
+
+In environments where not all devices support 802.1X (printers, IP cameras, etc.), configure MAC Authentication Bypass (MAB) as a fallback — the switch uses the device's MAC address as its credential:
+
+```
+interface GigabitEthernet0/1
+ authentication order dot1x mab
+ authentication priority dot1x mab
+ mab
+```
+
+---
+
+## VLAN Hopping Prevention
+
+VLAN hopping attacks exploit misconfigured trunk ports or DTP negotiation to gain access to VLANs the attacker should not reach.
+
+### Disable DTP on Access Ports
+
+By default, many Cisco switch ports are in `dynamic auto` mode and will form a trunk if the connected device sends DTP messages. Disable trunk negotiation on all access ports:
+
+```
+interface range GigabitEthernet0/1 - 20
+ switchport mode access
+ switchport nonegotiate
+```
+
+### Change the Native VLAN
+
+On trunk ports, 802.1Q frames for the native VLAN are sent untagged. An attacker on the native VLAN can send double-tagged frames to reach another VLAN. Move the native VLAN to an unused VLAN that no access ports belong to:
+
+```
+interface GigabitEthernet0/24
+ switchport mode trunk
+ switchport nonegotiate
+ switchport trunk native vlan 999
+```
+
+### Shut Down Unused Ports
+
+Any unused switch port is a potential entry point. Shut them down and assign them to a dedicated quarantine VLAN so that even if someone enables a port it does not land in a production VLAN:
+
+```
+interface range GigabitEthernet0/21 - 23
+ shutdown
+ switchport mode access
+ switchport access vlan 999
+ description UNUSED-QUARANTINE
+```
+
+---
+
+## Layered Defense Summary
+
+| Feature | Threat Mitigated | Key Command |
+|---------|-----------------|-------------|
+| Port Security | Unauthorised devices, MAC flooding | `switchport port-security` |
+| DHCP Snooping | Rogue DHCP servers, starvation | `ip dhcp snooping` |
+| DAI | ARP spoofing / man-in-the-middle | `ip arp inspection vlan` |
+| Storm Control | Broadcast/multicast storms | `storm-control broadcast level` |
+| 802.1X | Unauthorised network access | `dot1x system-auth-control` |
+| Disable DTP | VLAN hopping via trunk negotiation | `switchport nonegotiate` |
+| Native VLAN hardening | Double-tagging VLAN hopping | `switchport trunk native vlan 999` |
+
+No single feature provides complete protection. Deploying all of them together creates a layered defence that makes network-level attacks at Layer 2 impractical.
+
+---
+
+## References
+
+- IEEE 802.1X — Port-Based Network Access Control
+- Cisco IOS Security Configuration Guide — Layer 2 Security
+- CCNA 200-301 Official Cert Guide Vol. 2 (Odom) — Chapters 11–12

@@ -1,0 +1,251 @@
+---
+title: "Cisco IOS — First Hop Redundancy"
+category: "cisco"
+topic: "fhrp"
+summary: "Configuring HSRP, VRRP, and GLBP on Cisco IOS — virtual IP setup, priority and preemption, interface tracking, and verifying gateway redundancy."
+tags: ["cisco", "ios", "hsrp", "vrrp", "glbp", "redundancy", "gateway"]
+order: 10
+draft: false
+---
+
+## Overview
+
+End hosts are configured with a single default gateway IP address. If the router at that address fails, all hosts on the segment lose connectivity regardless of whether redundant routers exist. First Hop Redundancy Protocols (FHRPs) solve this by creating a **virtual IP address** and a **virtual MAC address** shared by a group of routers. Hosts point their default gateway at the virtual IP, which always resolves to a functioning router.
+
+Cisco IOS supports three FHRPs: HSRP (Cisco proprietary), VRRP (open standard), and GLBP (Cisco proprietary, adds load balancing). All three operate at Layer 3, use multicast hellos, and provide sub-second failover when tuned appropriately.
+
+---
+
+## HSRP — Hot Standby Router Protocol
+
+HSRP is Cisco's original FHRP, defined in RFC 2281 (informational, not a standard). Two versions exist:
+
+| | HSRPv1 | HSRPv2 |
+|---|--------|--------|
+| IP version | IPv4 | IPv4 and IPv6 |
+| Multicast address | 224.0.0.2 | 224.0.0.102 |
+| UDP port | 1985 | 1985 |
+| Virtual MAC prefix | 0000.0C07.ACxx | 0000.0C9F.Fxxx |
+| Group number range | 0–255 | 0–4095 |
+
+HSRPv2 is preferred for new deployments. Configure it explicitly with `standby version 2`.
+
+### HSRP States
+
+An HSRP router transitions through a series of states before becoming active or standby:
+
+| State | Description |
+|-------|-------------|
+| Initial | HSRP is starting up on the interface |
+| Learn | Waiting to hear the virtual IP from the active router |
+| Listen | Knows the virtual IP; not active, not standby |
+| Speak | Sending Hello messages; participating in election |
+| Standby | Backup; monitoring the active router |
+| Active | Forwarding traffic for the virtual IP |
+
+### HSRP Configuration
+
+**Router 1 (primary — higher priority):**
+
+```
+interface GigabitEthernet0/0
+ ip address 10.0.0.2 255.255.255.0
+ standby version 2
+ standby 1 ip 10.0.0.1
+ standby 1 priority 110
+ standby 1 preempt
+ standby 1 timers 1 3
+```
+
+**Router 2 (secondary — default priority):**
+
+```
+interface GigabitEthernet0/0
+ ip address 10.0.0.3 255.255.255.0
+ standby version 2
+ standby 1 ip 10.0.0.1
+ standby 1 priority 100
+ standby 1 preempt
+ standby 1 timers 1 3
+```
+
+Key parameters:
+- `standby 1 ip 10.0.0.1` — sets the virtual IP for group 1; the group number must match on all routers
+- `standby 1 priority 110` — higher priority wins the active role (default is 100; tie broken by highest interface IP)
+- `standby 1 preempt` — allows this router to reclaim the active role after recovering from a failure
+- `standby 1 timers 1 3` — Hello every 1 second, holdtime 3 seconds (default is 3/10)
+
+Without `preempt`, the router that comes back up after a failure stays in Standby even if it has higher priority. Preemption is almost always desirable on the primary router.
+
+### HSRP Interface Tracking
+
+Interface tracking decrements the HSRP priority when a tracked object fails. If the WAN uplink fails, the priority drops below the standby router's priority and triggers failover:
+
+```
+track 1 interface GigabitEthernet0/1 line-protocol
+!
+interface GigabitEthernet0/0
+ standby 1 track 1 decrement 20
+```
+
+With priority 110 and a decrement of 20, the router's effective priority becomes 90 when GigabitEthernet0/1 goes down. The standby router at priority 100 then wins. When the tracked interface recovers, the priority returns to 110 and preempt allows the primary to resume the active role.
+
+### HSRP Verification
+
+```
+show standby
+show standby brief
+show standby GigabitEthernet0/0
+```
+
+`show standby brief` output format:
+```
+                     P indicates configured to preempt.
+Interface   Grp  Pri P State   Active          Standby         Virtual IP
+Gi0/0       1    110 P Active  local           10.0.0.3        10.0.0.1
+```
+
+---
+
+## VRRP — Virtual Router Redundancy Protocol
+
+VRRP (RFC 5798) is the open-standard equivalent of HSRP. It is interoperable between vendors. Key differences from HSRP:
+
+- Uses the term **Master** instead of Active, and **Backup** instead of Standby
+- **Preemption is enabled by default** — a higher-priority router reclaims Master automatically
+- The router whose real interface IP equals the virtual IP is automatically assigned priority 255 and always wins
+- Advertisement interval default is 1 second (configurable)
+- Virtual MAC format: `0000.5E00.01xx` where xx = group number
+
+### VRRP Configuration
+
+```
+interface GigabitEthernet0/0
+ ip address 10.0.0.2 255.255.255.0
+ vrrp 1 ip 10.0.0.1
+ vrrp 1 priority 110
+ vrrp 1 timers advertise 1
+```
+
+If the virtual IP matches the router's real IP, set priority 255 explicitly to make it the guaranteed owner:
+
+```
+interface GigabitEthernet0/0
+ ip address 10.0.0.1 255.255.255.0
+ vrrp 1 ip 10.0.0.1
+ vrrp 1 priority 255
+```
+
+VRRP preemption is on by default. To disable it (unusual):
+
+```
+vrrp 1 preempt disable
+```
+
+### VRRP Verification
+
+```
+show vrrp
+show vrrp brief
+show vrrp interface GigabitEthernet0/0
+```
+
+---
+
+## GLBP — Gateway Load Balancing Protocol
+
+GLBP is Cisco proprietary and is the only FHRP that achieves **active load balancing** across multiple routers. HSRP and VRRP use one active gateway at a time; the standby router sits idle. GLBP uses all routers simultaneously.
+
+### How GLBP Works
+
+- All routers share the same **virtual IP** (the hosts' default gateway)
+- One router is elected **AVG** (Active Virtual Gateway) — it owns the virtual IP and responds to ARP requests
+- Each router in the group is an **AVF** (Active Virtual Forwarder) — it gets a unique virtual MAC
+- The AVG responds to ARP requests with different virtual MACs in round-robin (or another algorithm), distributing load across all AVFs
+- Up to 4 AVFs per GLBP group
+
+### GLBP Configuration
+
+```
+interface GigabitEthernet0/0
+ ip address 10.0.0.2 255.255.255.0
+ glbp 1 ip 10.0.0.1
+ glbp 1 priority 110
+ glbp 1 preempt
+ glbp 1 load-balancing round-robin
+```
+
+Load balancing methods:
+- `round-robin` — each ARP reply uses the next AVF's MAC in sequence (default)
+- `host-dependent` — the same client always gets the same virtual MAC; consistent mapping
+- `weighted` — distribute traffic proportionally by configured weight values
+
+### GLBP Verification
+
+```
+show glbp
+show glbp brief
+show glbp GigabitEthernet0/0
+```
+
+`show glbp brief` shows the AVG role, each AVF's virtual MAC, and the current state of each router.
+
+---
+
+## FHRP Comparison Table
+
+| Feature | HSRP | VRRP | GLBP |
+|---------|------|------|------|
+| Standard | Cisco proprietary | RFC 5798 | Cisco proprietary |
+| Terminology | Active / Standby | Master / Backup | AVG / AVF |
+| Load balancing | No (one active) | No (one master) | Yes (up to 4 AVFs) |
+| Preemption default | Off (must enable) | On (must disable to turn off) | Off (must enable) |
+| Virtual MAC prefix | 0000.0C07.AC (v1) / 0000.0C9F.F (v2) | 0000.5E00.01 | 0007.B4xx |
+| IPv6 support | HSRPv2 only | Yes | Yes |
+| Multicast (IPv4) | 224.0.0.2 (v1) / 224.0.0.102 (v2) | 224.0.0.18 | 224.0.0.102 |
+
+---
+
+## Design Recommendations
+
+### Always Pair Preemption with Interface Tracking
+
+Without preemption, a failed primary router that recovers stays in Standby — the secondary continues forwarding. This is usually undesirable in planned topologies. Always configure both:
+
+```
+standby 1 preempt
+standby 1 track 1 decrement 20
+```
+
+### Choose HSRP When Cisco-Only
+
+HSRP is the most widely deployed FHRP in Cisco environments. HSRPv2 adds IPv6 support and a wider group number range. It is well-documented and straightforward to troubleshoot.
+
+### Choose VRRP for Multi-Vendor Environments
+
+If the redundant routers are from different vendors (Cisco + Juniper, for example), VRRP is the only interoperable option.
+
+### Choose GLBP When Uplink Bandwidth is a Constraint
+
+In networks where the default gateway is a bottleneck, GLBP maximises utilisation by load-balancing across all available routers. This is most relevant at the distribution layer serving high-density access layers.
+
+### Hello Timer Tuning
+
+Reducing Hello and holdtime timers accelerates failover detection at the cost of increased control traffic:
+
+| Timer Setting | HSRP Command | Failover Time |
+|---------------|-------------|---------------|
+| Default | `standby 1 timers 3 10` | ~10 seconds |
+| Tuned | `standby 1 timers 1 3` | ~3 seconds |
+| Millisecond | `standby 1 timers msec 200 msec 700` | ~700ms |
+
+Millisecond timers require careful testing — aggressive timers on a loaded CPU can cause false failovers.
+
+---
+
+## References
+
+- RFC 2281 — Cisco Hot Standby Router Protocol (HSRP)
+- RFC 5798 — Virtual Router Redundancy Protocol (VRRP) Version 3
+- Cisco IOS IP Application Services Configuration Guide — FHRP
+- CCNA 200-301 Official Cert Guide Vol. 2 (Odom) — Chapter 16

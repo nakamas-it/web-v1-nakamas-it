@@ -1,0 +1,234 @@
+---
+title: "Cisco Wireless — WLC and Lightweight APs"
+category: "cisco"
+topic: "wireless"
+summary: "Cisco wireless LAN architecture — WLC interfaces and WLANs, CAPWAP AP join process, FlexConnect, AP modes, and basic WLC configuration."
+tags: ["cisco", "wireless", "wlc", "capwap", "lightweight-ap", "flexconnect", "ssid"]
+order: 11
+draft: false
+---
+
+## Overview
+
+Enterprise wireless networks at any significant scale are not built from independently configured APs. Cisco's approach separates intelligence from the physical radio hardware: lightweight APs handle only the RF layer, while a Wireless LAN Controller (WLC) provides centralised policy, authentication, RF management, and client tracking. This architecture allows hundreds of APs to be managed as a single logical system, with configuration changes deployed from one point.
+
+This article covers the autonomous vs lightweight AP distinction, the CAPWAP protocol that connects APs to WLCs, WLC interface types, WLAN configuration, AP operating modes, FlexConnect for branch deployments, and 802.11 standard fundamentals.
+
+---
+
+## Autonomous APs vs Lightweight APs
+
+### Autonomous APs (Fat APs)
+
+An autonomous AP contains the full wireless intelligence stack — SSID configuration, security policy, RF management, and client association are all handled on the device itself. Each AP is configured independently through its own web interface or CLI. This model is appropriate for very small deployments (one to five APs) but does not scale.
+
+Drawbacks:
+- No centralised management — every AP must be individually configured
+- No coordinated RF management across APs
+- Roaming between APs requires the client to re-associate, causing interruptions
+- No centralised security policy — each AP enforces its own rules independently
+
+### Lightweight APs (Thin APs)
+
+A lightweight AP offloads intelligence to a WLC. The AP itself handles only:
+- Transmitting and receiving 802.11 frames (the RF layer)
+- Local encryption and decryption of 802.11 frames
+- Sending 802.11 ACKs
+- Sending beacons and probe responses
+
+The WLC handles everything else:
+- Client association and authentication (802.1X/EAP)
+- QoS and ACL policy
+- RF management (channel assignment, power control)
+- SSID and WLAN configuration
+- Client roaming state
+
+This is called the **Split MAC** architecture — the MAC layer functions are divided between the AP and the WLC.
+
+---
+
+## CAPWAP — Control and Provisioning of Wireless Access Points
+
+CAPWAP (RFC 5415) is the protocol that carries both management traffic and client data between a lightweight AP and its WLC.
+
+### Two CAPWAP Channels
+
+| Channel | Transport | Port | Encryption | Carries |
+|---------|-----------|------|-----------|---------|
+| Control | UDP | 5246 | DTLS (always encrypted) | AP configuration, management, RF decisions |
+| Data | UDP | 5247 | Optional DTLS | Client data frames tunnelled to WLC |
+
+The control channel is always encrypted with DTLS (Datagram TLS). The data channel is encrypted only if configured — in many deployments, data traffic encryption is left off to reduce processing overhead, relying instead on the 802.11 WPA2 encryption at the radio layer.
+
+When client data is tunnelled through the data channel to the WLC, the WLC switches the traffic onto the wired network. This is called **centralised switching** — all client traffic flows through the WLC regardless of where the AP physically is.
+
+---
+
+## AP Discovery and Join Process
+
+An AP that boots for the first time has no WLC configured. It must discover a WLC before it can operate. The discovery sequence is:
+
+1. AP boots and requests an IP address via DHCP.
+2. AP attempts WLC discovery using the following methods in order:
+   - **DHCP Option 43** — the DHCP server provides the WLC's IP address in Option 43
+   - **DNS lookup** — the AP resolves the hostname `cisco-capwap-controller` in its DNS domain
+   - **Subnet broadcast** — the AP sends a CAPWAP discovery request as a Layer 3 broadcast
+   - **Previously known WLC** — if the AP was previously joined, the WLC IP is stored in NVRAM
+3. AP receives discovery responses from one or more WLCs and selects the best candidate (based on load, version, and AP group membership).
+4. AP initiates DTLS handshake with the chosen WLC — mutual certificate authentication.
+5. AP sends a Join Request; WLC responds with a Join Response containing the AP's full configuration.
+6. AP applies the configuration, activates its radios, and begins broadcasting SSIDs.
+
+DHCP Option 43 is the most reliable and recommended discovery method in production. It eliminates dependency on DNS availability and removes the need for the AP and WLC to be on the same subnet.
+
+---
+
+## WLC Interfaces
+
+A WLC has multiple logical interfaces, each serving a distinct function:
+
+| Interface | Purpose |
+|-----------|---------|
+| Management | Primary in-band management interface; used for SSH, HTTPS, SNMP, and as the CAPWAP control channel endpoint; APs must be able to reach this IP |
+| AP Manager | CAPWAP tunnel endpoint for AP data; in small deployments this is often the same IP as the Management interface |
+| Virtual | Used for DHCP relay and web authentication redirect; always configured as 1.1.1.1 — this address is never routed and only appears in redirected HTTP traffic |
+| Service Port | Dedicated physical out-of-band management port; connects to a separate management network; used when the WLC network is unreachable |
+| Dynamic | Customer-defined interfaces mapped to WLANs; each dynamic interface maps to a VLAN on the wired network |
+
+The virtual interface address 1.1.1.1 is a Cisco convention — it is used internally by the WLC for web auth redirects and DHCP proxy. Do not configure this address on any other device in the network.
+
+---
+
+## WLAN Configuration Flow
+
+Creating a new SSID on a WLC follows this sequence:
+
+1. **Create a dynamic interface** — define the VLAN mapping (VLAN ID, IP address/mask for the WLC's address on that VLAN, DHCP server IP).
+2. **Create a WLAN** — assign the SSID name, map it to the dynamic interface, configure security (WPA2-PSK or 802.1X), and set QoS profile.
+3. **Assign the WLAN to an AP group** — AP groups control which APs broadcast which WLANs. APs not in the relevant group will not advertise the SSID.
+4. **AP picks up the configuration** — APs receive updated configuration from the WLC and begin beaconing the new SSID.
+
+### Security Options
+
+| Security Mode | Use Case | Authentication |
+|---------------|----------|----------------|
+| WPA2-Personal (PSK) | Small office, guest networks | Pre-shared key |
+| WPA2-Enterprise (802.1X) | Corporate | RADIUS + EAP (ISE, NPS, FreeRADIUS) |
+| WPA3-Personal (SAE) | Modern clients, stronger PSK | SAE — replaces WPA2-PSK handshake |
+| Open (captive portal) | Guest with web redirect | Web authentication via virtual interface |
+
+---
+
+## AP Operating Modes
+
+A lightweight AP can be configured to operate in different modes depending on its role in the network:
+
+| Mode | Description |
+|------|-------------|
+| Local | Default mode; AP serves clients and forwards data to WLC via CAPWAP |
+| FlexConnect | Local switching capable; continues to serve clients if WLC is unreachable |
+| Monitor | Dedicated WIDS/WIPS sensor; scans all channels for rogue APs and clients; does not associate clients |
+| Sniffer | Captures 802.11 frames and forwards them to a Wireshark instance for analysis |
+| Rogue Detector | Monitors the wired network for ARP traffic to correlate with detected rogue APs |
+| Bridge | Creates a wireless point-to-point or mesh link between APs |
+| SE-Connect | Connected to Cisco Spectrum Expert for detailed RF spectrum analysis |
+
+The AP mode is configured per-AP in the WLC GUI or CLI. Local mode is used for the vast majority of APs serving clients.
+
+---
+
+## FlexConnect
+
+FlexConnect (previously called HREAP — Hybrid Remote Edge AP) is designed for branch offices where the WLC is located at headquarters and the branch connects over a WAN link.
+
+### The Problem FlexConnect Solves
+
+In standard Local mode, all client traffic is tunnelled from the branch AP through the WAN to the WLC and then back to the internet or intranet. This is inefficient — local branch traffic hairpins through the WAN. If the WAN link fails, the AP cannot communicate with the WLC and all clients lose connectivity.
+
+### FlexConnect Modes
+
+| Mode | WLC Status | Client Traffic |
+|------|-----------|----------------|
+| Connected | WLC reachable | AP can locally switch traffic or tunnel it — configurable per WLAN |
+| Standalone | WLC unreachable (WAN down) | AP continues to serve clients using cached configuration; locally switches traffic |
+
+In Standalone mode, FlexConnect APs cannot handle new 802.1X authentications (the RADIUS server may also be unreachable), but they can maintain authenticated sessions and allow pre-authenticated clients to continue working.
+
+### FlexConnect Groups
+
+FlexConnect groups allow multiple APs at the same branch to share VLAN mappings and configuration. An AP group is the WLC-centric assignment of which WLANs an AP broadcasts; FlexConnect groups are the branch-centric assignment of how SSIDs map to local VLANs.
+
+---
+
+## 802.11 Standards
+
+| Standard | Wi-Fi Name | Frequency | Max Data Rate | Channel Width | Notable Features |
+|----------|-----------|-----------|---------------|---------------|-----------------|
+| 802.11a | — | 5 GHz | 54 Mbps | 20 MHz | OFDM; first 5 GHz standard |
+| 802.11b | — | 2.4 GHz | 11 Mbps | 22 MHz | DSSS; legacy |
+| 802.11g | — | 2.4 GHz | 54 Mbps | 20 MHz | OFDM; backward compatible with b |
+| 802.11n | Wi-Fi 4 | 2.4 or 5 GHz | 600 Mbps | 20/40 MHz | First dual-band; MIMO (up to 4 streams) |
+| 802.11ac | Wi-Fi 5 | 5 GHz only | 3.5 Gbps | up to 160 MHz | MU-MIMO; beamforming |
+| 802.11ax | Wi-Fi 6 | 2.4 and 5 GHz | 9.6 Gbps | up to 160 MHz | OFDMA; BSS Coloring; TWT |
+| 802.11ax | Wi-Fi 6E | 2.4, 5, and 6 GHz | 9.6 Gbps | up to 160 MHz | Adds 6 GHz band |
+
+Key distinctions for exam and production planning:
+- 802.11ac is **5 GHz only**
+- 802.11n was the first standard to support **both 2.4 GHz and 5 GHz**
+- 802.11ax introduced **OFDMA** — allows multiple clients to transmit simultaneously on sub-channels of a single channel (vs OFDM where one client uses the full channel at a time)
+
+---
+
+## Channel Planning
+
+### 2.4 GHz
+
+The 2.4 GHz band has only three non-overlapping channels in North America: **1, 6, and 11**. Adjacent APs should use different non-overlapping channels. Using overlapping channels (such as 1 and 3) causes co-channel interference and degrades throughput.
+
+The 2.4 GHz band is also shared with Bluetooth, microwave ovens, baby monitors, and many other devices — interference is common in dense environments.
+
+### 5 GHz
+
+The 5 GHz band has 24 or more non-overlapping channels (depending on country and regulatory domain). DFS (Dynamic Frequency Selection) channels require radar detection — the AP must vacate the channel within 10 seconds if radar is detected. Some enterprise APs avoid DFS channels for simplicity.
+
+Wider channel bonding (40, 80, or 160 MHz) increases throughput but reduces the number of available non-overlapping channels.
+
+---
+
+## WLC CLI Verification Commands
+
+These commands are entered at the WLC's CLI (accessed via SSH or console):
+
+```
+show ap summary
+show ap join stats summary all
+show client summary
+show wlan summary
+show interface summary
+show run-config
+```
+
+`show ap summary` lists all joined APs with their name, model, MAC, and IP. `show client summary` lists associated clients with their MAC, IP, WLAN, and AP. `show wlan summary` lists all configured WLANs with their SSID, security policy, and status.
+
+---
+
+## CSMA/CA in Wireless
+
+Unlike Ethernet's CSMA/CD (Collision Detection), Wi-Fi uses CSMA/CA (Collision Avoidance). Because wireless devices cannot detect a collision while transmitting — they cannot listen and send simultaneously — they avoid collisions before they occur:
+
+1. **Carrier sense** — listen before transmitting
+2. **Backoff** — if the medium is busy, wait a random backoff period
+3. **RTS/CTS** — optional; sender sends RTS, AP replies CTS, clears other devices
+4. **Transmit** — send the data frame
+5. **ACK** — the receiver sends an ACK for every 802.11 frame
+
+This protocol overhead means Wi-Fi is inherently less efficient than wired Ethernet at the same nominal bit rate.
+
+---
+
+## References
+
+- RFC 5415 — Control and Provisioning of Wireless Access Points (CAPWAP) Protocol Specification
+- IEEE 802.11-2020 — Wireless LAN Medium Access Control and Physical Layer Specifications
+- CCNA 200-301 Official Cert Guide Vol. 2 (Odom) — Chapters 1–4
+- Cisco Wireless LAN Controller Configuration Guide

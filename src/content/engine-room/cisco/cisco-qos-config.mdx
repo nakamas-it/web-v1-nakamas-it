@@ -1,0 +1,298 @@
+---
+title: "Cisco IOS — Quality of Service"
+category: "cisco"
+topic: "qos"
+summary: "Implementing QoS on Cisco IOS using MQC — class-maps, policy-maps, DSCP marking, LLQ for voice, and applying service policies to interfaces."
+tags: ["cisco", "ios", "qos", "dscp", "llq", "mqc", "voice"]
+order: 12
+draft: false
+---
+
+## Overview
+
+Networks carry multiple types of traffic simultaneously — voice calls, video conferences, database transactions, file transfers, and web browsing. Without QoS, all of this traffic receives identical treatment: first-in, first-out. When a link is congested, voice packets wait behind bulk file transfer packets, introducing delay and jitter that makes calls unintelligible.
+
+QoS (Quality of Service) is a collection of mechanisms that classify traffic, mark it with a priority value, and then treat different classes differently — ensuring delay-sensitive applications get consistent service even when the network is under load.
+
+This article covers why QoS is necessary, DSCP marking values, Cisco's MQC (Modular QoS CLI) framework, LLQ (Low Latency Queuing) for voice, and interface-level verification.
+
+---
+
+## Why QoS — The Four Problems
+
+### 1. Bandwidth
+
+Some applications require a minimum guaranteed bandwidth. A 1080p video conference stream needs around 2–4 Mbps constantly. If bulk file transfers consume the entire link, the video call fails.
+
+### 2. Delay (Latency)
+
+Voice over IP has a strict one-way delay budget. The ITU G.114 recommendation specifies that one-way delay must not exceed **150 milliseconds** for acceptable voice quality. Delay above 150ms causes noticeable conversation problems; above 400ms, conversations become unusable.
+
+### 3. Jitter
+
+Jitter is the variation in delay between packets. RTP (the transport protocol for voice and video) buffers incoming packets in a playout buffer to compensate for jitter. If jitter exceeds the buffer depth, packets arrive late and are discarded, causing audio gaps. The maximum recommended jitter for voice is **30 milliseconds**.
+
+### 4. Packet Loss
+
+Voice and video codecs tolerate very little packet loss. Above **1% packet loss**, voice quality degrades noticeably. Above 5%, calls are unusable. Video is more resilient but still sensitive to bursty loss.
+
+Best-effort networks provide no guarantees for any of these parameters. QoS manages queuing and scheduling to meet these requirements.
+
+---
+
+## QoS Models
+
+Three approaches exist for implementing QoS:
+
+| Model | Mechanism | Scalability | Use Case |
+|-------|-----------|-------------|----------|
+| Best Effort | No QoS; FIFO queuing | N/A | Default; no guarantees |
+| IntServ | Per-flow reservation using RSVP | Poor (RSVP state per flow) | Rarely used; too complex |
+| DiffServ | Mark packets at ingress; treat marked classes at each hop | Excellent | Standard enterprise QoS |
+
+DiffServ is the practical choice. Packets are marked at the network edge (or trust boundary) with a DSCP value, and each network device treats packets according to their class. No per-flow state is maintained in the network core.
+
+---
+
+## DSCP Marking
+
+DSCP (Differentiated Services Code Point) is a 6-bit field in the IP header's Type of Service byte. It allows 64 possible values (0–63). In practice, a handful of standardised values are used:
+
+| DSCP Name | Decimal | Binary | Traffic Type | PHB |
+|-----------|---------|--------|--------------|-----|
+| EF | 46 | 101110 | Voice RTP | Expedited Forwarding |
+| CS5 | 40 | 101000 | Voice signalling (SIP/H.323) | Class Selector |
+| AF41 | 34 | 100010 | Video conferencing | Assured Forwarding |
+| AF21 | 18 | 010010 | Critical data (ERP, database) | Assured Forwarding |
+| CS0 / BE | 0 | 000000 | Best effort (default) | Default |
+
+**PHB (Per-Hop Behaviour)** defines how routers treat a marked packet:
+- **EF (Expedited Forwarding)**: packets receive strict priority service — they are never delayed by other queued traffic
+- **AF (Assured Forwarding)**: packets receive a guaranteed minimum bandwidth within their class; within an AF class, drop precedence (1 = low drop, 2 = medium, 3 = high drop) determines which packets are discarded first during congestion
+- **CS (Class Selector)**: backward compatible with IP Precedence (3-bit ToS field from original RFC 791)
+
+### AF Naming Convention
+
+AFxy: x = class (1–4), y = drop precedence (1 = low, 2 = medium, 3 = high).
+- AF41: class 4, low drop probability — high-priority video
+- AF42: class 4, medium drop probability — acceptable video
+- AF11: class 1, low drop — lower-priority data
+
+---
+
+## Trust Boundary
+
+The trust boundary defines where DSCP markings are accepted as valid. Within the network, DSCP values are trusted and used for forwarding decisions. At the edge (where untrusted endpoints connect), markings may be overwritten.
+
+- **IP phones**: Cisco IP phones mark voice RTP at DSCP EF and voice signalling at DSCP CS3 or CS5. These markings are trustworthy and should be honoured at the access switch.
+- **PCs**: A PC can set any DSCP value it wants. Allowing PCs to mark their own traffic as EF would let any application claim voice priority. Access switches should remark or police PC traffic.
+
+The recommended practice:
+
+```
+interface GigabitEthernet0/1
+ mls qos trust dscp
+```
+
+On ports connected to Cisco IP phones, trust DSCP. On general access ports, remark to CS0 (best effort) unless specific policies are defined.
+
+---
+
+## MQC — Modular QoS CLI
+
+Cisco's MQC is a three-step framework for implementing QoS on IOS. The three components are independent and reusable:
+
+1. **class-map** — defines how to identify traffic
+2. **policy-map** — defines what to do with each identified class
+3. **service-policy** — applies a policy-map to an interface
+
+### Step 1: Class Maps
+
+Class maps identify traffic using match criteria:
+
+```
+class-map match-all VOICE
+ match dscp ef
+
+class-map match-all VIDEO
+ match dscp af41
+
+class-map match-all CRITICAL_DATA
+ match dscp af21
+```
+
+`match-all` requires all conditions to match (logical AND). `match-any` requires at least one condition to match (logical OR).
+
+Other match options:
+- `match access-group <name|number>` — match by ACL
+- `match protocol <protocol>` — match by application protocol using NBAR (Network-Based Application Recognition); requires `ip nbar protocol-discovery` on the interface
+- `match ip dscp <value>` — match specific DSCP values
+- `match ip precedence <value>` — match IP Precedence values
+
+### Step 2: Policy Maps
+
+Policy maps define actions per class:
+
+```
+policy-map WAN_QOS
+ class VOICE
+  priority 128
+ class VIDEO
+  bandwidth 256
+ class CRITICAL_DATA
+  bandwidth 512
+  queue-limit 64
+ class class-default
+  fair-queue
+```
+
+The `class-default` class catches all traffic that does not match any named class. Every policy-map has an implicit class-default.
+
+**Policy map actions:**
+
+| Action | Description |
+|--------|-------------|
+| `priority <kbps>` | LLQ — strict priority queue; traffic gets bandwidth first, before any other class; must be combined with a limit to prevent starvation |
+| `bandwidth <kbps>` | CBWFQ — guaranteed minimum bandwidth; excess bandwidth shared among classes |
+| `bandwidth percent <n>` | Guaranteed bandwidth as percentage of interface speed |
+| `police rate <bps>` | Policing — drops (or remarks) traffic that exceeds the committed rate; no buffering |
+| `shape average <bps>` | Shaping — buffers excess traffic to conform to rate; no drops; adds delay |
+| `set dscp <value>` | Marks/remarks the DSCP value of matching packets |
+| `fair-queue` | CBWFQ fair queuing for the class |
+
+### Step 3: Service Policy
+
+Apply the policy-map to an interface:
+
+```
+interface GigabitEthernet0/0
+ service-policy output WAN_QOS
+```
+
+Direction:
+- `output` — applies queuing when packets leave the interface (most common for WAN links)
+- `input` — applies policing and marking when packets arrive on the interface
+
+An interface can have both an input and an output service-policy. Only one policy-map per direction per interface is allowed.
+
+---
+
+## LLQ — Low Latency Queuing
+
+LLQ is the recommended queuing mechanism for voice and video. It combines two queuing approaches:
+
+- **Strict priority queue (PQ)**: the `priority` class — voice packets are always sent before anything else, ensuring minimal delay and jitter
+- **CBWFQ (Class-Based Weighted Fair Queuing)**: the `bandwidth` classes — non-voice traffic gets guaranteed minimum bandwidth shares without starvation
+
+### Complete LLQ Example
+
+```
+class-map match-all VOICE
+ match dscp ef
+
+class-map match-all VIDEO
+ match dscp af41
+
+class-map match-all SIGNALLING
+ match dscp cs5
+
+policy-map LLQ_POLICY
+ class VOICE
+  priority 128
+ class SIGNALLING
+  bandwidth 64
+ class VIDEO
+  bandwidth 512
+ class class-default
+  fair-queue
+
+interface Serial0/0/0
+ service-policy output LLQ_POLICY
+```
+
+In this policy:
+- Voice gets strict LLQ — 128 kbps reserved, served first
+- Signalling gets 64 kbps guaranteed
+- Video gets 512 kbps guaranteed
+- Everything else uses fair queuing on remaining bandwidth
+
+Without queuing configuration, all traffic uses simple FIFO. FIFO is fine when the link is never congested. The moment the link becomes congested, FIFO begins dropping packets from the tail of the queue without regard to application sensitivity. QoS mechanisms become active only when the interface is congested — when the output queue is not empty.
+
+---
+
+## Auto-QoS
+
+IOS provides an auto-configuration feature that generates MQC configurations based on best-practice templates for specific use cases. For a VoIP access port:
+
+```
+interface GigabitEthernet0/1
+ auto qos voip
+```
+
+IOS generates class-maps, policy-maps, and a service-policy for the interface automatically. The generated configuration can be reviewed with `show running-config` and is fully editable afterward. Auto-QoS is useful as a starting point but should be reviewed to ensure it matches the actual traffic profile.
+
+---
+
+## Verification
+
+### Policy-Map Interface Statistics
+
+The primary verification command shows per-class statistics for a policy applied to an interface:
+
+```
+show policy-map interface GigabitEthernet0/0
+```
+
+Output includes for each class:
+- Packets and bytes matched
+- Current queue depth
+- Bit rate (rate of traffic in the class)
+- Drop count (packets dropped due to policing or queue overflow)
+- Congestion indicator
+
+This output is the most valuable troubleshooting tool. If the drop count for the VOICE class is non-zero, voice packets are being dropped — verify the priority bandwidth is sufficient for the number of concurrent calls.
+
+### Class-Map and Policy-Map Definitions
+
+```
+show class-map
+show policy-map
+show policy-map WAN_QOS
+```
+
+These show the defined match criteria and actions without the interface-specific statistics.
+
+### Queue Depth and Congestion
+
+Queuing only activates when an interface is congested — when packets arrive faster than they can be sent. On a 1 Gbps interface in a typical office network, the output queue is almost always empty and QoS has no effect. On WAN links (10–100 Mbps), congestion is common during peak periods. To observe QoS in action, generate traffic that fills the WAN link and then observe queue depths and drop counts.
+
+---
+
+## DSCP and CoS Relationship
+
+CoS (Class of Service) is a 3-bit field in the 802.1Q VLAN tag (Layer 2). DSCP is a 6-bit field in the IP header (Layer 3). When packets traverse trunk links, CoS values can be used for queuing. When packets are routed, DSCP values are used.
+
+IOS maps between CoS and DSCP values automatically based on a configurable table. In most enterprise environments, DSCP is used end-to-end for consistency.
+
+---
+
+## QoS Design Summary
+
+| Traffic Type | DSCP Mark | Policy Action | Maximum Delay |
+|-------------|-----------|---------------|---------------|
+| Voice RTP | EF (46) | LLQ `priority` | 150ms one-way |
+| Voice signalling | CS5 (40) | `bandwidth` guaranteed | 500ms |
+| Video conferencing | AF41 (34) | `bandwidth` guaranteed | 150ms |
+| Critical data | AF21 (18) | `bandwidth` guaranteed | Application-dependent |
+| Best effort | CS0 (0) | `fair-queue` | No guarantee |
+
+---
+
+## References
+
+- RFC 2474 — Definition of the Differentiated Services Field in IPv4 and IPv6 Headers
+- RFC 3246 — An Expedited Forwarding PHB
+- RFC 2597 — Assured Forwarding PHB Group
+- ITU-T G.114 — One-Way Transmission Time
+- CCNA 200-301 Official Cert Guide Vol. 2 (Odom) — Chapter 15
+- Cisco IOS Quality of Service Solutions Configuration Guide

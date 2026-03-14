@@ -14,20 +14,20 @@ Bio, work experience, interests, and a contact form backed by Formspree. Availab
 ### The School (`/school/`)
 A protocol library covering how networking actually works — from the physics of copper and fiber at Layer 1 up through TCP, RTP, and application-layer signalling. Each article walks through packet structure, protocol mechanics, and real-world behaviour. Articles use custom Astro components (`PacketDiagram`, `FlowDiagram`) to render packet field diagrams and message-sequence charts inline. Includes a live client-side search bar — press `/` to focus.
 
-**Current coverage — 59 articles:**
+**Current coverage — 62 articles:**
 
 | Layer | Articles |
 |-------|----------|
 | Layer 1 — Physical | Copper, Fiber, Wireless, Coaxial, Signaling & Encoding, Ethernet Standards, Cables & Connectors |
 | Layer 2 — Data Link | Ethernet Frame, MAC Addressing, ARP, VLANs, STP, EtherChannel, CDP & LLDP, PPP |
-| Layer 3 — Network | IPv4, DHCP, Subnetting, DNS, ICMP, Static Routing, RIP, OSPF, BGP, NAT/PAT, IGMP, EIGRP |
+| Layer 3 — Network | IPv4, DHCP, Subnetting, DNS, ICMP, Static Routing, RIP, OSPF, BGP, NAT/PAT, IGMP, EIGRP, IPv6 Fundamentals, IPv6 Addressing, IPv6 Routing |
 | Layer 4 — Transport | TCP, UDP, TCP vs UDP, Ports & Sockets, RTP |
 | Application Layer | HTTP/HTTPS, TLS/SSL, FTP/SFTP/FTPS, SSH, SMTP, IMAP/POP3, SNMP, NTP, LDAP, RADIUS, Syslog, Telnet, TACACS+, Kerberos, NetBIOS, RTSP, iSCSI, rsync, MySQL, iperf, SIP, SMB, MSSQL, VPN, SSL VPN, IPsec VPN, DMVPN |
 
 ### The Engine Room (`/engine-room/`)
 Vendor-focused platform coverage — what each vendor's technology stack is, why it exists, and how it works conceptually. Organised by vendor rather than function.
 
-**Current coverage — 159 articles across 5 vendors:**
+**Current coverage — 177 articles across 6 vendors:**
 
 #### Microsoft (91 articles)
 
@@ -89,6 +89,14 @@ Vendor-focused platform coverage — what each vendor's technology stack is, why
 | Storage | Storage Backends, ZFS, Ceph |
 | Virtualisation | KVM Virtual Machines, LXC Containers |
 | Operations | High Availability, Backup & Restore, VM Advanced Features, Monitoring & Maintenance, Templates & Snapshots |
+
+#### Cisco (18 articles)
+
+| Topic area | Articles |
+|------------|----------|
+| IOS Foundations | IOS CLI, Switch Configuration, STP Configuration, Router Configuration, ROAS & L3 Switching, OSPF Configuration |
+| Advanced Features | IPv6 Configuration, ACL Configuration, Switch Security, FHRP Configuration, Wireless & WLC, QoS Configuration |
+| Platform & Security | Smart Licensing, FTD & FMC Overview, Firepower Policies, FTD VPN, SD-Access, Network Automation |
 
 ---
 
@@ -199,7 +207,7 @@ import FlowDiagram from '../../../components/FlowDiagram.astro';
 ...
 ```
 
-Valid `category` values: `identity`, `virtualization`, `storage`, `endpoint`, `email`, `monitoring`
+Valid `category` values: `identity`, `virtualization`, `storage`, `endpoint`, `email`, `monitoring`, `cisco`
 
 Set `draft: true` in either collection to exclude from the production build while writing.
 

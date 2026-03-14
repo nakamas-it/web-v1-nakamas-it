@@ -1,0 +1,374 @@
+---
+title: "Cisco IOS — STP, RSTP, and EtherChannel"
+category: "cisco"
+topic: "stp"
+summary: "Spanning Tree configuration on Cisco IOS — root bridge election, PortFast, BPDU Guard, and bundling links with EtherChannel using LACP and PAgP."
+tags: ["cisco", "ios", "stp", "rstp", "etherchannel", "lacp", "pagp"]
+order: 3
+draft: false
+---
+
+## Overview
+
+Redundant links between switches prevent single points of failure, but they also create Layer 2 loops. A broadcast frame entering a loop replicates indefinitely, saturating all links and crashing the network within seconds — a "broadcast storm." Spanning Tree Protocol (STP) and its faster successor RSTP solve this by mathematically eliminating redundant paths, keeping exactly one active forwarding path between any two switches.
+
+EtherChannel complements Spanning Tree by bundling multiple physical links into a single logical channel. From STP's perspective, an EtherChannel is one link — so all bundled ports forward simultaneously, multiplying bandwidth without triggering loop prevention.
+
+---
+
+## STP Concepts
+
+### STP Standards
+
+| Protocol | Standard | Key Characteristic |
+|---|---|---|
+| STP | IEEE 802.1D | Original; one tree for all VLANs; slow convergence (30–50 s) |
+| PVST+ | Cisco proprietary | Per-VLAN STP; one tree per VLAN; default on older Cisco |
+| RSTP | IEEE 802.1w | Faster convergence (seconds); backward compatible with 802.1D |
+| Rapid PVST+ | Cisco proprietary | Per-VLAN RSTP; default on modern Cisco Catalyst switches |
+| MSTP | IEEE 802.1s | Groups VLANs into instances; reduces overhead in large VLAN environments |
+
+Rapid PVST+ is the default on Cisco Catalyst switches. You will interact with it for the CCNA. The `spanning-tree mode` global command can switch between modes.
+
+### How STP Prevents Loops
+
+STP elects a **root bridge** — the central reference point for the entire spanning tree. From the root bridge, every other switch calculates the best (lowest cost) path back to the root. Any redundant paths that are not the best path are placed in a blocking state.
+
+### Bridge ID and Root Election
+
+Every switch has a Bridge ID (BID) consisting of a 2-byte priority and a 6-byte MAC address. The switch with the **lowest BID** wins the root election. Priority is the dominant factor — only MAC addresses break ties.
+
+- Default priority: **32768**
+- Priority values must be multiples of 4096
+- Valid priorities: 0, 4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768, 36864 …
+
+In Rapid PVST+, the priority includes the VLAN ID (called the extended system ID): actual priority field = configured priority + VLAN ID. So for VLAN 10, a priority of 32768 is stored as 32778.
+
+### STP Port Roles
+
+| Role | Description |
+|---|---|
+| Root port (RP) | Best path to root bridge; one per non-root switch |
+| Designated port (DP) | Best port on each network segment; forwards traffic |
+| Non-designated port (NDP) | Blocking — not the best path; prevents loops |
+
+The root bridge has all ports as designated ports.
+
+---
+
+## STP Port States (802.1D)
+
+Classic STP uses five port states:
+
+| State | Forwards Frames? | Learns MACs? | Duration |
+|---|---|---|---|
+| Blocking | No | No | Variable (listens for BPDUs) |
+| Listening | No | No | 15 seconds (Forward Delay) |
+| Learning | No | Yes | 15 seconds (Forward Delay) |
+| Forwarding | Yes | Yes | Indefinite |
+| Disabled | No | No | Port is shut down |
+
+Total convergence from blocking to forwarding: up to 50 seconds (max age 20s + 15s listening + 15s learning). This is the main problem RSTP solves.
+
+---
+
+## RSTP Port States and Roles
+
+RSTP (IEEE 802.1w) reduces the five states to three:
+
+| RSTP State | Equivalent STP States |
+|---|---|
+| Discarding | Blocking + Listening |
+| Learning | Learning |
+| Forwarding | Forwarding |
+
+RSTP adds two new port roles beyond STP's root and designated:
+
+| Role | Description |
+|---|---|
+| Root port | Same as STP — best path to root |
+| Designated port | Same as STP — best port on segment |
+| Alternate port | Backup path to root bridge; takes over if root port fails |
+| Backup port | Backup to designated port on same shared segment (rare) |
+
+The alternate port is RSTP's secret to fast convergence — when the root port fails, the alternate port transitions to forwarding almost immediately rather than waiting through listening/learning.
+
+### RSTP Link Types
+
+RSTP uses link types to decide how fast a port can transition to forwarding:
+
+| Link Type | When | Behavior |
+|---|---|---|
+| Point-to-point | Full-duplex links (switch-to-switch) | Rapid transition possible |
+| Shared | Half-duplex links (legacy hubs) | Falls back to STP-like behavior |
+| Edge | PortFast-enabled ports (host-facing) | Immediate forwarding, no negotiation |
+
+---
+
+## Configuring Root Bridge
+
+### Manual Priority
+
+```
+spanning-tree vlan 10 priority 4096
+```
+
+Sets priority for VLAN 10 to 4096. Combined with the extended system ID (VLAN 10), the effective BID priority is 4106 — lower than the default 32778, so this switch becomes root for VLAN 10.
+
+### Macro Commands
+
+```
+spanning-tree vlan 10 root primary
+spanning-tree vlan 10 root secondary
+```
+
+`root primary` sets the priority to 24576 (or lower if another switch already has a lower priority). `root secondary` sets it to 28672. These macros make it easy to designate a primary and secondary root without manually calculating priorities.
+
+Verify with:
+
+```
+show spanning-tree vlan 10
+```
+
+Look for `This bridge is the root` in the output, or check the `Root ID` section — if it matches `Bridge ID`, this switch is the root.
+
+---
+
+## PortFast
+
+PortFast tells IOS to skip the Listening and Learning states on a port and go directly to Forwarding. This is correct for access ports connecting to end hosts — a workstation does not send BPDUs, so there is no loop risk from skipping those states. Without PortFast, a workstation must wait 30 seconds before it can get a DHCP address.
+
+### Per-Interface PortFast
+
+```
+interface FastEthernet0/1
+ spanning-tree portfast
+```
+
+### Global PortFast Default
+
+```
+spanning-tree portfast default
+```
+
+Enables PortFast on all access ports (ports configured with `switchport mode access`). Does not apply to trunk ports.
+
+**Warning:** PortFast must only be used on edge ports connected to hosts. If a switch is accidentally connected to a PortFast port, it can form a loop before BPDUs arrive and disable the port.
+
+---
+
+## BPDU Guard
+
+BPDU Guard complements PortFast by protecting edge ports from receiving BPDUs. If any BPDU arrives on a BPDU Guard-enabled port, the port is immediately put into `err-disable` state — effectively shutting it down and logging an error. This prevents an attacker or misconfigured switch from influencing the STP topology.
+
+### Per-Interface BPDU Guard
+
+```
+interface FastEthernet0/1
+ spanning-tree portfast
+ spanning-tree bpduguard enable
+```
+
+### Global BPDU Guard (with portfast default)
+
+```
+spanning-tree portfast bpduguard default
+```
+
+Enables BPDU Guard on all PortFast-enabled ports automatically.
+
+### Recovering from err-disable
+
+When BPDU Guard triggers, the port goes err-disabled. To bring it back up, remove the condition (disconnect the offending switch) and then:
+
+```
+interface FastEthernet0/1
+ shutdown
+ no shutdown
+```
+
+Or configure automatic recovery:
+
+```
+errdisable recovery cause bpduguard
+errdisable recovery interval 30
+```
+
+---
+
+## BPDU Filter and Root Guard
+
+**BPDU Filter** suppresses the sending and receiving of BPDUs on a port. Applied per-interface, it effectively disables STP on that port. Use with caution — it does not err-disable on BPDU receipt; it just ignores them.
+
+```
+interface FastEthernet0/5
+ spanning-tree bpdufilter enable
+```
+
+**Root Guard** prevents a port from becoming a root port. If a BPDU with a superior BID arrives on a Root Guard port, the port is put in a `root-inconsistent` state (not forwarding) rather than allowing the topology to change.
+
+```
+interface GigabitEthernet0/1
+ spanning-tree guard root
+```
+
+Use Root Guard on ports connecting to parts of the network that should never become root — for example, access layer switches connecting to distribution layer switches. This protects against rogue switches advertising a low priority.
+
+---
+
+## Show Spanning-Tree Commands
+
+```
+show spanning-tree
+show spanning-tree vlan 10
+show spanning-tree interface FastEthernet0/1
+show spanning-tree interface FastEthernet0/1 detail
+show spanning-tree summary
+```
+
+Key fields to read in `show spanning-tree vlan 10` output:
+
+- `Root ID` section — BID of the current root bridge
+- `This bridge is the root` (or not) — tells you if this switch is root
+- `Bridge ID` section — this switch's own BID
+- Port role (Root, Desg, Altn) and state (FWD, BLK, LIS, LRN)
+- `Cost` — path cost to root bridge
+
+---
+
+## EtherChannel
+
+EtherChannel bundles 2 to 8 physical ports into a single logical port channel. The benefits are:
+
+- **Bandwidth aggregation** — traffic load-balanced across all member links
+- **Redundancy** — if one physical link fails, traffic continues on remaining links (no STP reconvergence needed)
+- **STP simplicity** — STP sees the bundle as one link, so no ports are blocked
+
+All member ports in a channel must have identical configuration: same speed, duplex, VLAN membership (access or trunk settings), and STP settings.
+
+### EtherChannel Protocols
+
+| Protocol | Standard | Modes |
+|---|---|---|
+| LACP | IEEE 802.3ad (open standard) | `active` / `passive` |
+| PAgP | Cisco proprietary | `desirable` / `auto` |
+| Static | No negotiation | `on` |
+
+### LACP Modes
+
+| Mode | Behavior |
+|---|---|
+| `active` | Actively sends LACP frames to negotiate |
+| `passive` | Waits for LACP frames from the other side |
+
+Two `passive` ports facing each other will not form an EtherChannel — at least one side must be `active`.
+
+### PAgP Modes
+
+| Mode | Behavior |
+|---|---|
+| `desirable` | Actively sends PAgP frames to negotiate |
+| `auto` | Waits for PAgP frames from the other side |
+
+Two `auto` ports facing each other will not form an EtherChannel.
+
+### Configuring EtherChannel
+
+#### LACP (recommended — open standard)
+
+```
+interface range GigabitEthernet0/1 - 2
+ channel-group 1 mode active
+```
+
+#### PAgP (Cisco-to-Cisco)
+
+```
+interface range GigabitEthernet0/3 - 4
+ channel-group 2 mode desirable
+```
+
+#### Static (no negotiation — both sides must be `on`)
+
+```
+interface range GigabitEthernet0/5 - 6
+ channel-group 3 mode on
+```
+
+Static `on` mode does not send any negotiation frames and does not detect misconfiguration on the remote end. It is only appropriate when both devices are known-good and you need to avoid protocol overhead.
+
+### Configuring the Port-Channel Interface
+
+After the physical ports form the bundle, a virtual Port-channel interface is created. Apply all shared configuration (switchport mode, VLANs, IP address for Layer 3) on the Port-channel interface, not the physical ports.
+
+```
+interface Port-channel1
+ switchport mode trunk
+ switchport trunk native vlan 99
+ switchport trunk allowed vlan 10,20,99
+```
+
+Changes to the Port-channel interface are automatically reflected on all member physical ports.
+
+### EtherChannel Verification
+
+```
+show etherchannel summary
+```
+
+The most useful single command. Shows each channel group, its protocol, member ports, and flags:
+
+- `P` — bundled in port-channel (good)
+- `D` — default state / down
+- `I` — individual (not bundled — misconfiguration on this port)
+- `s` — suspended
+- `H` — LACP hot-standby (8 active max; additional ports on standby)
+
+```
+show etherchannel 1 port-channel
+show interfaces Port-channel1
+show interfaces Port-channel1 trunk
+```
+
+### EtherChannel Load Balancing
+
+Traffic is distributed across member links based on a hash of selected frame fields. The load balancing method applies globally (not per-channel) on most platforms.
+
+```
+port-channel load-balance src-dst-mac
+```
+
+Common options:
+
+| Method | Hash Input |
+|---|---|
+| `src-mac` | Source MAC only |
+| `dst-mac` | Destination MAC only |
+| `src-dst-mac` | Source XOR destination MAC |
+| `src-ip` | Source IP (for routed traffic) |
+| `dst-ip` | Destination IP |
+| `src-dst-ip` | Source XOR destination IP |
+
+`src-dst-mac` is a good default for switched traffic — it distributes different host pairs across different links. Check the current method with:
+
+```
+show etherchannel load-balance
+```
+
+---
+
+## Quick Reference
+
+| Task | Command |
+|---|---|
+| Set root bridge (primary) | `spanning-tree vlan 10 root primary` |
+| Set root bridge (manual priority) | `spanning-tree vlan 10 priority 4096` |
+| Enable PortFast on port | `spanning-tree portfast` |
+| Enable PortFast globally | `spanning-tree portfast default` |
+| Enable BPDU Guard on port | `spanning-tree bpduguard enable` |
+| Enable Root Guard on port | `spanning-tree guard root` |
+| View STP for a VLAN | `show spanning-tree vlan 10` |
+| Create LACP EtherChannel | `channel-group 1 mode active` |
+| Create PAgP EtherChannel | `channel-group 1 mode desirable` |
+| View EtherChannel status | `show etherchannel summary` |
+| Set load balance method | `port-channel load-balance src-dst-mac` |

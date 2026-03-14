@@ -1,0 +1,366 @@
+---
+title: "Cisco Network Automation"
+category: "cisco"
+topic: "automation"
+summary: "Automating Cisco networks — NETCONF/YANG, REST APIs (DNA Center, Meraki), Ansible for IOS configuration, and Terraform for infrastructure provisioning."
+tags: ["cisco", "automation", "netconf", "yang", "rest-api", "ansible", "terraform", "programmability"]
+order: 18
+draft: false
+---
+
+## Overview
+
+A human network engineer can configure a router in a few minutes. In an enterprise with a thousand routers, that means thousands of minutes — each with its own potential for typos, missed steps, and configuration drift. When you need to push the same SNMP server address to every device, or change a NTP configuration fleet-wide, the only scalable approach is automation.
+
+Network automation is not new — network teams have been writing expect scripts and TFTP-based config pushes for decades. What has changed is the tooling. Modern automation tools are structured, declarative, version-controlled, and testable. They treat network configuration the way software engineers treat code: as something that can be reviewed, tested, rolled back, and reproduced exactly.
+
+---
+
+## The Three Network Planes
+
+Before diving into automation tools, it helps to be clear about which part of the network they affect:
+
+| Plane | What It Does | Examples |
+|---|---|---|
+| **Data plane** | Forwards packets based on tables | Switch ASICs forwarding frames, router FIB lookups, ACL enforcement |
+| **Control plane** | Builds and maintains forwarding tables | OSPF computing routes, STP selecting the root bridge, ARP populating MAC tables |
+| **Management plane** | Configures and monitors the device | SSH CLI sessions, SNMP GET/SET, NETCONF, syslog output |
+
+Automation tools primarily operate on the **management plane** — they interact with device management interfaces to read and write configuration and operational state. Software-Defined Networking (SDN) goes further by centralising the **control plane** on a controller (as DNS Center does for SD-Access), removing per-device routing decisions.
+
+Traditional network management relies on human operators individually logging into devices via SSH and typing commands. This approach does not scale, produces configuration drift (devices accumulate individual changes over time and deviate from the intended baseline), and makes it difficult to prove what changed, when, and why.
+
+---
+
+## NETCONF
+
+**NETCONF (Network Configuration Protocol)** is defined in RFC 6241. It provides a structured, reliable mechanism for reading and writing device configuration — the opposite of screen-scraping CLI output.
+
+Key NETCONF characteristics:
+
+- **Transport**: SSH (TCP 830)
+- **Encoding**: XML
+- **Operations**: structured remote procedure calls with defined semantics
+- **Transactions**: supports candidate configuration and commit — changes can be staged before being committed atomically
+
+### Core NETCONF Operations
+
+| Operation | Purpose |
+|---|---|
+| `get-config` | Retrieve the current configuration (running, startup, or candidate datastore) |
+| `edit-config` | Modify the configuration in the candidate datastore |
+| `commit` | Apply the candidate configuration to the running configuration |
+| `get` | Retrieve operational state data (not just configuration — also ARP tables, interface counters) |
+| `lock` / `unlock` | Lock the datastore to prevent concurrent conflicting changes |
+| `validate` | Validate a proposed configuration against the device's schema without committing |
+
+The advantage of `edit-config` + `commit` over CLI is that a partial failure does not leave the device in an inconsistent state. Either the entire change commits or none of it does.
+
+A NETCONF session interaction looks like this:
+
+```xml
+<!-- Client sends: get the running configuration -->
+<rpc message-id="101">
+  <get-config>
+    <source><running/></source>
+    <filter type="subtree">
+      <interfaces xmlns="urn:ietf:params:xml:ns:yang:ietf-interfaces"/>
+    </filter>
+  </get-config>
+</rpc>
+```
+
+The device returns XML-structured configuration data that can be parsed reliably by any programming language — no regex parsing of human-readable CLI output required.
+
+---
+
+## YANG Data Models
+
+**YANG (Yet Another Next Generation)** is a data modelling language defined in RFC 6020. If NETCONF is the protocol for exchanging data, YANG defines the **schema** — the exact structure, data types, and valid values for every piece of configuration and operational data on a device.
+
+A YANG model defines the tree structure of configuration:
+
+```yang
+container interfaces {
+  list interface {
+    key "name";
+    leaf name {
+      type string;
+      description "Interface name, e.g. GigabitEthernet0/0";
+    }
+    leaf description {
+      type string;
+    }
+    container ipv4 {
+      leaf address { type inet:ipv4-address; }
+      leaf mask { type string; }
+    }
+    leaf enabled { type boolean; default true; }
+  }
+}
+```
+
+YANG models come from two sources:
+
+- **Native models**: vendor-specific models that expose every feature of a specific OS (Cisco IOS XE YANG models, NX-OS YANG models). These give access to all features but are not portable between vendors.
+- **OpenConfig models**: vendor-neutral YANG models defined by the OpenConfig working group (openconfig.net). A playbook written against OpenConfig models works on Cisco, Juniper, and Arista with minimal changes.
+
+YANG models are the foundation for all structured management of modern network devices. Even when using higher-level tools like Ansible or DNA Center, YANG models define what the underlying data looks like.
+
+---
+
+## REST APIs
+
+**REST (Representational State Transfer)** is an architectural style for APIs that uses standard HTTP methods over HTTPS. Most modern network management platforms expose REST APIs for programmatic control.
+
+### HTTP Methods in Network Automation
+
+| Method | CRUD | Typical Use |
+|---|---|---|
+| **GET** | Read | Retrieve device inventory, retrieve interface configuration, fetch event logs |
+| **POST** | Create | Create a new object, trigger an action (deploy, restart) |
+| **PUT** | Replace | Replace an entire resource with a new version |
+| **PATCH** | Update | Modify specific fields of an existing resource |
+| **DELETE** | Delete | Remove a resource |
+
+REST APIs are stateless — each request must include all authentication and context information. Responses are typically JSON-formatted.
+
+### HTTP Status Codes
+
+| Code | Meaning | Typical Cause |
+|---|---|---|
+| **200** | OK | Successful GET or PUT |
+| **201** | Created | Successful POST that created a new resource |
+| **204** | No Content | Successful DELETE (no body in response) |
+| **400** | Bad Request | Malformed request body or invalid parameters |
+| **401** | Unauthorized | Missing or invalid authentication credentials |
+| **403** | Forbidden | Authenticated but not authorised for this resource |
+| **404** | Not Found | Requested resource does not exist |
+| **500** | Internal Server Error | Server-side error — check platform logs |
+
+### DNA Center REST API
+
+DNA Center exposes a comprehensive REST API under the intent API path. Every GUI action in DNA Center can also be performed via API:
+
+```
+# Authenticate and get token
+POST https://dnac/dna/system/api/v1/auth/token
+Authorization: Basic <base64-encoded credentials>
+→ Returns: {"Token": "eyJhbGciO..."}
+
+# List all network devices
+GET https://dnac/dna/intent/api/v1/network-device
+X-Auth-Token: <token>
+Content-Type: application/json
+→ Returns JSON array of all managed devices with ID, hostname, IP, platform, software version
+```
+
+DNA Center API uses token-based authentication. The token is obtained with a POST to the auth endpoint using Basic auth, then included in subsequent requests as a header. Tokens expire after a defined period.
+
+### Meraki Dashboard API
+
+Cisco Meraki (the cloud-managed networking platform) exposes a REST API via the Meraki Dashboard. Authentication uses a static API key per organisation. The Meraki API is particularly clean and well-documented, making it a common starting point for network automation beginners:
+
+```
+GET https://api.meraki.com/api/v1/organizations/{orgId}/devices
+X-Cisco-Meraki-API-Key: <api-key>
+→ Returns list of all devices in the organisation
+```
+
+Cisco DevNet provides a free sandbox environment (developer.cisco.com/site/sandbox/) with always-on DNA Center, Meraki, and IOS XE instances for practising API automation without requiring physical hardware.
+
+---
+
+## Ansible for Cisco Networks
+
+**Ansible** is an agentless automation framework that uses YAML-based playbooks to define desired configuration state. For network devices, Ansible connects via SSH (for CLI-based modules) or via API (for modules that use REST/NETCONF directly).
+
+### Key Ansible Concepts
+
+| Concept | Description |
+|---|---|
+| **Inventory** | A file (static or dynamic) listing managed hosts, grouped by role (routers, switches, firewalls) |
+| **Playbook** | YAML file defining a list of plays; each play targets a host group and contains tasks |
+| **Task** | A single operation executed by a module |
+| **Module** | Reusable unit of work; Cisco IOS modules are in the `cisco.ios` collection |
+| **Role** | Reusable bundle of tasks, variables, and handlers for a specific function |
+| **Idempotent** | Running the same playbook multiple times produces the same result — no duplicate changes |
+
+### Cisco IOS Collection Modules
+
+The `cisco.ios` Ansible collection provides modules purpose-built for IOS and IOS XE devices:
+
+| Module | Purpose |
+|---|---|
+| `cisco.ios.ios_config` | Push arbitrary IOS configuration lines |
+| `cisco.ios.ios_command` | Run show commands and capture output |
+| `cisco.ios.ios_facts` | Gather facts (hostname, interfaces, routing, etc.) from the device |
+| `cisco.ios.ios_interfaces` | Manage interface configuration in a structured way |
+| `cisco.ios.ios_vlans` | Manage VLANs on IOS switches |
+| `cisco.ios.ios_ntp_global` | Manage NTP server configuration |
+| `cisco.ios.ios_bgp_global` | Manage BGP global configuration |
+
+### Example Playbook
+
+```yaml
+---
+- name: Configure NTP and hostname on all routers
+  hosts: cisco_routers
+  gather_facts: no
+  connection: network_cli
+
+  tasks:
+    - name: Set NTP server
+      cisco.ios.ios_ntp_global:
+        config:
+          servers:
+            - server: 192.168.1.1
+              prefer: true
+        state: merged
+
+    - name: Configure interface description
+      cisco.ios.ios_interfaces:
+        config:
+          - name: GigabitEthernet0/0
+            description: "WAN uplink to ISP"
+            enabled: true
+        state: merged
+```
+
+The `state: merged` directive is key to idempotency — it applies only the changes needed to bring the device to the desired state, without removing existing configuration that is not in the playbook.
+
+### Inventory File Example
+
+```ini
+[cisco_routers]
+router1 ansible_host=10.0.0.1
+router2 ansible_host=10.0.0.2
+
+[cisco_switches]
+switch1 ansible_host=10.0.1.1
+switch2 ansible_host=10.0.1.2
+
+[all:vars]
+ansible_user=admin
+ansible_ssh_pass={{ vault_password }}
+ansible_network_os=cisco.ios.ios
+```
+
+Secrets like passwords should be stored in Ansible Vault (encrypted) rather than in plaintext inventory files.
+
+---
+
+## Terraform for Cisco
+
+**Terraform** by HashiCorp takes a different approach from Ansible. Where Ansible focuses on configuration management (what settings are on existing devices), Terraform focuses on **infrastructure provisioning** — creating, modifying, and destroying infrastructure resources.
+
+Terraform uses **HCL (HashiCorp Configuration Language)**, a declarative language that defines the desired end state:
+
+```hcl
+terraform {
+  required_providers {
+    aci = {
+      source  = "CiscoDevNet/aci"
+      version = "~> 2.0"
+    }
+  }
+}
+
+provider "aci" {
+  username = "admin"
+  password = var.aci_password
+  url      = "https://aci-apic.example.com"
+  insecure = false
+}
+
+resource "aci_tenant" "engineering" {
+  name        = "Engineering"
+  description = "Engineering department tenant"
+}
+
+resource "aci_vrf" "engineering_vrf" {
+  tenant_dn = aci_tenant.engineering.id
+  name      = "Engineering_VRF"
+}
+```
+
+### Terraform Workflow
+
+1. `terraform init` — download required providers and initialise working directory
+2. `terraform plan` — dry run; shows what changes will be made without making them
+3. `terraform apply` — make the changes; create/modify/destroy resources to match the declared state
+4. `terraform destroy` — remove all resources managed by this configuration
+
+Terraform maintains a **state file** (`terraform.tfstate`) that tracks the current real-world state of all managed resources. This allows Terraform to determine the delta between the desired state and the current state on each run.
+
+Cisco providers available for Terraform:
+- **Cisco ACI provider**: provisions tenants, VRFs, EPGs, contracts, and all ACI constructs
+- **Cisco NSO provider**: interacts with Network Services Orchestrator for multi-vendor provisioning
+- **Meraki provider**: manages Meraki organisations, networks, and devices
+
+---
+
+## Python with Netmiko and NAPALM
+
+Before Ansible and Terraform became standard, the dominant approach to network automation was Python with SSH libraries. These tools remain widely used and are important for custom scripts and integrations.
+
+**Netmiko** is a Python library that simplifies SSH connections to multi-vendor network devices. It handles the connection, prompt detection, and command output parsing:
+
+```python
+from netmiko import ConnectHandler
+
+device = {
+    "device_type": "cisco_ios",
+    "host": "10.0.0.1",
+    "username": "admin",
+    "password": "cisco123",
+}
+
+with ConnectHandler(**device) as conn:
+    output = conn.send_command("show ip route")
+    conn.send_config_set(["ntp server 192.168.1.1"])
+    print(output)
+```
+
+**NAPALM (Network Automation and Programmability Abstraction Layer with Multivendor support)** provides a higher-level abstraction. The same Python code works against Cisco IOS, Juniper JunOS, and Arista EOS by using a unified API:
+
+```python
+from napalm import get_network_driver
+
+driver = get_network_driver("ios")
+device = driver("10.0.0.1", "admin", "password")
+device.open()
+facts = device.get_facts()
+interfaces = device.get_interfaces()
+device.close()
+```
+
+NAPALM is particularly useful for gathering consistent operational data (interface status, ARP tables, BGP peers) across a multi-vendor environment.
+
+---
+
+## Infrastructure as Code Benefits
+
+Treating network configuration as code — stored in Git, reviewed via pull requests, and deployed by pipelines — brings software engineering discipline to network operations:
+
+| Benefit | Explanation |
+|---|---|
+| **Version history** | Every change is recorded in Git with author, timestamp, and commit message |
+| **Peer review** | Changes are reviewed before they are applied — the same as a code review |
+| **Repeatability** | The same code produces the same infrastructure every time; no manual steps |
+| **Rollback** | Revert a bad commit and re-apply the previous configuration |
+| **Drift detection** | Run Ansible or Terraform in check mode to identify devices that have drifted from the defined baseline |
+| **CI/CD pipelines** | Automated testing (syntax check, lint, dry-run) before changes are applied to production |
+
+---
+
+## Cisco DevNet Resources
+
+Cisco's DevNet program provides certification tracks and learning resources specifically for network programmability:
+
+| Certification | Focus |
+|---|---|
+| **Cisco Certified DevNet Associate** | REST APIs, Python scripting, NETCONF/YANG, Ansible basics, DNA Center API, Meraki API |
+| **Cisco Certified DevNet Professional** | Advanced automation, application development on Cisco platforms, CI/CD for networks, Terraform, advanced YANG modelling |
+
+The DevNet Sandbox (developer.cisco.com/site/sandbox/) provides free, always-on and reservation-based lab access to DNA Center, Meraki, ACI, IOS XE, and other platforms — all via real APIs, with no physical hardware required. It is the fastest way to start practising network automation without building a home lab.

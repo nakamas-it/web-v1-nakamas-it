@@ -1,0 +1,458 @@
+---
+title: "Cisco IOS — OSPF Configuration"
+category: "cisco"
+topic: "ospf"
+summary: "Configuring OSPFv2 on Cisco IOS — router ospf, network statements, passive interfaces, neighbour verification, cost tuning, and multi-area OSPF."
+tags: ["cisco", "ios", "ospf", "routing", "ospfv2"]
+order: 6
+draft: false
+---
+
+## Overview
+
+OSPF (Open Shortest Path First) is the most widely deployed interior gateway routing protocol in enterprise and service provider networks. It is link-state: every router builds a complete map of the network topology (the Link-State Database) and runs Dijkstra's shortest-path algorithm to determine the best routes. Unlike distance-vector protocols such as RIP, OSPF routers do not send their routing tables to neighbours — they share raw topology information, giving each router the intelligence to calculate its own optimal paths.
+
+OSPFv2 handles IPv4 (RFC 2328). This article covers the full IOS configuration workflow: process creation, router ID, the network command, interface-mode configuration, passive interfaces, neighbour verification, cost tuning, DR/BDR elections, network types, multi-area design, and the default route advertisement.
+
+---
+
+## Starting OSPF
+
+### Process ID
+
+```
+router ospf 1
+```
+
+The process ID (1 in this example) is locally significant — it identifies this OSPF process on this router only. Two routers can use different process IDs and still become OSPF neighbours. Multiple OSPF processes can run on one router simultaneously (used for redistribution), though this is rare in simple designs.
+
+### Router ID (RID)
+
+The Router ID uniquely identifies this router in the OSPF domain. Every router must have a unique RID — duplicate RIDs prevent adjacency formation.
+
+IOS selects the RID automatically using this priority order:
+
+1. **Manual `router-id` command** (highest priority)
+2. **Highest IP address on any loopback interface** (up at time of OSPF startup)
+3. **Highest IP address on any physical interface** (up at time of OSPF startup)
+
+Manual assignment is strongly recommended — it makes the RID predictable and stable regardless of which interfaces are up when OSPF starts.
+
+```
+router ospf 1
+ router-id 1.1.1.1
+```
+
+Use a loopback-style address (e.g., `1.1.1.1`, `2.2.2.2`) that clearly identifies the router. The RID does not need to be routable or even configured on an interface — it is an identifier, not a destination address.
+
+After changing the router-id, reset OSPF to apply it:
+
+```
+clear ip ospf process
+```
+
+This resets all OSPF neighbour relationships and triggers a new RID election. Do this during a maintenance window — it causes a brief routing interruption.
+
+---
+
+## Enabling OSPF on Interfaces
+
+### Classic Method — Network Statement
+
+The `network` command activates OSPF on any interface whose IP address falls within the specified range and assigns it to an area.
+
+```
+router ospf 1
+ router-id 1.1.1.1
+ network 10.1.0.0 0.0.255.255 area 0
+ network 192.168.1.0 0.0.0.255 area 0
+```
+
+The second argument is a **wildcard mask** — the bitwise inverse of a subnet mask. In the wildcard, `0` means "this bit must match" and `1` means "ignore this bit."
+
+| Wildcard | Meaning |
+|---|---|
+| `0.0.0.0` | Exact host match — only that specific IP |
+| `0.0.0.255` | Match the first 3 octets — whole /24 subnet |
+| `0.0.255.255` | Match the first 2 octets — whole /16 |
+| `255.255.255.255` | Match anything — all interfaces |
+
+To match a specific interface exactly (common best practice):
+
+```
+network 10.1.10.1 0.0.0.0 area 0
+```
+
+### Interface Mode Method (Newer Style)
+
+Configure OSPF directly on each interface instead of using a network statement. This is more explicit and easier to read.
+
+```
+interface GigabitEthernet0/0/0
+ ip ospf 1 area 0
+```
+
+This activates OSPF process 1 on this interface in area 0. There is no need for a `network` statement when using this method. Both methods work; interface mode is becoming the preferred style on IOS XE platforms.
+
+---
+
+## Passive Interfaces
+
+By default, every interface enabled for OSPF sends and receives Hello packets. On LAN interfaces that connect to hosts (not other routers), sending Hellos wastes bandwidth and exposes topology information unnecessarily. Passive interfaces advertise the connected subnet into OSPF but suppress Hello packets entirely — no OSPF neighbours can form on that interface.
+
+### Passive Single Interface
+
+```
+router ospf 1
+ passive-interface GigabitEthernet0/0/0
+```
+
+### Passive Default (All Interfaces)
+
+In networks where most interfaces face hosts and only a few face other routers, the `passive-interface default` approach is cleaner:
+
+```
+router ospf 1
+ passive-interface default
+ no passive-interface GigabitEthernet0/0/1
+ no passive-interface GigabitEthernet0/0/2
+```
+
+All interfaces are passive by default. Use `no passive-interface` to re-enable Hello transmission only on the interfaces that actually connect to other OSPF routers.
+
+---
+
+## Neighbour Requirements
+
+Two routers form an OSPF adjacency only when all of these parameters match on the common interface:
+
+| Parameter | Must Match? | Notes |
+|---|---|---|
+| Interface up/up | Yes | Physical link must work |
+| Same subnet | Yes | IPs must be in the same subnet |
+| Same area | Yes | Area 0 and Area 0 — cannot mix |
+| Same Hello timer | Yes | Default 10s on Ethernet |
+| Same Dead timer | Yes | Default 40s on Ethernet |
+| Same MTU | No (but…) | Neighbours form but LSDB exchange fails — route installation fails |
+| Same authentication | Yes | Must both have auth or both not |
+| Unique Router IDs | Yes | Duplicate RIDs prevent adjacency |
+| OSPF process not shut | Yes | `router ospf 1 shutdown` prevents all adjacency |
+| Same network type | No (but…) | Mismatched types reach FULL but routes fail |
+
+MTU mismatch is a particularly nasty problem — the neighbours appear in `show ip ospf neighbor` but the Database Description exchange fails silently.
+
+---
+
+## Verifying OSPF Neighbours
+
+```
+show ip ospf neighbor
+```
+
+Key output fields:
+
+| Field | Meaning |
+|---|---|
+| Neighbor ID | RID of the remote router |
+| Pri | OSPF interface priority |
+| State | Adjacency state |
+| Dead Time | Countdown before neighbour declared dead |
+| Interface | Local interface the neighbour is on |
+
+### OSPF Neighbour States
+
+Healthy states for Ethernet (broadcast) networks:
+
+- `FULL/DR` — fully adjacent with the DR
+- `FULL/BDR` — fully adjacent with the BDR
+- `FULL/-` — fully adjacent (point-to-point link, no DR)
+- `2WAY/DROTHER` — normal state between two DROthers; not fully adjacent with each other
+
+States that indicate a problem:
+
+- `INIT` — one-way communication; own RID not in remote Hello
+- `EXSTART` or `EXCHANGE` stuck — MTU mismatch or authentication issue
+- `LOADING` stuck — corrupted LSA or MTU issue
+
+```
+show ip ospf neighbor detail
+```
+
+Shows extended information including Dead/Hello timers, MTU, authentication type, area, and adjacency uptime.
+
+---
+
+## Verifying OSPF Routes
+
+```
+show ip route ospf
+```
+
+OSPF route codes:
+
+- `O` — OSPF intra-area (within the same area)
+- `O IA` — OSPF inter-area (route learned from another area via an ABR)
+- `O E1` / `O E2` — OSPF external (redistributed from another protocol)
+- `[110/cost]` — Administrative Distance 110 / OSPF metric (path cost)
+
+```
+show ip ospf interface brief
+```
+
+Shows each OSPF-enabled interface with: area, cost, DR/BDR state, hello/dead timers, and neighbour counts. The `State` column shows `DR`, `BDR`, or `DROTH` for broadcast networks; `P2P` for point-to-point.
+
+```
+show ip ospf
+```
+
+Summary of the OSPF process: RID, areas, SPF run count, reference bandwidth, and redistribution details.
+
+```
+show ip ospf database
+```
+
+The Link-State Database — all LSAs this router has collected. For single-area OSPF, you should see Type 1 (Router) LSAs from every router.
+
+---
+
+## DR and BDR Election
+
+On broadcast networks (Ethernet), OSPF elects a Designated Router (DR) and Backup Designated Router (BDR) to reduce the number of OSPF adjacencies. All other routers (DROthers) form full adjacency only with the DR and BDR — not with each other. This reduces LSA flooding overhead on multi-access segments.
+
+### Election Rules
+
+1. **Highest OSPF interface priority wins** (range 0–255; default 1). Priority 0 means "never become DR or BDR."
+2. **Tiebreaker: highest Router ID**
+
+There is **no preemption**. Once a DR is elected, it keeps that role until it fails, regardless of a higher-priority router joining later. The next election happens only when the current DR fails.
+
+### Configuring Priority
+
+```
+interface GigabitEthernet0/0/0
+ ip ospf priority 99
+```
+
+Set priority to 0 on interfaces where you never want the router to become DR:
+
+```
+interface GigabitEthernet0/0/0
+ ip ospf priority 0
+```
+
+This is useful on access switches that run OSPF but should not become DR for a distribution segment.
+
+### Multicast Addresses
+
+| Address | Used By | Purpose |
+|---|---|---|
+| 224.0.0.5 | DR → all routers | Flood LSAs to all OSPF routers |
+| 224.0.0.6 | DROthers → DR/BDR | Send LSU updates to DR/BDR only |
+
+---
+
+## OSPF Cost
+
+OSPF cost is the metric used to determine the best path. The cost of a path equals the sum of outgoing interface costs along the entire path from source to destination.
+
+### Default Cost Formula
+
+```
+Cost = Reference_bandwidth (Kbps) / Interface_bandwidth (Kbps)
+```
+
+Default reference bandwidth is 100 Mbps (100,000 Kbps). This creates a problem: FastEthernet (100 Mbps), GigabitEthernet (1 Gbps), and 10 GigabitEthernet all calculate to cost 1 — they are indistinguishable. OSPF will treat them equally and may make poor routing decisions.
+
+### Setting the Reference Bandwidth
+
+Set reference bandwidth on all routers to a value higher than the fastest link in your network:
+
+```
+router ospf 1
+ auto-cost reference-bandwidth 10000
+```
+
+This sets the reference to 10,000 Mbps (10 Gbps). Now:
+
+| Interface | Cost (10 Gbps ref) |
+|---|---|
+| Serial 1.544 Mbps | ~6477 |
+| FastEthernet 100 Mbps | 100 |
+| GigabitEthernet 1 Gbps | 10 |
+| 10 GigabitEthernet | 1 |
+
+All routers in the OSPF domain must use the same reference bandwidth — inconsistent values produce incorrect SPF calculations.
+
+### Manual Cost Override
+
+Set the cost directly on an interface, overriding the calculated value:
+
+```
+interface GigabitEthernet0/0/1
+ ip ospf cost 50
+```
+
+Manual cost is useful when the calculated value does not reflect the real-world preference (for example, a high-latency satellite link that has a low numerical bandwidth cost but should be avoided for latency-sensitive traffic).
+
+### Bandwidth Statement
+
+The `bandwidth` command in Kbps influences the cost calculation but does not change the physical speed:
+
+```
+interface Serial0/0/0
+ bandwidth 512
+```
+
+This tells OSPF the link is 512 Kbps for cost calculation purposes. The physical rate is whatever the circuit provider delivers. Use this only when the IOS default bandwidth (1544 Kbps for serial) does not reflect the actual circuit.
+
+---
+
+## OSPF Hello and Dead Timers
+
+Hellos are sent every 10 seconds on Ethernet (default). Dead time is 4× Hello = 40 seconds. If a router does not hear from a neighbour within the dead time, it declares the neighbour down and triggers SPF recalculation.
+
+Both timers must match on both sides of a link to form adjacency.
+
+```
+interface GigabitEthernet0/0/1
+ ip ospf hello-interval 5
+ ip ospf dead-interval 20
+```
+
+Reducing timers speeds up failure detection but increases CPU and bandwidth usage. Increasing them reduces overhead on large slow networks.
+
+---
+
+## OSPF Network Types
+
+The OSPF network type controls DR/BDR election and how neighbours are discovered:
+
+| Network Type | Keyword | Discovers Neighbours | DR/BDR |
+|---|---|---|---|
+| Broadcast | `broadcast` | Dynamically via multicast | Yes |
+| Point-to-Point | `point-to-point` | Dynamically via multicast | No |
+
+Default: Ethernet = broadcast, Serial = point-to-point.
+
+For Ethernet WAN links (where only two routers are connected), changing to point-to-point eliminates the DR/BDR election overhead and speeds up convergence:
+
+```
+interface GigabitEthernet0/0/1
+ ip ospf network point-to-point
+```
+
+Both ends must use the same network type — a mismatch causes the neighbours to reach adjacency but fail to exchange routes correctly.
+
+---
+
+## Multi-Area OSPF
+
+As a network grows, a single OSPF area becomes unwieldy. Every router stores every LSA; the SPF calculation runs on the full topology. Multi-area OSPF partitions the network so each area only floods within itself.
+
+### Area Design Rules
+
+- **Area 0 (backbone)** is mandatory. All other areas must connect to Area 0.
+- **ABR (Area Border Router)** connects two or more areas. It has a full LSDB for each area it belongs to and generates Type 3 Summary LSAs to advertise routes between areas.
+- **Intra-area routes** (`O`) — destination in the same area
+- **Inter-area routes** (`O IA`) — destination in a different area, learned via ABR
+
+### LSA Types
+
+| Type | Name | Generated By | Describes |
+|---|---|---|---|
+| 1 | Router LSA | Every router | Router's own links and states |
+| 2 | Network LSA | DR (on broadcast segments) | Multi-access network details |
+| 3 | Summary LSA | ABR | Routes between areas |
+
+Type 3 LSAs do not carry the full topology of the remote area — just the prefix, mask, and cost. Routers in one area cannot see inside another area's topology. This reduces SPF complexity.
+
+### Multi-Area Configuration Example
+
+**R1 (Area 0 and Area 1 — ABR):**
+
+```
+router ospf 1
+ router-id 1.1.1.1
+ network 10.0.0.0 0.0.0.3 area 0
+ network 10.1.10.0 0.0.0.255 area 1
+```
+
+**R2 (Area 0 only):**
+
+```
+router ospf 1
+ router-id 2.2.2.2
+ network 10.0.0.0 0.0.0.3 area 0
+ network 10.2.20.0 0.0.0.255 area 0
+```
+
+**R3 (Area 1 only):**
+
+```
+router ospf 1
+ router-id 3.3.3.3
+ network 10.1.10.0 0.0.0.255 area 1
+```
+
+R1 is the ABR — it sits in both Area 0 and Area 1 and generates Type 3 LSAs to advertise Area 1 prefixes into Area 0 and vice versa.
+
+### Route Summarisation at ABR
+
+An ABR can summarise inter-area routes, reducing the number of Type 3 LSAs flooded into Area 0:
+
+```
+router ospf 1
+ area 1 range 10.1.0.0 255.255.0.0
+```
+
+All routes from Area 1 that fall within `10.1.0.0/16` are summarised into a single Type 3 LSA advertised to Area 0. Summarisation reduces the routing table size on routers in other areas and limits the impact of topology changes within Area 1.
+
+---
+
+## Advertising a Default Route
+
+An OSPF router can inject a default route into the OSPF domain so all other routers point toward it as the internet exit:
+
+```
+ip route 0.0.0.0 0.0.0.0 203.0.113.1
+
+router ospf 1
+ default-information originate
+```
+
+`default-information originate` creates an OSPF Type 5 External LSA for `0.0.0.0/0` and floods it to all OSPF areas. Other routers install `O*E2 0.0.0.0/0` in their routing tables.
+
+The `always` keyword advertises the default route even if the router itself does not currently have a default route in its routing table:
+
+```
+router ospf 1
+ default-information originate always
+```
+
+Use with care — if the internet link is down and `always` is configured, routers will continue pointing traffic at the OSPF exit router, which will blackhole it.
+
+---
+
+## Quick Reference
+
+| Task | Command |
+|---|---|
+| Start OSPF | `router ospf 1` |
+| Set Router ID | `router-id 1.1.1.1` |
+| Enable OSPF on interface (network cmd) | `network 10.1.0.0 0.0.0.255 area 0` |
+| Enable OSPF on interface (interface cmd) | `ip ospf 1 area 0` |
+| Make interface passive | `passive-interface Gi0/0/0` |
+| Make all interfaces passive | `passive-interface default` |
+| Re-activate specific interface | `no passive-interface Gi0/0/1` |
+| Set reference bandwidth | `auto-cost reference-bandwidth 10000` |
+| Set interface cost | `ip ospf cost 10` |
+| Set DR priority | `ip ospf priority 99` |
+| Never become DR | `ip ospf priority 0` |
+| Set network type | `ip ospf network point-to-point` |
+| Summarise at ABR | `area 1 range 10.1.0.0 255.255.0.0` |
+| Advertise default route | `default-information originate` |
+| View neighbours | `show ip ospf neighbor` |
+| View OSPF interfaces | `show ip ospf interface brief` |
+| View OSPF routes | `show ip route ospf` |
+| View LSDB | `show ip ospf database` |
+| Reset OSPF process | `clear ip ospf process` |

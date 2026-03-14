@@ -1,0 +1,284 @@
+---
+title: "Cisco IOS — Switch Configuration"
+category: "cisco"
+topic: "switching"
+summary: "Configuring Cisco IOS switches — VLANs, access and trunk ports, DTP, inter-VLAN routing concepts, and verifying the MAC address table."
+tags: ["cisco", "ios", "switching", "vlan", "trunk", "dtp"]
+order: 2
+draft: false
+---
+
+## Overview
+
+A Cisco IOS switch forwards Ethernet frames at Layer 2, separating broadcast domains with VLANs and connecting them with trunks. Correct switch configuration is the foundation of every enterprise LAN — get the VLAN assignments, trunking, and management interface wrong, and nothing works cleanly above it.
+
+This article covers VLAN creation, access port configuration, trunk port configuration, Dynamic Trunking Protocol (DTP), native VLANs, voice VLANs, the MAC address table, and switch management.
+
+---
+
+## VLANs
+
+A VLAN (Virtual LAN) creates a separate Layer 2 broadcast domain on a switch. Frames inside one VLAN cannot reach another VLAN without being routed — they are as isolated as if they were on completely separate physical switches. VLANs allow you to segment a network logically without purchasing additional hardware.
+
+### VLAN Ranges
+
+| Range | VLANs | Notes |
+|---|---|---|
+| Reserved | 0, 4095 | Cannot be used |
+| Normal | 1–1005 | Supported on all switch platforms |
+| Extended | 1006–4094 | Requires VTP transparent mode or VTP v3 |
+
+VLAN 1 is the default VLAN. All ports belong to VLAN 1 by default and it cannot be deleted. Best practice is to avoid using VLAN 1 for user data — move management and user traffic to separate, explicitly numbered VLANs.
+
+### Creating VLANs
+
+```
+vlan 10
+ name Engineering
+vlan 20
+ name Marketing
+vlan 99
+ name Management
+```
+
+VLANs can be created in VLAN config mode or inline when configuring access ports. The `name` command is optional but strongly recommended for clarity. On platforms running VTP, VLANs are stored in the `vlan.dat` file in flash — they persist separately from startup-config.
+
+### Verify VLANs
+
+```
+show vlan brief
+```
+
+Shows all VLANs, their names, status, and which access ports are assigned to each. Trunk ports do not appear in this output — use `show interfaces trunk` for trunks.
+
+```
+show vlan id 10
+```
+
+Detailed view of a specific VLAN including its ports and SAID (Security Association ID).
+
+---
+
+## Access Ports
+
+An access port carries traffic for a single VLAN. It is used to connect end devices — workstations, printers, servers, IP phones (data side). The switch adds no 802.1Q tag when forwarding frames out an access port; the connected device sees normal untagged Ethernet.
+
+### Configuring an Access Port
+
+```
+interface FastEthernet0/1
+ switchport mode access
+ switchport access vlan 10
+ switchport nonegotiate
+ no shutdown
+```
+
+`switchport mode access` statically sets the port to access mode and disables DTP negotiation on that port (though using `nonegotiate` explicitly is cleaner). `switchport access vlan 10` assigns the port to VLAN 10.
+
+If a port is assigned to a VLAN that does not yet exist in the VLAN database, IOS will create a warning but still assign it — traffic will not pass until the VLAN is created.
+
+### Verify Access Port Configuration
+
+```
+show interfaces FastEthernet0/1 switchport
+```
+
+Shows the administrative and operational mode, access VLAN, voice VLAN, and trunking details for the interface. Look for `Administrative Mode: static access` and `Access Mode VLAN: 10`.
+
+---
+
+## Trunk Ports
+
+A trunk port carries traffic for multiple VLANs over a single physical link. Each frame on a trunk is tagged with a 4-byte 802.1Q header (TPID 0x8100 + priority + DEI + 12-bit VLAN ID) so the receiving switch knows which VLAN the frame belongs to. Trunks are used between switches and between a switch and a router in Router-on-a-Stick configurations.
+
+### Configuring a Trunk Port
+
+```
+interface GigabitEthernet0/1
+ switchport mode trunk
+ switchport nonegotiate
+ switchport trunk native vlan 99
+ switchport trunk allowed vlan 10,20,99
+```
+
+`switchport mode trunk` statically sets the port to trunk mode. `switchport nonegotiate` disables DTP so no DTP frames are sent on this port — recommended when connecting to non-Cisco devices and as a security hardening measure.
+
+### Managing the Allowed VLAN List
+
+By default a trunk allows all VLANs (1–4094). In production, restrict it to only the VLANs actually needed on that link.
+
+```
+switchport trunk allowed vlan 10,20,99          # Set to exactly these VLANs
+switchport trunk allowed vlan add 30            # Add VLAN 30 to the list
+switchport trunk allowed vlan remove 30         # Remove VLAN 30 from the list
+switchport trunk allowed vlan all               # Restore to all VLANs
+```
+
+### Verify Trunk Ports
+
+```
+show interfaces trunk
+```
+
+Shows all active trunk ports with: trunking mode, native VLAN, allowed VLANs, VLANs in the STP forwarding state, and VLANs whose traffic is actually being forwarded. Critically, if a VLAN is not in `show vlan brief` as active, it will not appear in the "VLANs allowed and active" section of `show interfaces trunk` — meaning its traffic will not pass even if it is in the allowed list.
+
+```
+show interfaces GigabitEthernet0/1 trunk
+```
+
+Same output filtered to a single interface.
+
+---
+
+## Dynamic Trunking Protocol (DTP)
+
+DTP is a Cisco proprietary protocol that negotiates trunk formation between directly connected Cisco switches. It sends DTP frames periodically on trunk-capable interfaces. Understanding DTP mode interactions is important for the CCNA exam and for troubleshooting unexpected trunk or access states.
+
+### DTP Modes
+
+| Mode | Behavior |
+|---|---|
+| `switchport mode trunk` | Always trunk; sends DTP advertising trunking |
+| `switchport mode access` | Always access; never trunk; sends DTP advertising access |
+| `switchport mode dynamic desirable` | Actively negotiates trunk (Cisco proprietary) |
+| `switchport mode dynamic auto` | Passively waits for the other side to initiate |
+| `switchport nonegotiate` | Trunk, but sends no DTP frames at all |
+
+### DTP Negotiation Outcomes
+
+| Local Mode | Remote Mode | Result |
+|---|---|---|
+| trunk | trunk | Trunk |
+| trunk | dynamic auto | Trunk |
+| trunk | dynamic desirable | Trunk |
+| dynamic desirable | dynamic desirable | Trunk |
+| dynamic desirable | dynamic auto | Trunk |
+| dynamic auto | dynamic auto | Access |
+| access | any | Access |
+
+The key takeaway: two `dynamic auto` ports facing each other will NOT form a trunk — both sides are waiting for the other to initiate. This is a common misconfiguration in labs.
+
+### Disabling DTP (Best Practice)
+
+On any port where you know the mode (all production ports), explicitly set the mode and add `switchport nonegotiate`. This prevents a rogue device from negotiating a trunk and gaining access to all VLANs.
+
+```
+interface GigabitEthernet0/2
+ switchport mode trunk
+ switchport nonegotiate
+```
+
+---
+
+## Native VLAN
+
+The native VLAN on a trunk port is the one VLAN whose frames are sent **untagged**. When the receiving switch sees an untagged frame on a trunk, it associates it with the native VLAN. Both ends of a trunk must agree on the native VLAN — a mismatch causes a CDP warning and results in frames being placed in the wrong VLAN.
+
+Default native VLAN is VLAN 1. Best practice is to change it to an unused VLAN to mitigate VLAN hopping attacks:
+
+```
+switchport trunk native vlan 99
+```
+
+If VLAN 99 is used as native VLAN, create and name it but assign no user ports to it.
+
+---
+
+## Voice VLAN
+
+Cisco IP phones contain a built-in three-port switch. The phone connects to the wall jack, and the PC plugs into the phone's downstream port. The phone tags its voice traffic with a separate VLAN while passing the PC's data traffic untagged on the data VLAN.
+
+```
+interface FastEthernet0/3
+ switchport mode access
+ switchport access vlan 10
+ switchport voice vlan 20
+```
+
+With this configuration, the port sends data frames untagged (VLAN 10) and voice frames 802.1Q-tagged for VLAN 20. The CDP frames sent to the phone tell it which VLAN to use for voice traffic. VLAN 20 must exist in the VLAN database.
+
+---
+
+## MAC Address Table
+
+The switch's MAC address table (also called the CAM table) maps destination MAC addresses to outgoing ports. The switch learns entries dynamically by observing the source MAC of incoming frames.
+
+### Key MAC Table Behaviors
+
+| Frame Type | Action |
+|---|---|
+| Known unicast | Forward to the specific port in the MAC table |
+| Unknown unicast | Flood to all ports in the VLAN except the source port |
+| Broadcast | Flood to all ports in the VLAN except the source port |
+| Multicast | Flood by default (unless IGMP snooping is enabled) |
+
+Dynamic entries age out after 300 seconds (5 minutes) of inactivity by default.
+
+### Viewing the MAC Address Table
+
+```
+show mac address-table
+show mac address-table dynamic
+show mac address-table address aabb.ccdd.eeff
+show mac address-table interface FastEthernet0/1
+```
+
+### Static MAC Entries
+
+```
+mac address-table static aabb.ccdd.eeff vlan 10 interface FastEthernet0/1
+```
+
+A static entry never ages out and takes precedence over a dynamically learned entry for the same MAC address. Used for security-sensitive devices.
+
+### Clearing Dynamic Entries
+
+```
+clear mac address-table dynamic
+clear mac address-table dynamic interface FastEthernet0/1
+```
+
+---
+
+## Switch Management Interface
+
+A switch does not have a routed interface for management by default. To manage the switch remotely (SSH, SNMP, syslog), configure a Switched Virtual Interface (SVI) on the management VLAN.
+
+```
+interface vlan 1
+ ip address 192.168.1.10 255.255.255.0
+ no shutdown
+```
+
+The SVI comes up only when at least one port assigned to that VLAN is up/up. Putting management on VLAN 1 is acceptable in a lab but consider a dedicated management VLAN in production.
+
+### Default Gateway
+
+The switch needs a default gateway to communicate with hosts on other subnets (for example, a management workstation on a different network).
+
+```
+ip default-gateway 192.168.1.1
+```
+
+Note: `ip default-gateway` is for a Layer 2 switch (no `ip routing`). On a Layer 3 switch with `ip routing` enabled, use a default static route instead.
+
+---
+
+## Quick Reference: Key Switch Configuration Commands
+
+| Task | Command |
+|---|---|
+| Create VLAN | `vlan 10` then `name USERS` |
+| Assign port to VLAN | `switchport access vlan 10` |
+| Force access mode | `switchport mode access` |
+| Force trunk mode | `switchport mode trunk` |
+| Disable DTP | `switchport nonegotiate` |
+| Set native VLAN | `switchport trunk native vlan 99` |
+| Restrict trunk VLANs | `switchport trunk allowed vlan 10,20,99` |
+| Set voice VLAN | `switchport voice vlan 20` |
+| Management IP | `interface vlan 1` then `ip address ...` |
+| Default gateway | `ip default-gateway 192.168.1.1` |
+| View VLANs | `show vlan brief` |
+| View trunks | `show interfaces trunk` |
+| View port details | `show interfaces Gi0/1 switchport` |
+| View MAC table | `show mac address-table` |

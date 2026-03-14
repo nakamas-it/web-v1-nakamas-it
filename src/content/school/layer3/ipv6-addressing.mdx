@@ -1,0 +1,228 @@
+---
+title: "IPv6 — Addressing, SLAAC, and DHCPv6"
+layer: "layer3"
+protocol: "ipv6"
+summary: "IPv6 address assignment methods — EUI-64 interface IDs, Stateless Address Autoconfiguration (SLAAC), stateless and stateful DHCPv6, and Neighbor Discovery Protocol."
+tags: ["ipv6", "layer3", "slaac", "dhcpv6", "ndp", "eui-64"]
+order: 14
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Knowing what an IPv6 address looks like is only half the story. The more operationally interesting question is: how does an interface get its IPv6 address in the first place? IPv4 answers this with either manual configuration or DHCP. IPv6 offers three distinct mechanisms — EUI-64 derived from the interface MAC address, Stateless Address Autoconfiguration (SLAAC) where a host builds its own full address with no server, and stateful DHCPv6 where a server assigns addresses explicitly. Understanding which mechanism applies in a given scenario, and how Neighbor Discovery Protocol underpins all of them, is essential for both configuring and troubleshooting IPv6 networks.
+
+---
+
+## The Interface Identifier — The Low 64 Bits
+
+An IPv6 address is 128 bits. In the common /64 subnetting model, the high 64 bits represent the network prefix and the low 64 bits represent the **interface identifier (IID)** — the part that uniquely identifies the specific device within the subnet. The IID is to IPv6 what the host portion is to IPv4, but it is almost always exactly 64 bits, giving a vast amount of per-subnet address space.
+
+The IID can be generated in several ways: derived deterministically from the hardware MAC address using EUI-64, generated randomly for privacy, or assigned by a DHCPv6 server. Each method has tradeoffs between stability, operational predictability, and privacy.
+
+---
+
+## Modified EUI-64 — Building an IID from a MAC Address
+
+**EUI-64 (Extended Unique Identifier — 64 bit)** is a method for expanding a 48-bit Ethernet MAC address into a 64-bit interface identifier. The process has three steps:
+
+1. **Split** the 48-bit MAC address into two 24-bit halves.
+2. **Insert** the 16-bit value `FFFE` between the two halves, producing a 64-bit value.
+3. **Invert the 7th bit** (the Universal/Local bit) of the first byte of the result.
+
+The bit inversion is the step that trips people up. In Ethernet MAC addresses, the 7th bit of the first byte indicates whether the address is globally unique (bit = 0) or locally administered (bit = 1). By inverting this bit, EUI-64 ensures that a globally unique MAC produces an IID with the 7th bit set to 1, which per RFC 4291 indicates a globally unique IID. A locally administered MAC (bit already 1) inverts to 0.
+
+**Worked example:**
+
+```
+MAC address:    00:1A:2B:3C:4D:5E
+
+Step 1 — Split:
+  First half:   00:1A:2B
+  Second half:  3C:4D:5E
+
+Step 2 — Insert FFFE:
+  00:1A:2B:FF:FE:3C:4D:5E
+
+Step 3 — Invert 7th bit of first byte:
+  First byte:   00  =  0000 0000
+  Bit 7 (0-indexed from MSB) = 0 → invert → 1
+  Result byte:  02  =  0000 0010
+
+Final IID:  02:1A:2B:FF:FE:3C:4D:5E
+Written as: 021A:2BFF:FE3C:4D5E
+```
+
+A quick shortcut for the 7th bit inversion: the second hex digit of the first byte swaps according to this table: `0↔2`, `1↔3`, `4↔6`, `5↔7`, `8↔A`, `9↔B`, `C↔E`, `D↔F`. So `00` becomes `02`, `08` becomes `0A`, `1C` becomes `1E`, and so on.
+
+Cisco IOS routers use modified EUI-64 to generate both their link-local address and any global unicast address configured with the `eui-64` keyword on the interface.
+
+---
+
+## Privacy Extensions — Randomized Interface IDs
+
+EUI-64 has a significant privacy problem: the IID is derived from the MAC address, which is a globally unique hardware identifier. Any server on the internet that logs IPv6 source addresses can trivially track a device across networks and over time, because the IID remains constant regardless of what prefix the device uses.
+
+RFC 8981 (originally RFC 4941) defines **privacy extensions** that replace EUI-64 with a randomly generated IID. The host generates a random 64-bit value for the IID rather than deriving it from the MAC. This random IID is rotated periodically — the preferred lifetime is typically 24 hours and the valid lifetime about 7 days, after which a new random IID is generated for outgoing connections.
+
+Modern operating systems (Windows, macOS, Linux, iOS, Android) all enable privacy extensions by default. This means that in practice, an IPv6-enabled device will have at minimum:
+- A **stable link-local address** (often EUI-64 derived, since it never leaves the local link)
+- A **stable global unicast address** (for incoming connections and stable identification)
+- A **temporary global unicast address** (for outgoing connections, rotated to prevent tracking)
+
+---
+
+## Link-Local Address Auto-Generation
+
+Every IPv6-enabled interface generates a link-local address automatically, regardless of any other configuration. The format is always `FE80::/10`, and in practice the address is `FE80::` followed by a 64-bit IID with the 54 bits between the prefix and the IID set to zero.
+
+On Cisco routers, the link-local IID is generated from the interface MAC address using modified EUI-64. On most host operating systems, a random IID is used for the link-local address as well, though this varies by implementation. The link-local address exists from the moment `ipv6 enable` is configured (or when IPv6 is activated on the interface) — it does not depend on SLAAC or DHCPv6.
+
+A network engineer can also configure the link-local address manually. On Cisco IOS:
+
+```
+interface GigabitEthernet0/0/0
+ ipv6 address FE80::1 link-local
+```
+
+Manual link-local addresses are common on routers because the auto-generated EUI-64 address is long and hard to remember. `FE80::1` on every router's LAN interface is a practical and recognizable convention.
+
+---
+
+## SLAAC — Stateless Address Autoconfiguration
+
+SLAAC (RFC 4862) is the mechanism that allows an IPv6 host to configure a full, routable global unicast address with no DHCP server and no manual configuration. The host generates its own address using information it obtains from the local router via NDP.
+
+<FlowDiagram
+  parties={["Host", "Router"]}
+  steps={[
+    { from: "Host", to: "Router", label: "Router Solicitation (RS)", sub: "Sent to FF02::2 — 'Any routers present?'" },
+    { from: "Router", to: "Host", label: "Router Advertisement (RA)", sub: "Prefix, prefix length, flags, router LLA" },
+    { from: "Host", to: "Host", label: "Generate IID", sub: "EUI-64 or random (privacy extensions)" },
+    { from: "Host", to: "Host", label: "Combine prefix + IID", sub: "Full /64 global unicast address" },
+    { from: "Host", to: "Host", label: "Duplicate Address Detection (DAD)", sub: "NS to own address — wait for NA" },
+    { from: "Host", to: "Host", label: "Address assigned", sub: "Default route via router LLA from RA" },
+  ]}
+/>
+
+The SLAAC process in detail:
+
+1. The host sends a **Router Solicitation (RS)** to `FF02::2` (all-routers multicast). This prompts routers to immediately send an RA rather than waiting for their periodic RA interval.
+2. The router responds with a **Router Advertisement (RA)** containing the on-link prefix(es), their prefix lengths, the router's own link-local address, and lifetime values.
+3. The host takes the advertised prefix and appends a 64-bit IID (EUI-64 or random) to form a complete /64 address.
+4. Before using the address, the host runs **Duplicate Address Detection (DAD)** — described below.
+5. Once DAD confirms uniqueness, the host installs the address and a default route pointing to the router's link-local address.
+
+SLAAC does not provide a DNS server address on its own. Hosts can receive DNS information through **RDNSS options** embedded directly in the RA (RFC 8106), or through stateless DHCPv6.
+
+### RA Flags — M and O
+
+The Router Advertisement includes two critical flags that control how hosts supplement SLAAC:
+
+| Flag | Name | Meaning |
+|---|---|---|
+| M | Managed Address Configuration | Set to 1 → use stateful DHCPv6 to get the IPv6 address |
+| O | Other Configuration | Set to 1 → use stateless DHCPv6 to get other config (DNS, domain name) |
+
+When **M=0, O=0** (the default): pure SLAAC. Host builds its own address; no DHCPv6 involved.
+
+When **M=0, O=1**: SLAAC for the address + stateless DHCPv6 for DNS and other options.
+
+When **M=1** (O is implied): stateful DHCPv6 for everything — address and options. SLAAC is not used for the global unicast address (though the link-local is still auto-generated).
+
+---
+
+## DHCPv6
+
+### Stateless DHCPv6
+
+Stateless DHCPv6 (RFC 3736) is a hybrid model. The host still uses SLAAC to generate its IPv6 address — the DHCPv6 server does not track or assign addresses. The DHCPv6 server only provides configuration parameters that SLAAC cannot: primarily DNS server addresses and domain search lists.
+
+This is triggered when the RA has `M=0, O=1`. The host generates its address via SLAAC, then sends a DHCPv6 Information-Request to obtain the DNS server list. No lease is created on the server side; hence "stateless."
+
+### Stateful DHCPv6
+
+Stateful DHCPv6 works like IPv4 DHCP: a server assigns IPv6 addresses to clients, maintains a lease database, and tracks which address belongs to which client. The message exchange uses four messages abbreviated as **SARR**:
+
+<FlowDiagram
+  parties={["Client", "DHCPv6 Server"]}
+  steps={[
+    { from: "Client", to: "DHCPv6 Server", label: "Solicit", sub: "Sent to FF02::1:2 (all-DHCP-agents)" },
+    { from: "DHCPv6 Server", to: "Client", label: "Advertise", sub: "Server offers an IPv6 address" },
+    { from: "Client", to: "DHCPv6 Server", label: "Request", sub: "Client confirms it wants the offered address" },
+    { from: "DHCPv6 Server", to: "Client", label: "Reply", sub: "Server confirms; lease established" },
+  ]}
+/>
+
+One important difference from IPv4 DHCP: **DHCPv6 does not provide the default gateway**. In IPv4, DHCP option 3 delivers the default router. In IPv6, there is no equivalent DHCPv6 option for this — the default router is always learned from the NDP Router Advertisement. This means even in a stateful DHCPv6 environment, NDP RA messages are still required.
+
+A rapid-commit option allows the exchange to be reduced to two messages (Solicit + Reply) when the server supports it.
+
+**DHCPv6 relay:** When the DHCPv6 server is not on the same link as the client, a relay agent (typically the first-hop router) intercepts the Solicit (sent to `FF02::1:2`) and forwards it as a unicast Relay-Forward message to the server's known address.
+
+---
+
+## Duplicate Address Detection (DAD)
+
+Before any IPv6 unicast address is used — whether generated by EUI-64, SLAAC, privacy extensions, or DHCPv6 — the host must verify that no other device on the link is already using it. This process is called **Duplicate Address Detection**, and it runs automatically for every unicast address.
+
+DAD uses NDP Neighbor Solicitation and Neighbor Advertisement messages:
+
+1. The host sends a **Neighbor Solicitation (NS)** with the candidate address as the target and the unspecified address (`::`) as the source (because the address is not yet confirmed). The NS is sent to the candidate address's solicited-node multicast group.
+2. The host waits one second (the default RetransTimer).
+3. If another device is using that address, it replies with a **Neighbor Advertisement (NA)**. The host marks the candidate address as a duplicate and does not use it.
+4. If no NA is received, the address is unique and the host begins using it.
+
+DAD runs for every unicast address: the link-local address immediately after it is generated, and any global unicast address generated via SLAAC or assigned via DHCPv6. Routers also run DAD on their configured interface addresses.
+
+---
+
+## NDP Neighbor Table — The IPv6 ARP Cache
+
+Just as IPv4 maintains an ARP cache mapping IP addresses to MAC addresses, IPv6 maintains an **NDP neighbor table** mapping IPv6 addresses to MAC addresses. The table is populated by NS/NA exchanges and can be viewed with:
+
+```
+show ipv6 neighbors               # Cisco IOS router
+ip -6 neighbor show               # Linux
+netsh interface ipv6 show neighbors  # Windows
+ndp -an                           # macOS
+```
+
+NDP neighbor table entries have states similar to ARP cache entries: Reachable (recently confirmed), Stale (not confirmed recently but usable), Delay (pending reconfirmation), Probe (actively sending NS to reconfirm), and Incomplete (NS sent but no NA received yet).
+
+---
+
+## Solicited-Node Multicast — Efficient Neighbor Resolution
+
+When a host wants to resolve a neighbor's MAC address, it does not send an ARP broadcast as IPv4 does. Instead, it computes the **solicited-node multicast address** for the target and sends the NS to that multicast group. The solicited-node address is formed by taking the prefix `FF02::1:FF00:0000/104` and appending the last 24 bits (6 hex digits) of the target's IPv6 address.
+
+For example, if the target address is `2001:DB8:1111:1::1A2B:3C4D`, the last 24 bits are `2B:3C:4D`, and the solicited-node multicast address is `FF02::1:FF2B:3C4D`.
+
+A device listening for its own solicited-node multicast group will only share that group with other devices whose IPv6 addresses end in the same 24 bits — typically just one or two devices per link. This makes neighbor resolution far more targeted than broadcast-based ARP, especially on large segments.
+
+---
+
+## Well-Known IPv6 Multicast Addresses
+
+NDP and other IPv6 protocols use a set of well-known link-local multicast addresses that every IPv6 device joins automatically:
+
+| Address | Name | Joined By |
+|---|---|---|
+| `FF02::1` | All nodes | Every IPv6-enabled node |
+| `FF02::2` | All routers | Every IPv6-enabled router |
+| `FF02::5` | All OSPFv3 routers | OSPF-enabled routers |
+| `FF02::6` | All OSPFv3 DR routers | OSPF DR/BDR routers |
+| `FF02::9` | All RIPng routers | RIPng-enabled routers |
+| `FF02::A` | All EIGRPv6 routers | EIGRPv6-enabled routers |
+| `FF02::1:2` | All DHCP agents | DHCPv6 servers and relays |
+| `FF02::1:FF00:0000/104` | Solicited-node (per address) | Each node, one per unicast address |
+
+---
+
+## Summary
+
+IPv6 address assignment is richer and more automated than IPv4's. EUI-64 provides a deterministic method for building a 64-bit interface identifier from a hardware MAC address. SLAAC allows hosts to self-configure a full global unicast address using only information from the local router's RA message — no server required. DHCPv6 provides stateless (DNS only) or stateful (full address assignment) modes depending on the RA flags set by the router. NDP's NS/NA messages handle neighbor resolution more efficiently than ARP through solicited-node multicast. And DAD ensures that every unicast address is unique on the link before it is used.
+
+These mechanisms work together to make IPv6 address management largely automatic, while still giving network administrators full control through stateful DHCPv6 when centralized address management is required.

@@ -1,0 +1,317 @@
+---
+title: "Cisco IOS — Router Configuration"
+category: "cisco"
+topic: "routing"
+summary: "Configuring Cisco IOS routers — interface IP addressing, static routes, floating static routes, default routes, and verifying IPv4 routing."
+tags: ["cisco", "ios", "routing", "static-routes", "router"]
+order: 4
+draft: false
+---
+
+## Overview
+
+A Cisco router connects networks by forwarding IP packets between interfaces. Each interface belongs to a different subnet, and the router maintains a routing table that maps destination prefixes to outgoing interfaces or next-hop IP addresses. Static routes manually define these mappings; dynamic routing protocols build the table automatically.
+
+This article covers router interface configuration, serial and loopback interfaces, the routing table, static route syntax, floating static routes, the default route, Administrative Distance, and how to verify routing with ping and traceroute.
+
+---
+
+## Router Interface Configuration
+
+### Ethernet Interfaces
+
+Router Ethernet interfaces are administratively shut down by default. You must assign an IP address and enable the interface.
+
+```
+interface GigabitEthernet0/0/0
+ ip address 192.168.1.1 255.255.255.0
+ description LAN-Facing-Interface
+ no shutdown
+```
+
+The IP address becomes the default gateway for hosts on that subnet. `no shutdown` removes the administrative shutdown. Without it, the interface stays in `administratively down / down` state regardless of cabling.
+
+### Checking Interface Status
+
+```
+show ip interface brief
+```
+
+The most important verification command. Displays every interface with its assigned IP, line status (Layer 1), and protocol status (Layer 2).
+
+| Line | Protocol | Meaning |
+|---|---|---|
+| up | up | Fully operational |
+| administratively down | down | `shutdown` applied; no `no shutdown` |
+| down | down | Layer 1 problem — no cable, speed mismatch, or remote device off |
+| up | down | Layer 1 OK but Layer 2 failure (encapsulation mismatch, keepalive failure) |
+
+### Detailed Interface Statistics
+
+```
+show interfaces GigabitEthernet0/0/0
+```
+
+Displays: bandwidth, encapsulation, duplex, speed, MTU, input/output packet counts, error counters (input errors, CRC, frame errors, output drops). High input errors combined with CRC errors typically indicate a duplex mismatch or a bad cable.
+
+---
+
+## Serial Interfaces
+
+Serial interfaces are used for legacy WAN connections (T1/E1, Frame Relay). They are less common in modern networks but still appear in CCNA lab equipment.
+
+### DCE vs DTE
+
+A serial link has one DCE (Data Communications Equipment) end and one DTE (Data Terminal Equipment) end. The DCE side provides the clocking signal. In labs, the back-to-back serial cable includes a DCE connector on one end — that router must provide the clock rate.
+
+```
+interface Serial0/0/0
+ ip address 10.0.0.1 255.255.255.252
+ clock rate 128000
+ bandwidth 128
+ no shutdown
+```
+
+`clock rate` is only needed on the DCE side. `bandwidth` does not change the physical speed — it tells routing protocols the logical bandwidth of the link for metric calculations (OSPF cost, EIGRP composite metric).
+
+The `/30` subnet (`255.255.255.252`) is standard for point-to-point WAN links — only 2 usable host addresses needed.
+
+---
+
+## Loopback Interfaces
+
+A loopback interface is a logical, software-only interface. It has no physical connector and is always in up/up state as long as it is not administratively shut down. Loopbacks are used for:
+
+- Stable OSPF/EIGRP router IDs (a loopback IP never goes down)
+- Management access that is always reachable as long as the router is up
+- Testing and simulation in labs
+
+```
+interface Loopback0
+ ip address 1.1.1.1 255.255.255.255
+```
+
+The `/32` mask is typical for loopbacks — there is only one host (the router itself), so no subnet range is needed.
+
+---
+
+## The Routing Table
+
+The routing table lists every prefix the router knows how to reach, how it learned about it, and how to forward packets toward it.
+
+```
+show ip route
+```
+
+### Route Source Codes
+
+| Code | Source |
+|---|---|
+| C | Connected — interface is up/up with an IP address |
+| L | Local — /32 host route for the router's own interface IP |
+| S | Static — manually configured |
+| O | OSPF — learned from OSPF |
+| D | EIGRP |
+| R | RIP |
+| B | BGP |
+| * | Candidate default route |
+
+Connected (C) and Local (L) routes are created automatically when an interface comes up/up. Every configured interface generates one C route (the subnet) and one L route (/32 host route for the router's own IP).
+
+### Reading a Route Entry
+
+```
+O    10.2.0.0/24 [110/2] via 192.168.1.2, 00:05:14, GigabitEthernet0/0/0
+```
+
+- `O` — learned by OSPF
+- `10.2.0.0/24` — destination prefix
+- `[110/2]` — [Administrative Distance / Metric]
+- `via 192.168.1.2` — next-hop IP
+- `00:05:14` — age of route
+- `GigabitEthernet0/0/0` — outgoing interface
+
+### Filtering the Routing Table
+
+```
+show ip route connected
+show ip route static
+show ip route ospf
+show ip route 10.2.0.0
+show ip route 10.2.0.5          # Shows which route would be used for this destination
+```
+
+---
+
+## Static Routes
+
+A static route manually tells the router how to reach a specific network.
+
+### Syntax
+
+```
+ip route <network> <mask> {<next-hop-ip> | <outgoing-interface>} [distance]
+```
+
+### Examples
+
+#### Route via next-hop IP (recommended on Ethernet)
+
+```
+ip route 10.2.0.0 255.255.255.0 192.168.1.2
+```
+
+#### Route via outgoing interface (acceptable on serial point-to-point)
+
+```
+ip route 10.2.0.0 255.255.255.0 Serial0/0/0
+```
+
+On Ethernet, using only an outgoing interface creates a "proxy ARP" dependency — the router ARP-requests for every destination. Use next-hop IP on Ethernet.
+
+#### Fully-specified static route (both next-hop and interface — preferred)
+
+```
+ip route 10.2.0.0 255.255.255.0 GigabitEthernet0/0/1 192.168.1.2
+```
+
+Specifying both eliminates the recursive lookup (router must resolve next-hop to an interface anyway) and avoids proxy ARP issues. This is the most explicit and recommended form.
+
+### Static Host Route (/32)
+
+Routes to a single specific host:
+
+```
+ip route 10.1.1.100 255.255.255.255 192.168.1.2
+```
+
+### Default Route
+
+The default route matches any destination not covered by a more specific route. It is the "gateway of last resort."
+
+```
+ip route 0.0.0.0 0.0.0.0 192.168.1.1
+```
+
+This appears in the routing table as `S* 0.0.0.0/0` (the asterisk means "candidate default"). The router also prints `Gateway of last resort is 192.168.1.1 to network 0.0.0.0`.
+
+---
+
+## Administrative Distance
+
+Administrative Distance (AD) is a rating of trustworthiness assigned to each route source. When two routing sources have routes for the same prefix/mask, the lower AD wins — that source's route is installed in the routing table.
+
+| Route Source | AD |
+|---|---|
+| Connected | 0 |
+| Static | 1 |
+| eBGP | 20 |
+| EIGRP internal | 90 |
+| OSPF | 110 |
+| IS-IS | 115 |
+| RIP | 120 |
+| EIGRP external | 170 |
+| iBGP | 200 |
+| DHCP-learned default | 254 |
+| Unusable | 255 |
+
+AD 255 means the route is never installed in the routing table. AD 0 (connected) means the interface is directly attached — cannot be better than that.
+
+Metrics are only compared within the same routing protocol. You cannot compare an OSPF cost of 10 against an EIGRP metric of 100,000 — they measure different things. AD decides which protocol "wins" first; the metric within that protocol selects the best path.
+
+---
+
+## Floating Static Routes
+
+A floating static route has a higher AD than the primary dynamic route. It sits in the configuration but does not appear in the routing table while the dynamic route exists. If the dynamic route disappears (link failure, neighbour lost), the floating static takes over.
+
+```
+ip route 10.2.0.0 255.255.0.0 192.168.2.1 130
+```
+
+With AD 130, this static route is less preferred than OSPF (AD 110). As long as OSPF has a route to `10.2.0.0/16`, the static is invisible. When OSPF loses the route, the static with AD 130 becomes the best (only) route for that prefix and is installed.
+
+Floating statics are commonly used to provide a dial-backup or cellular link that activates automatically when the primary WAN path fails.
+
+---
+
+## Routing Logic and Longest Prefix Match
+
+When a packet arrives, the router does two things:
+
+1. Finds all routes whose prefix matches the destination
+2. Among matching routes, uses the **most specific match** (longest prefix length)
+
+Example: destination is `172.16.10.4`. Routing table contains:
+
+- `S 0.0.0.0/0 via 192.168.1.1` (default)
+- `O 172.16.0.0/16 via 10.1.1.1` (OSPF)
+- `S 172.16.10.0/24 via 10.1.2.1` (static)
+
+All three match. The static `/24` is most specific (longest prefix), so the router uses `10.1.2.1` as the next hop.
+
+This means you can have a general OSPF route for a whole supernet and override specific subnets within it with more specific static routes — longest prefix match handles the selection automatically.
+
+---
+
+## Ping and Traceroute
+
+### Standard Ping
+
+```
+ping 10.1.2.1
+```
+
+Sends 5 ICMP Echo Request packets, each 100 bytes, from the closest interface to the destination. `!!!!!` means all 5 replies received. `U` means unreachable. `.` means timeout.
+
+### Extended Ping
+
+Extended ping lets you control every aspect of the test — including the source address:
+
+```
+R1# ping
+Protocol [ip]:
+Target IP address: 10.1.2.1
+Repeat count [5]:
+Datagram size [100]:
+Extended commands [n]: y
+Source address or interface: 10.1.1.1
+```
+
+Specifying a source address tests the full round-trip including the remote host's ability to route back to that specific source. This catches asymmetric routing problems that standard ping misses.
+
+Or in one line on IOS XE:
+
+```
+ping 10.1.2.1 source GigabitEthernet0/0/0
+ping 10.1.2.1 source 10.1.1.1
+```
+
+### Traceroute
+
+```
+traceroute 10.1.2.1
+```
+
+Uses incrementing TTL values (1, 2, 3…) to map each hop. Each router that receives a packet with TTL=0 returns an ICMP Time Exceeded message, revealing its IP address. Cisco IOS traceroute uses UDP probes (unlike Windows `tracert` which uses ICMP).
+
+Output shows three round-trip times for each hop. `*` means no response (host is not responding to ICMP TTL expired or is rate-limiting).
+
+---
+
+## Quick Reference
+
+| Task | Command |
+|---|---|
+| Configure interface IP | `ip address 10.1.1.1 255.255.255.0` |
+| Enable interface | `no shutdown` |
+| Configure serial clock rate | `clock rate 128000` (DCE side only) |
+| Create loopback | `interface Loopback0` |
+| View routing table | `show ip route` |
+| View interface status | `show ip interface brief` |
+| Static route (next-hop) | `ip route 10.2.0.0 255.255.255.0 192.168.1.2` |
+| Default route | `ip route 0.0.0.0 0.0.0.0 192.168.1.1` |
+| Host route | `ip route 10.1.1.100 255.255.255.255 192.168.1.2` |
+| Floating static (backup) | `ip route 10.2.0.0 255.255.0.0 192.168.2.1 130` |
+| Extended ping | `ping 10.1.2.1 source 10.1.1.1` |
+| Traceroute | `traceroute 10.1.2.1` |

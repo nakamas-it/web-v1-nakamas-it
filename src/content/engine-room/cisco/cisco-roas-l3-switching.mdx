@@ -1,0 +1,254 @@
+---
+title: "Cisco IOS — Inter-VLAN Routing"
+category: "cisco"
+topic: "inter-vlan"
+summary: "Routing between VLANs on Cisco IOS — Router-on-a-Stick subinterfaces, Layer 3 switch SVIs, and routed ports."
+tags: ["cisco", "ios", "inter-vlan", "roas", "svi", "layer3-switch"]
+order: 5
+draft: false
+---
+
+## Overview
+
+VLANs create separate Layer 2 broadcast domains. A workstation in VLAN 10 cannot communicate with a workstation in VLAN 20 without a Layer 3 device routing between them — the separation is by design. Inter-VLAN routing is how you allow controlled communication across that boundary while keeping the broadcast domain separation that VLANs provide.
+
+Cisco IOS supports three approaches: a legacy method using separate physical router interfaces (one per VLAN), Router-on-a-Stick (ROAS) using subinterfaces on a single trunk, and Layer 3 switching using Switched Virtual Interfaces (SVIs) or routed ports on a multilayer switch.
+
+---
+
+## Why Inter-VLAN Routing Needs a Router or Layer 3 Switch
+
+A Layer 2 switch forwards frames based on MAC addresses within a VLAN. It has no concept of IP routing. If a PC in VLAN 10 (10.1.10.100) tries to reach a PC in VLAN 20 (10.1.20.100), its default gateway IP address points to the gateway for VLAN 10's subnet — which must be a router or Layer 3 switch interface.
+
+Without that routing function, the two VLANs are completely isolated at Layer 3. The hosts cannot communicate no matter how many switches are between them.
+
+---
+
+## Option 1 — Router-on-a-Stick (ROAS)
+
+Router-on-a-Stick uses a single physical interface on a router connected to the switch via a trunk link. The router creates logical subinterfaces, one per VLAN, each with its own IP address. The switch trunk carries all VLAN traffic to the router, the router routes between VLANs, and the traffic comes back down the same trunk.
+
+### Topology
+
+```
+[Switch Gi0/1 trunk] ---- [Router Gi0/1 trunk]
+ - VLAN 10 (Engineering)
+ - VLAN 20 (Marketing)
+ - VLAN 99 (Management / Native)
+```
+
+The physical link between the switch and router is configured as a trunk on the switch side. On the router, the physical interface itself has no IP address — the subinterfaces do.
+
+### Switch Configuration (Trunk to Router)
+
+```
+interface GigabitEthernet0/1
+ switchport mode trunk
+ switchport nonegotiate
+ switchport trunk native vlan 99
+ switchport trunk allowed vlan 10,20,99
+```
+
+### Router Subinterface Configuration
+
+```
+interface GigabitEthernet0/1.10
+ encapsulation dot1Q 10
+ ip address 10.1.10.1 255.255.255.0
+
+interface GigabitEthernet0/1.20
+ encapsulation dot1Q 20
+ ip address 10.1.20.1 255.255.255.0
+
+interface GigabitEthernet0/1.99
+ encapsulation dot1Q 99 native
+ ip address 10.1.99.1 255.255.255.0
+```
+
+The subinterface number (`.10`, `.20`, `.99`) does not have to match the VLAN ID — but it is a strong best practice to keep them aligned to avoid confusion.
+
+`encapsulation dot1Q 10` tells the router that frames arriving tagged with VLAN 10 belong to this subinterface, and frames sent out this subinterface should be tagged with VLAN 10.
+
+`encapsulation dot1Q 99 native` tells the router that untagged frames on this trunk belong to VLAN 99 (the native VLAN). Frames sent to this subinterface are sent untagged.
+
+### Physical Interface Activation
+
+The physical interface (`GigabitEthernet0/1`) must be brought up with `no shutdown`. Subinterfaces do not have their own `shutdown` state independent of the physical interface — if the physical interface is down, all subinterfaces are down.
+
+```
+interface GigabitEthernet0/1
+ no shutdown
+```
+
+You do NOT put `no shutdown` on the subinterfaces themselves for this — the physical `no shutdown` brings them all up.
+
+### Host Default Gateways
+
+Hosts in each VLAN configure the subinterface IP as their default gateway:
+
+- VLAN 10 hosts → default gateway `10.1.10.1`
+- VLAN 20 hosts → default gateway `10.1.20.1`
+
+### Verify ROAS
+
+```
+show vlans
+show interfaces GigabitEthernet0/1.10
+show ip route
+```
+
+`show vlans` (on a router) shows subinterface-to-VLAN mappings. The routing table should show directly connected routes for each subinterface subnet.
+
+### ROAS Limitations
+
+ROAS is simple and cost-effective — one router port, one cable, one trunk. The bottleneck is that all inter-VLAN traffic must traverse that single physical link twice (once inbound, once outbound). In high-traffic environments this becomes a bandwidth constraint. It is suitable for small deployments but is replaced by SVI-based Layer 3 switching in enterprise designs.
+
+---
+
+## Option 2 — Layer 3 Switch SVIs
+
+A multilayer (Layer 3) switch combines switching and routing in hardware. Instead of sending inter-VLAN traffic to an external router, the switch routes internally at line rate. This is the preferred method in all but the simplest environments.
+
+### Enabling IP Routing
+
+The critical first step. Without this command, the switch forwards at Layer 2 only — no IP routing occurs, SVIs have IP addresses but the switch does not route between them.
+
+```
+ip routing
+```
+
+This is a global config command. Verify with `show ip route` — if you see connected routes for the SVI subnets, routing is enabled.
+
+### Creating SVIs
+
+An SVI (Switched Virtual Interface) is a Layer 3 interface associated with a VLAN. It acts as the default gateway IP address for hosts in that VLAN.
+
+```
+interface vlan 10
+ ip address 10.1.10.1 255.255.255.0
+ no shutdown
+
+interface vlan 20
+ ip address 10.1.20.1 255.255.255.0
+ no shutdown
+
+interface vlan 99
+ ip address 10.1.99.1 255.255.255.0
+ no shutdown
+```
+
+### SVI Up/Up Requirements (Autostate)
+
+An SVI does not come up just because you configure it. The SVI enters up/up state only when ALL of these conditions are met:
+
+1. **The VLAN exists** in the VLAN database (`vlan 10` is configured)
+2. **The VLAN is not in a shutdown state**
+3. **At least one Layer 2 port in the VLAN is in the up/up state** — either an access port assigned to that VLAN, or a trunk port with that VLAN active
+4. **The SVI itself is not shut down**
+
+This is called "SVI autostate." A common lab mistake is configuring an SVI but forgetting to create the VLAN, or having no active ports in the VLAN — the SVI stays down/down.
+
+```
+show interfaces vlan 10
+```
+
+The output will show the SVI as `Vlan10 is up, line protocol is up` when all conditions are met, or `Vlan10 is up, line protocol is down` if the autostate conditions are not satisfied.
+
+### Verify Layer 3 Switching
+
+```
+show ip route
+show interfaces vlan 10
+show interfaces status
+```
+
+`show interfaces status` shows switch ports and their VLANs. Routed ports (covered next) show `routed` in the VLAN column.
+
+---
+
+## Option 3 — Routed Ports on a Layer 3 Switch
+
+A Layer 3 switch port can be converted from a Layer 2 switchport to a Layer 3 routed port using `no switchport`. The port then behaves like a router interface — you assign it an IP address directly.
+
+```
+interface GigabitEthernet0/1
+ no switchport
+ ip address 10.1.12.1 255.255.255.0
+ no shutdown
+```
+
+Routed ports are used for uplinks between distribution and core switches, or to connect a Layer 3 switch directly to a router. There is no VLAN association — the port is purely Layer 3.
+
+Routed ports are not visible in `show vlan brief` and are not subject to STP in the same way as access or trunk ports.
+
+---
+
+## Layer 3 EtherChannel
+
+When using EtherChannel on a Layer 3 switch uplink, the bundle should also be a Layer 3 (routed) channel.
+
+```
+interface range GigabitEthernet0/1 - 2
+ no switchport
+ channel-group 1 mode active
+
+interface Port-channel1
+ no switchport
+ ip address 10.1.13.1 255.255.255.0
+```
+
+`no switchport` must be applied to the physical interfaces before creating the channel group. The IP address goes on the Port-channel interface, not the physical members. This gives you a redundant, high-bandwidth Layer 3 link between switches.
+
+---
+
+## ROAS vs SVI Comparison
+
+| Feature | ROAS | SVI (Layer 3 Switch) |
+|---|---|---|
+| Hardware required | Router + switch | Layer 3 switch only |
+| Number of physical links | 1 trunk | Internal (no physical inter-VLAN link) |
+| Bandwidth bottleneck | Single physical link | None — routed in hardware |
+| Throughput | Limited by trunk link speed | Line rate |
+| Scalability | Poor (many VLANs = same bottleneck) | Good |
+| Cost | Lower (reuses existing router) | Higher (L3 switch costs more than L2) |
+| Typical use case | Small branch, lab | Enterprise, distribution layer |
+
+SVI is the preferred design for any environment where inter-VLAN throughput matters. ROAS is a useful lab exercise and is still viable for very small deployments with light inter-VLAN traffic.
+
+---
+
+## Troubleshooting Inter-VLAN Routing
+
+### SVI stays down/down
+
+- Check that the VLAN exists: `show vlan brief` — VLAN must be in active state
+- Check that at least one port in the VLAN is up/up: `show interfaces status`
+- Check that `ip routing` is enabled: `show ip route` — if you only see static/connected from management, routing may not be enabled
+
+### Hosts cannot reach the default gateway
+
+- Confirm the SVI or subinterface IP is up/up: `show interfaces vlan 10`
+- Confirm the host's default gateway matches the SVI IP exactly
+- Check for an access port VLAN mismatch: `show interfaces Fa0/1 switchport` — access VLAN must match
+
+### ROAS — inter-VLAN traffic not forwarded
+
+- Verify trunk is up: `show interfaces trunk` — both VLANs must appear in "VLANs allowed and active"
+- Verify `encapsulation dot1Q` VLAN numbers match the switch VLAN IDs
+- Verify physical interface is up: `no shutdown` on the parent interface, not just subinterfaces
+- Confirm `ip routing` is on (if using a router, it is on by default; if routing was disabled, re-enable)
+
+---
+
+## Quick Reference
+
+| Task | Command |
+|---|---|
+| Enable IP routing on L3 switch | `ip routing` |
+| Create SVI | `interface vlan 10` then `ip address ...` |
+| Check SVI status | `show interfaces vlan 10` |
+| Convert port to routed | `no switchport` |
+| ROAS subinterface | `encapsulation dot1Q 10` then `ip address` |
+| ROAS native VLAN subinterface | `encapsulation dot1Q 99 native` |
+| Verify routing table | `show ip route` |
+| Verify ROAS mapping | `show vlans` |

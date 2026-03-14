@@ -1,0 +1,158 @@
+---
+title: "Cisco Smart Licensing"
+category: "cisco"
+topic: "licensing"
+summary: "How Cisco Smart Licensing works — CSSM, virtual accounts, token-based registration, compliance reporting, and Smart Licensing Using Policy (SLP)."
+tags: ["cisco", "smart-licensing", "cssm", "compliance", "slp"]
+order: 13
+draft: false
+---
+
+## Overview
+
+Cisco Smart Licensing replaced the traditional PAK (Product Authorisation Key) and node-locked licence model that had been in place since the early IOS days. Under the old model, each licence was tied to a specific device by its serial number or Unique Device Identifier (UDI). Moving a licence to a replacement unit required a manual process of returning the PAK to Cisco and re-generating a key bound to the new hardware. Managing hundreds of such licences across a large network was error-prone and slow.
+
+Smart Licensing changes this fundamentally. Licences are no longer bound to individual devices. Instead, they live in the cloud in a virtual account held on the **Cisco Smart Software Manager (CSSM)**, accessible at `software.cisco.com`. Devices register with CSSM, report their usage, and the system tracks compliance centrally. A licence consumed by one device can be freed and consumed by another without contacting Cisco or generating new keys.
+
+---
+
+## Cisco Smart Software Manager (CSSM)
+
+CSSM is the Cisco cloud portal that serves as the single management point for all Smart Licences associated with a Cisco account. It is accessed at `software.cisco.com` under Smart Software Licensing.
+
+Key CSSM capabilities:
+
+- View all purchased licences and their quantities
+- Create and manage virtual accounts to organise licences by department, region, or project
+- Generate registration tokens for device onboarding
+- View compliance status across the entire licence pool
+- Run usage reports for audits or renewals
+
+CSSM ties to a company's Cisco Smart Account, which is the umbrella identity under which all licences purchased through Cisco Commerce Workspace (CCW) are held.
+
+### Virtual Accounts
+
+Virtual accounts are subdivisions within a Smart Account. They let organisations group licences logically — for example, one virtual account for the data centre team, another for branch offices, and another for security devices managed by a separate team. Licences are assigned to a specific virtual account and devices register against that virtual account. A device in the "Security" virtual account draws licences from that pool only; it does not automatically have access to licences sitting in the "Campus" virtual account.
+
+Virtual accounts make it straightforward to enforce internal chargeback, track consumption per business unit, and control which teams can deploy which features.
+
+---
+
+## Licence Types
+
+Cisco Smart Licences fall into three broad categories based on how long they last:
+
+| Licence Type | Description |
+|---|---|
+| **Perpetual** | One-time purchase; no expiry; counts as consumed as long as the feature is active on a device |
+| **Subscription / Term** | Time-limited; must be renewed when the term expires; common for threat intelligence and AMP cloud services |
+| **Evaluation** | Temporary (90 days by default); allows full feature access while formal licences are being procured |
+
+For Firepower Threat Defense specifically, the licences are additive tiers:
+
+| FTD Licence | Feature Unlocked |
+|---|---|
+| **Base** | Stateful firewall, routing, site-to-site VPN; included with hardware |
+| **Threat** (IPS) | Snort IPS inspection, Security Intelligence feeds from Talos |
+| **Malware** (AMP) | AMP for Networks file inspection and cloud lookups |
+| **URL Filtering** | URL category and reputation-based filtering |
+| **RA VPN** (AnyConnect Plus/Apex) | Remote access SSL/IKEv2 VPN for AnyConnect clients |
+
+IPS policy requires the Threat licence. File and malware policy requires the Malware licence. URL category rules in an Access Control Policy require the URL Filtering licence. The Base licence alone enables the stateful firewall and VPN but not any of the Next-Generation features.
+
+---
+
+## Token-Based Registration
+
+The standard way to bring a new device into Smart Licensing is token-based registration:
+
+1. In CSSM, navigate to the target virtual account and generate a **registration token**. The token is a short alphanumeric string with a configurable validity period (days) and an optional device count limit.
+2. On the device (or on FMC for FTD devices), enter the token to trigger registration. The device contacts CSSM over HTTPS, presents the token, and is added to the virtual account's device list.
+3. CSSM records the device's licence consumption. The device moves into **In Compliance** status if sufficient licences are available in the virtual account.
+
+For FTD managed by FMC, the registration path is:
+
+```
+FMC GUI → System → Licenses → Smart Licenses → Register
+Enter token → FMC registers with CSSM on behalf of all managed FTDs
+Assign licences per device → Devices → Device Management → select device → Licenses tab
+```
+
+The FMC acts as the proxy for all its managed FTDs. Each FTD does not independently register; the FMC registers once and then allocates the appropriate licence tiers to each device.
+
+---
+
+## Transport Methods
+
+A device needs to be able to communicate licence status to Cisco. Three transport mechanisms exist:
+
+| Method | How It Works | Use Case |
+|---|---|---|
+| **Direct Cloud** | Device or FMC connects directly to CSSM over the internet via HTTPS | Most common; requires internet access from management network |
+| **CSSM On-Prem Satellite** | Local Satellite server mirrors CSSM inside the network; devices report to Satellite | Air-gapped or restricted networks; Satellite syncs with cloud periodically |
+| **Smart Licensing Using Policy (SLP)** | No registration required; device installs usage reports on a schedule | New model for modern IOS XE, IOS XR, and NX-OS platforms |
+
+---
+
+## Smart Licensing Using Policy (SLP)
+
+Smart Licensing Using Policy is the evolution of traditional Smart Licensing and is the default model on newer Cisco platforms (IOS XE 17.3+, some NX-OS versions). SLP removes the requirement to register devices with CSSM before using features.
+
+Under SLP:
+
+- The device operates immediately using any feature, in an **Enforcement** or **Honour** mode depending on the product
+- The device generates **RUM reports** (Resource Utilisation Measurement) on a periodic schedule (the reporting interval is defined by policy, typically 30 to 90 days)
+- RUM reports are sent to CSSM (directly, via Satellite, or via CSSM Smart Transport)
+- CSSM reconciles reported usage against purchased licences and returns a policy acknowledgement
+
+The key difference from the older model: there is no registration token, no compliance check gate before features work, and no per-device binding. The obligation is to report usage honestly within the defined reporting period. If a device fails to report within the window, it enters an out-of-compliance state and features may be restricted depending on enforcement mode.
+
+---
+
+## Compliance Status
+
+CSSM tracks four compliance states for licences:
+
+| Status | Meaning |
+|---|---|
+| **In Compliance** | The virtual account holds enough licences to cover all reported consumption |
+| **Out of Compliance** | Consumption exceeds available licences; an over-deployment exists |
+| **Evaluation Mode** | Device is using features without a valid licence during the 90-day evaluation window |
+| **Not Authorised** | Feature requires a licence that has not been assigned and evaluation has expired |
+
+Out-of-compliance devices continue to function — Cisco's Smart Licensing is generally not a hard enforcement model for most products. However, the compliance violation is visible in CSSM reports, which matters for audit purposes, contract compliance, and renewals.
+
+---
+
+## Assigning Licences to FTD via FMC
+
+Once FMC is registered to CSSM, the workflow for enabling features on a specific FTD device is:
+
+1. In FMC, navigate to **Devices → Device Management** and select the target FTD device.
+2. Click the **Licenses** tab on the device page.
+3. Enable the licence tiers required: Threat, Malware, URL Filtering, RA VPN.
+4. FMC updates CSSM to reflect the consumption and deploys the feature entitlements to the FTD.
+
+If the virtual account does not hold enough licences for the requested tier, FMC will warn about the out-of-compliance condition but will still enable the feature (depending on enforcement mode).
+
+---
+
+## Verifying Compliance in CSSM
+
+To audit licence usage across the organisation:
+
+- CSSM → **Reports → License Usage**: shows consumed vs available licence counts per virtual account and per product family
+- CSSM → **Smart Account → Inventory**: shows all registered devices, their last contact time, and the licences they are consuming
+- CSSM → **Reports → Usage Report** (for SLP): shows submitted RUM reports and acknowledgement status
+
+For FTD specifically, a quick check at the FMC level is available under **System → Licenses → Smart Licenses**, which shows the registration status and compliance state for all licence types currently assigned.
+
+---
+
+## Legacy vs CSSM
+
+Before Smart Licensing, Cisco used the **Product License Registration Portal** (now called the Legacy Portal). This system issued PAK-based licences that had to be activated against specific serial numbers. Many older ASA, IOS, and IPS devices still use this model and their licences do not appear in CSSM.
+
+The practical implication for network teams managing a mixed environment is that CSSM covers only Smart-capable devices. Legacy PAK-based licences require the legacy portal for transfers and rehosting. When decommissioning older equipment, returning PAK licences to the pool is a manual step that is easy to overlook.
+
+Smart Licensing, and especially SLP, represents a significant simplification: a single portal, virtual account grouping, usage-based reporting rather than per-device keys, and visibility across the entire installed base in one view.

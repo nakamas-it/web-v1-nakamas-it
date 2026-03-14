@@ -1,0 +1,272 @@
+---
+title: "Cisco IOS — Access Control Lists"
+category: "cisco"
+topic: "acl"
+summary: "Configuring standard and extended ACLs on Cisco IOS — numbered and named syntax, wildcard masks, interface application, VTY restriction, and troubleshooting."
+tags: ["cisco", "ios", "acl", "security", "packet-filtering"]
+order: 8
+draft: false
+---
+
+## Overview
+
+Access Control Lists (ACLs) are ordered lists of permit and deny statements that IOS evaluates against packet header fields. They are the primary tool for packet filtering on Cisco routers and layer-3 switches. Beyond security, ACLs serve as a classification mechanism for other IOS features — NAT uses ACLs to identify traffic for translation, QoS uses them for classification, and route redistribution uses them in distribute-lists and route-maps.
+
+Understanding ACLs requires mastering four concepts: the type (standard vs extended), the syntax (numbered vs named), wildcard masks, and placement rules.
+
+---
+
+## ACL Processing Logic
+
+Every ACL operates as a sequential list of Access Control Entries (ACEs). When a packet is evaluated:
+
+1. IOS compares the packet against each ACE in order from top to bottom.
+2. The first matching ACE determines the action (permit or deny).
+3. If no ACE matches, the implicit **deny any** at the end of every ACL drops the packet.
+
+The implicit deny is not visible in the configuration but is always present. This means an ACL with no explicit permit statements will drop all traffic. If no ACL is applied to an interface at all, traffic passes freely in both directions.
+
+---
+
+## Standard ACLs
+
+Standard ACLs match only on **source IP address**. They cannot filter by destination, protocol, or port. Because they are imprecise, the placement rule is to apply them **close to the destination** — placing them close to the source would block traffic to all destinations, not just the intended one.
+
+**Numbered standard ACL range:** 1–99 and 1300–1999
+
+### Numbered Standard Syntax
+
+```
+access-list 10 permit 192.168.1.0 0.0.0.255
+access-list 10 permit host 10.0.0.5
+access-list 10 deny any
+```
+
+The `host` keyword is a shorthand for a /32 match (`host 10.0.0.5` = `10.0.0.5 0.0.0.0`). The `any` keyword matches all addresses (`0.0.0.0 255.255.255.255`).
+
+### Named Standard Syntax
+
+Named ACLs are preferred in production because they allow descriptive names and support sequence number editing:
+
+```
+ip access-list standard PERMIT_MGMT
+ permit 192.168.10.0 0.0.0.255
+ deny any
+```
+
+---
+
+## Extended ACLs
+
+Extended ACLs match on **source IP, destination IP, protocol (TCP/UDP/ICMP), source port, and destination port**. Their additional specificity means they should be placed **close to the source** — you can filter precisely without affecting unrelated traffic flows.
+
+**Numbered extended ACL range:** 100–199 and 2000–2699
+
+### Numbered Extended Syntax
+
+```
+access-list 101 permit tcp 10.1.1.0 0.0.0.255 any eq 80
+access-list 101 permit tcp 10.1.1.0 0.0.0.255 any eq 443
+access-list 101 deny ip any any
+```
+
+The format for a TCP/UDP ACE is:
+```
+access-list <number> {permit|deny} {tcp|udp} <src> <src-wildcard> <dst> <dst-wildcard> [eq|lt|gt|neq|range <port>]
+```
+
+### Named Extended Syntax
+
+```
+ip access-list extended WEB_FILTER
+ permit tcp 10.1.0.0 0.0.0.255 any eq 80
+ permit tcp 10.1.0.0 0.0.0.255 any eq 443
+ remark Block everything else from this subnet
+ deny ip any any
+```
+
+The `remark` keyword adds a comment line that appears in the configuration but is not evaluated.
+
+### Port Matching Operators
+
+| Operator | Meaning | Example |
+|----------|---------|---------|
+| `eq` | Equal to | `eq 80` — port 80 only |
+| `neq` | Not equal to | `neq 23` — anything except Telnet |
+| `lt` | Less than | `lt 1024` — privileged ports |
+| `gt` | Greater than | `gt 1023` — ephemeral ports |
+| `range` | Inclusive range | `range 20 21` — FTP data and control |
+
+---
+
+## Wildcard Masks
+
+Wildcard masks define which bits of an IP address must match and which can be ignored:
+- **Bit 0** = this bit must match exactly
+- **Bit 1** = ignore this bit
+
+Wildcard masks are the bitwise inverse of subnet masks. A /24 subnet mask of `255.255.255.0` becomes wildcard `0.0.0.255` — meaning the first three octets must match, and the last octet can be anything.
+
+| Subnet | Mask | Wildcard |
+|--------|------|----------|
+| /8 | 255.0.0.0 | 0.255.255.255 |
+| /16 | 255.255.0.0 | 0.0.255.255 |
+| /24 | 255.255.255.0 | 0.0.0.255 |
+| /30 | 255.255.255.252 | 0.0.0.3 |
+
+Special shortcuts:
+- `host <ip>` = `<ip> 0.0.0.0` (exact match on one address)
+- `any` = `0.0.0.0 255.255.255.255` (match everything)
+
+---
+
+## Sequence Numbers and ACL Editing
+
+IOS automatically assigns sequence numbers to ACEs (10, 20, 30, ...) when you create them. Sequence numbers make in-place editing possible without deleting and recreating the entire ACL:
+
+```
+show ip access-lists WEB_FILTER
+```
+
+Output shows:
+```
+Extended IP access list WEB_FILTER
+    10 permit tcp 10.1.0.0 0.0.0.255 any eq www
+    20 permit tcp 10.1.0.0 0.0.0.255 any eq 443
+    30 deny ip any any
+```
+
+To delete entry 20 and insert a new entry between 10 and 30:
+
+```
+ip access-list extended WEB_FILTER
+ no 20
+ 15 permit tcp 10.1.0.0 0.0.0.255 any eq 8080
+```
+
+This is only possible with **named** ACLs. Numbered ACLs entered in config mode also support sequence editing in modern IOS, but the original numbered syntax (entered at global config) does not.
+
+---
+
+## Applying ACLs to Interfaces
+
+An ACL does nothing until applied. Apply it to an interface in a specific direction:
+
+```
+interface GigabitEthernet0/0
+ ip access-group WEB_FILTER in
+ ip access-group OUTBOUND_POLICY out
+```
+
+Direction matters:
+- **in** — filters packets arriving on the interface, before the routing decision
+- **out** — filters packets leaving the interface, after the routing decision
+
+IOS allows one ACL per interface per direction per protocol (IPv4 and IPv6 are independent). Applying a second ACL in the same direction replaces the first.
+
+---
+
+## Applying ACLs to VTY Lines
+
+To restrict who can SSH or Telnet to the device itself, use `access-class` (not `access-group`) on VTY lines. This is a critical hardening step that limits management access to known networks:
+
+```
+access-list 10 permit 192.168.1.0 0.0.0.255
+!
+line vty 0 15
+ access-class 10 in
+ transport input ssh
+ login local
+```
+
+The `in` direction checks the source IP of incoming management connections. Only hosts in 192.168.1.0/24 will be able to reach the VTY lines; all others hit the implicit deny.
+
+---
+
+## ACLs for NAT
+
+NAT uses a standard ACL to identify which inside hosts should be translated. The ACL permits the traffic that should be translated — it is not used for filtering here but purely as a match criterion:
+
+```
+access-list 1 permit 192.168.0.0 0.0.0.255
+!
+ip nat inside source list 1 interface GigabitEthernet0/1 overload
+```
+
+---
+
+## ACLs in OSPF Distribute-Lists
+
+A distribute-list with an ACL can filter routes from being installed into the routing table (inbound) or from being advertised to neighbours (outbound). This is an advanced use case for route filtering:
+
+```
+ip access-list standard BLOCK_ROUTES
+ deny 10.99.0.0 0.0.255.255
+ permit any
+!
+router ospf 1
+ distribute-list BLOCK_ROUTES in
+```
+
+---
+
+## Verification and Troubleshooting
+
+### Show Commands
+
+```
+show ip access-lists
+show ip access-lists 101
+show ip access-lists WEB_FILTER
+```
+
+Displays all ACEs with match counters. Each time a packet matches an ACE, the counter increments. A counter of zero means no traffic has matched that entry — either the ACL is not seeing that traffic, or the entry is misconfigured.
+
+```
+show ip interface GigabitEthernet0/0
+```
+
+Shows which ACLs are applied inbound and outbound on an interface. Look for lines like:
+```
+  Inbound  access list is WEB_FILTER
+  Outbound access list is not set
+```
+
+### Clearing Counters
+
+```
+clear ip access-list counters
+clear ip access-list counters WEB_FILTER
+```
+
+Resets hit counts to zero. Useful before testing to confirm which entries a new traffic flow matches.
+
+### Common ACL Mistakes
+
+| Mistake | Effect | Fix |
+|---------|--------|-----|
+| Wrong direction (in vs out) | ACL not evaluated for the traffic flow | Verify traffic direction relative to the interface |
+| Wrong interface | ACL never sees the traffic | Trace the packet path and apply ACL to the correct interface |
+| Permit before deny | Intended deny never reached (first match wins) | Order entries correctly; place specific denies before broad permits |
+| Missing permit at end | Implicit deny blocks all traffic, including wanted flows | Add `permit any` or a specific permit at the end |
+| Standard ACL placed close to source | Blocks traffic to all destinations, not just the intended one | Move standard ACLs to the destination-side interface |
+| Editing numbered ACL in global config | New entries always added at end — cannot insert | Use named ACLs or config-mode editing with sequence numbers |
+
+---
+
+## Placement Summary
+
+| ACL Type | Matches | Preferred Placement |
+|----------|---------|---------------------|
+| Standard (1–99) | Source IP only | Close to destination |
+| Extended (100–199) | Src + Dst + Protocol + Port | Close to source |
+
+The reason for this difference: a standard ACL placed near the source would block the matching traffic from reaching any destination, not just the intended one. An extended ACL placed near the source filters precisely — it names both source and destination — so traffic unrelated to the policy passes freely.
+
+---
+
+## References
+
+- RFC 3021 — Using 31-Bit Prefixes on IPv4 Point-to-Point Links
+- Cisco IOS Security Configuration Guide — IP Access Control Lists
+- CCNA 200-301 Official Cert Guide Vol. 2 (Odom) — Chapters 6–8

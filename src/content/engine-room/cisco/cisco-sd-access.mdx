@@ -1,0 +1,173 @@
+---
+title: "Cisco SD-Access and DNA Center"
+category: "cisco"
+topic: "sd-access"
+summary: "Cisco Software-Defined Access — DNA Center as the controller, the SD-Access fabric (underlay, overlay, LISP, VXLAN), and Scalable Group Tags for policy."
+tags: ["cisco", "sd-access", "dna-center", "lisp", "vxlan", "sgt", "fabric", "automation"]
+order: 17
+draft: false
+---
+
+## Overview
+
+Traditional campus networks have a fundamental operational problem: they were designed for a world where users, devices, and applications had predictable, static locations. A user sits at a desk, plugs into a wall jack, and is in VLAN 10. Security policy is enforced with ACLs that match IP address ranges. If the user moves — or if the organisation grows, reorganises, or acquires another company — ACLs must be rewritten, VLANs must be extended, and subnets must be renumbered.
+
+**Cisco Software-Defined Access (SD-Access)** is the answer to this problem. It decouples user identity from physical location and IP address. A user can plug into any switch anywhere in the campus and still get the same security policy, the same VLAN, and the same network experience — because policy is tied to who they are, not where they sit.
+
+SD-Access is managed by **DNA Center** (now officially rebranded as Catalyst Center), Cisco's intent-based networking controller. DNA Center provides the management plane; the SD-Access fabric provides the data plane.
+
+---
+
+## Intent-Based Networking
+
+**Intent-based networking** is the conceptual foundation of the SD-Access approach. The operator expresses the desired outcome — "users in the Finance group can reach the accounting server; they cannot reach the engineering development environment" — and the system translates that intent into the specific ACLs, VLANs, routes, and configurations required to implement it across all devices.
+
+This is the opposite of the traditional workflow where the operator directly configures every device. Intent-based networking does not eliminate the need to understand the underlying infrastructure — the policies must still be correct — but it removes the per-device CLI work required to implement them.
+
+---
+
+## DNA Center — Four Pillars
+
+DNA Center organises its functionality into four capability areas:
+
+| Pillar | Purpose |
+|---|---|
+| **Design** | Define the physical and logical network hierarchy (sites, buildings, floors), IP address pools per site, DNS/DHCP servers, credential profiles, and the network hierarchy that binds physical devices to logical locations |
+| **Policy** | Define group-based access policy — which Scalable Group Tags can communicate with which other SGTs; this is where intent is expressed as high-level business policy |
+| **Provision** | Apply templates and configurations to devices; onboard new switches and routers into the fabric; manage software images (SWIM — Software Image Management); day-0 provisioning with PnP (Plug and Play) |
+| **Assurance** | Network health monitoring, client 360 (per-client troubleshooting view), path trace (trace the exact path a packet takes from source to destination through the fabric), issues and recommendations (AI/ML-based anomaly detection) |
+
+---
+
+## SD-Access Fabric Architecture
+
+The SD-Access fabric has two distinct layers that work together: the **underlay** and the **overlay**.
+
+### Underlay
+
+The underlay is the physical IP network — the actual switches, cables, and routing adjacencies. In SD-Access, the underlay is a **routed access** design: every access switch (fabric edge node) runs a routing protocol. There are no spanning tree loops and no large Layer 2 domains in the underlay.
+
+Cisco uses **IS-IS** as the underlay routing protocol. Every switch participating in the fabric — access, distribution, and core — runs IS-IS and builds full IP reachability to every other switch. The result is a flat, fully routed underlay where any switch can reach any other switch via IP.
+
+This is a significant departure from traditional campus designs where distribution and core switches run routing but access switches are Layer 2 only.
+
+### Overlay
+
+The overlay runs on top of the underlay and provides the virtualised, identity-aware network that end users experience. The overlay has two components that work together:
+
+- **VXLAN** for the data plane (how traffic is actually transported)
+- **LISP** for the control plane (how devices know where each endpoint is)
+
+---
+
+## LISP Control Plane
+
+**LISP (Locator/ID Separation Protocol)** solves the fundamental mobility problem in IP networking by separating two concepts that IPv4 conflates: the identity of an endpoint (where it is) from the location of that endpoint in the network (how to reach it).
+
+In standard IP, a host's address serves both purposes. `10.1.1.100` identifies the host AND encodes the routing location (subnet 10.1.1.0/24, reachable via the router for that subnet). When a host moves to a different subnet, it must get a new IP address, or the entire network must carry a host route for it.
+
+LISP introduces two new concepts:
+
+| Term | Meaning | In SD-Access Context |
+|---|---|---|
+| **EID** (Endpoint Identifier) | The host's IP address — its identity | The IP address assigned to the end user's device |
+| **RLOC** (Routing Locator) | The underlay IP of the switch the host is connected to | The IP address of the fabric edge switch |
+
+The **LISP Map Server/Resolver** (running on the Fabric Control Plane node, which is typically a DNA Center-provisioned Catalyst switch) maintains a database mapping every EID to the RLOC of the switch that has seen that host.
+
+The lookup flow when Host A (EID 10.1.1.100) tries to reach Host B (EID 10.2.2.200):
+
+1. The fabric edge switch attached to Host A does not have a forwarding entry for 10.2.2.200
+2. The edge switch sends a **Map-Request** to the LISP Map Server asking "who has EID 10.2.2.200?"
+3. The Map Server looks up its database and returns a **Map-Reply**: "10.2.2.200 is at RLOC 10.100.0.22" (the underlay IP of Host B's edge switch)
+4. The edge switch caches this mapping and encapsulates the original packet in VXLAN toward RLOC 10.100.0.22
+5. Host B's edge switch receives the VXLAN packet, decapsulates it, and delivers the original packet to Host B
+
+If Host B moves to a different access switch, the Map Server is updated automatically. The next Map-Request for Host B's EID will return the new RLOC. The network adapts without any manual reconfiguration.
+
+---
+
+## VXLAN Data Plane
+
+**VXLAN (Virtual Extensible LAN)** is the encapsulation protocol that carries the actual user traffic across the underlay.
+
+VXLAN takes an original Ethernet frame (the inner frame from the end device) and encapsulates it inside a UDP packet:
+
+```
+Outer Ethernet header
+Outer IP header (source RLOC → destination RLOC)
+UDP header (destination port 4789)
+VXLAN header (contains the 24-bit VNI)
+Inner Ethernet frame (original frame from end device)
+```
+
+Key VXLAN characteristics:
+
+| Property | Value |
+|---|---|
+| **VNI** (VXLAN Network Identifier) | 24-bit field; supports 16,777,216 unique segments (vs 4,094 VLANs) |
+| **UDP port** | 4789 |
+| **VTEP** (VXLAN Tunnel Endpoint) | The device that encapsulates and decapsulates VXLAN — the fabric edge switch |
+| **Benefit over VLAN** | Segments can span any routed underlay; no STP; 16M segments vs 4K VLANs |
+
+In SD-Access, each user VLAN maps to a unique VNI in the overlay. Traffic between the same VNI (same segment) is bridged. Traffic between different VNIs requires routing through the fabric border, where the inter-VNI routing policy is enforced.
+
+---
+
+## Fabric Components
+
+| Component | Function |
+|---|---|
+| **Fabric Edge** | The access layer switch where end devices connect. It is the VTEP that encapsulates/decapsulates VXLAN and registers endpoint EIDs with the LISP Map Server. Runs IS-IS for underlay routing. |
+| **Fabric Border** | The boundary node between the SD-Access fabric and external networks (internet, data centre, WAN, legacy campus). Connects the VXLAN overlay to the external IP world. Enforces inter-fabric policy. |
+| **Fabric Control Plane** | Runs the LISP Map Server and Map Resolver. Tracks all EID-to-RLOC mappings. Typically deployed on a dedicated Catalyst switch provisioned by DNA Center. |
+| **Intermediate Nodes** | Distribution and core switches that carry underlay traffic. They run IS-IS and forward underlay packets but are not fabric-aware — they do not process VXLAN or LISP. |
+
+---
+
+## Scalable Group Tags (SGT)
+
+Scalable Group Tags are the mechanism through which SD-Access moves from VLAN-based segmentation to identity-based segmentation.
+
+A **Scalable Group Tag (SGT)** is a 16-bit tag assigned to each network session based on the identity of the user or device, as determined by **Cisco ISE** during 802.1X authentication. The tag represents a security group — for example, SGT 10 = Finance, SGT 20 = Engineering, SGT 30 = Contractors.
+
+Once tagged, traffic carries the SGT through the fabric. Policy is enforced at the **fabric border** using **SGACLs (Scalable Group ACLs)** — permit/deny rules that reference source and destination SGTs rather than IP addresses:
+
+```
+SGACL: Finance → Accounting_Server = permit any
+SGACL: Finance → Engineering_Dev = deny ip
+SGACL: Contractors → Internet = permit tcp eq 80 443
+SGACL: Contractors → Internal_Servers = deny ip
+```
+
+The benefit over traditional IP ACLs is enormous. When a Finance employee moves from the New York office to the London office, they authenticate with their AD credentials, receive SGT 10, and immediately get Finance-level access — without any ACL changes on any switch. The ACLs are based on who the user is, not where they sit.
+
+ISE assigns SGTs based on authentication results. An 802.1X supplicant authenticating as a member of the Finance AD group is assigned SGT 10. A device using MAB (MAC Authentication Bypass) for a printer is assigned a Printer SGT. VPN users authenticating via AnyConnect can also receive SGTs from ISE.
+
+---
+
+## DNA Center Automation
+
+DNA Center reduces the per-device configuration burden for day-to-day network operations:
+
+**Device Discovery and Inventory**: DNA Center can discover network devices using CDP/LLDP or IP range scans and build a complete inventory automatically.
+
+**Template-Based Provisioning**: configuration templates written in Jinja2 or FreeMarker are stored in DNA Center and applied to devices during onboarding or when changes are needed. Variables in templates are filled from the design hierarchy (site-specific IP pools, VLAN IDs, etc.).
+
+**Software Image Management (SWIM)**: DNA Center maintains a repository of IOS XE and IOS XE SD-Access images. It can check compliance (are all switches on the target image?), plan upgrades, and push images to devices with rolling upgrade scheduling to avoid simultaneous reboots.
+
+**Plug and Play (PnP)**: new switches ship to branch offices without preconfiguration. When they power on and get DHCP, they contact the PnP server (DNA Center). DNA Center authenticates the device via its serial number, pushes the day-0 configuration, and onboards it into the fabric automatically. No hands-on configuration at the branch is required.
+
+---
+
+## DNA Center Assurance
+
+The Assurance pillar provides operational visibility across the fabric:
+
+**Health Scores**: DNA Center assigns a health score (0–10) to every network device, every access point, and every wireless client. The score is derived from interface errors, CPU/memory utilisation, IS-IS neighbour state, and other telemetry. A red score indicates an issue requiring attention.
+
+**Client 360**: a per-client troubleshooting view that shows the full history of a specific device — which switch it connected to, which SGT it received, whether authentication succeeded or failed, DNS lookups performed, and the health of its connection over time.
+
+**Path Trace**: given a source and destination IP, DNA Center traces the exact path a packet would take through the network, showing each hop, the interface used, and any ACL or policy applied. This replaces hours of manual `show` command correlation.
+
+**Issues and Recommendations**: DNA Center uses machine learning on streaming telemetry (via Model-Driven Telemetry, Syslog, and SNMP) to detect anomalies — unexpected traffic patterns, degraded clients, or switch behaviour that deviates from the baseline — and presents them as actionable issues with recommended remediation steps.

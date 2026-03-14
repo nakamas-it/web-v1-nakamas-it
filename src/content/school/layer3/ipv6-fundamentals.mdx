@@ -1,0 +1,176 @@
+---
+title: "IPv6 — Fundamentals and Address Types"
+layer: "layer3"
+protocol: "ipv6"
+summary: "Why IPv6 exists, how its 128-bit address space is structured, and the major address categories — global unicast, link-local, multicast, and special addresses."
+tags: ["ipv6", "layer3", "addressing", "networking"]
+order: 13
+draft: false
+---
+
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+IPv4 served the internet remarkably well for over four decades, but it was designed in an era when the total number of connected devices was measured in the hundreds. Its 32-bit address space allows for approximately 4.3 billion unique addresses — a number that sounded astronomical in 1981 and became a crisis by the 2010s. IANA exhausted its pool of unallocated /8 blocks in February 2011. Regional Internet Registries followed suit throughout the decade. By 2020, every RIR had effectively run out of addresses to hand out to new organizations.
+
+The internet did not collapse because of clever stopgaps: NAT allowed thousands of private devices to share a single public IP, and CIDR replaced classful allocation to squeeze more efficiency from the existing space. These measures bought time. They did not solve the underlying problem. IPv6 is the solution — not a workaround, but a complete redesign of the Internet Protocol with a 128-bit address space that provides approximately 3.4 × 10³⁸ addresses. That is enough to assign a unique address to every atom on the surface of the Earth, with room left over.
+
+This article covers the fundamentals: what IPv6 addresses look like, how they are written and abbreviated, the major address types, and the structural changes IPv6 makes to the protocol stack compared to IPv4.
+
+---
+
+## The 128-Bit Address Space
+
+An IPv6 address is 128 bits long — four times the length of an IPv4 address. Rather than dotted decimal notation, IPv6 uses **colon-hexadecimal notation**: the 128 bits are divided into eight groups of 16 bits (called quartets or hextets), each expressed as four hexadecimal digits and separated by colons.
+
+```
+Full form:  2001:0DB8:ABCD:0001:1234:5678:9ABC:0001
+```
+
+This representation works but is verbose. Two abbreviation rules make IPv6 addresses more manageable in practice.
+
+**Rule 1 — Remove leading zeros within each quartet.** Leading zeros within a group can be dropped; trailing zeros cannot. The quartet `0001` becomes `1`. The quartet `0000` becomes `0`. The quartet `00AB` becomes `AB`.
+
+```
+2001:0DB8:0000:0001:0000:0000:0000:0056
+       ↓
+2001:DB8:0:1:0:0:0:56
+```
+
+**Rule 2 — Replace the longest consecutive run of all-zero quartets with `::`** The double-colon `::` represents one or more consecutive quartets of all zeros. It can appear **only once** in any address — using it twice would make the address ambiguous since you could not determine how many zeros each `::` represents.
+
+```
+2001:DB8:0:1:0:0:0:56
+            ↓
+2001:DB8:0:1::56
+```
+
+Here the run of three consecutive zero quartets (`0:0:0`) is replaced by `::`. The two isolated zero quartets (`0` for the third group and `1` for the fourth) are not replaced because they are not consecutive with the longer run.
+
+To expand a `::` back to full form: count the quartets present, subtract from 8, and insert that many `0000` quartets in place of the `::`.
+
+---
+
+## IPv6 Address Types
+
+IPv6 replaces IPv4's class-based address scheme with a range of well-defined address types, each identified by a specific prefix.
+
+| Type | Prefix | Purpose |
+|---|---|---|
+| Global unicast (GUA) | `2000::/3` (starts with 2 or 3) | Publicly routable addresses, equivalent to public IPv4 |
+| Link-local | `FE80::/10` | Scope-limited to a single network link; not routable |
+| Unique local (ULA) | `FC00::/7` (in practice `FD`) | Private addressing, equivalent to RFC 1918 |
+| Multicast | `FF00::/8` | One-to-many delivery |
+| Loopback | `::1/128` | Equivalent to IPv4 127.0.0.1 |
+| Unspecified | `::/128` | Source address before an address is assigned |
+
+### Global Unicast Addresses
+
+IANA allocates the `2000::/3` block for global unicast — any address whose first three bits are `001`, which in hexadecimal means addresses starting with `2` or `3`. Organizations receive a **global routing prefix** from their ISP or RIR, typically a /32 to /48. Within that prefix, a 16-bit subnet field allows 65,536 subnets, and the remaining 64 bits form the interface identifier. This gives every organization an enormous amount of address space to work with independently.
+
+### Link-Local Addresses
+
+Link-local addresses begin with `FE80::/10`. In practice they always appear as `FE80:0000:0000:0000:<interface-id>/64` because the 54 bits after the `FE80` prefix through the subnet boundary are always zero. Every IPv6-enabled interface generates a link-local address automatically, without configuration. Routers never forward packets with a link-local source or destination — they are constrained to a single L2 segment.
+
+Link-local addresses are not optional; they are essential. They serve as the next-hop addresses in routing tables, as default gateways for hosts, and as the transport mechanism for all NDP messages. An interface that has only a global unicast address still has an automatically generated link-local address alongside it.
+
+### Unique Local Addresses
+
+Unique local addresses (RFC 4193) occupy the `FD` prefix space and are the IPv6 equivalent of RFC 1918 private addresses. They are not routed on the public internet. The structure includes a 40-bit pseudo-randomly generated global ID, which reduces the chance of address collision when two organizations with ULA space merge networks. The full format is `FD<40-bit global ID>:<16-bit subnet>:<64-bit IID>`.
+
+### Multicast
+
+All multicast addresses begin with `FF`. The second octet encodes the scope — `FF02::` is link-local scope, meaning the packet is not forwarded beyond the local link. The well-known multicast groups include:
+
+| Address | Purpose |
+|---|---|
+| `FF02::1` | All nodes on the local link |
+| `FF02::2` | All routers on the local link |
+| `FF02::5` | All OSPFv3 routers |
+| `FF02::9` | All RIPng routers |
+| `FF02::1:2` | All DHCPv6 agents |
+
+There is no broadcast in IPv6. Every function that IPv4 accomplished with broadcast — ARP, router discovery, DHCP discovery — is handled in IPv6 by targeted multicast. This is a deliberate improvement: broadcast forces every device on a segment to interrupt its CPU to process the packet. Multicast can be filtered at the NIC level, so only devices listening for a specific multicast group need to process it.
+
+---
+
+## The IPv6 Header
+
+One of the most significant engineering improvements in IPv6 is a cleaner, simpler header. The IPv4 header is variable in length (20 to 60 bytes) due to its Options field and includes several fields that were rarely used or that created complexity at intermediate routers. IPv6 replaces this with a fixed 40-byte header.
+
+<PacketDiagram
+  label="IPv6 Header (Fixed 40 Bytes)"
+  fields={[
+    { name: "Version (4b)", bytes: 0.5 },
+    { name: "Traffic Class (8b)", bytes: 1 },
+    { name: "Flow Label (20b)", bytes: 2.5 },
+    { name: "Payload Length", bytes: 2, highlight: true },
+    { name: "Next Header", bytes: 1, highlight: true },
+    { name: "Hop Limit", bytes: 1 },
+    { name: "Source Address", bytes: 8 },
+    { name: "Destination Address", bytes: 8 },
+  ]}
+/>
+
+Key differences from IPv4:
+
+- **No checksum.** IPv4's header checksum had to be recalculated at every hop because the TTL field changes. IPv6 eliminates the header checksum entirely, delegating integrity checking to upper-layer protocols (TCP, UDP) and link-layer protocols. This reduces per-hop processing.
+- **No fragmentation at routers.** In IPv4, routers can fragment packets that exceed a link's MTU. In IPv6, routers refuse to fragment — they drop the packet and send back an ICMPv6 "Packet Too Big" message. It is the source host's responsibility to discover the path MTU (PMTUD) and send appropriately sized packets. This eliminates significant complexity and state from router software.
+- **Hop Limit replaces TTL.** Functionally equivalent — decremented by one at each router; packet dropped at zero — but the name more accurately describes what the field does.
+- **Next Header replaces Protocol.** The Next Header field serves dual duty: it identifies the upper-layer protocol (TCP = 6, UDP = 17) when there are no extension headers, or it points to the first extension header in the chain.
+
+### Extension Headers
+
+Optional features that were crammed into IPv4's Options field become **extension headers** in IPv6 — separate headers inserted between the IPv6 header and the upper-layer payload. Each extension header has its own Next Header field pointing to the next item in the chain. Examples include:
+
+- **Hop-by-Hop Options** — processed by every router along the path
+- **Routing** — source-specified routing (loose source routing)
+- **Fragment** — used by the source when it must fragment before sending
+- **Destination Options** — processed only by the final destination
+- **Authentication Header (AH)** and **Encapsulating Security Payload (ESP)** — IPsec integration
+
+Extension headers allow future protocol extensions without changing the base header format.
+
+---
+
+## ICMPv6 — The Swiss Army Knife
+
+In IPv4, three separate protocols handled different functions: ICMP for diagnostics and error reporting, ARP for Layer 2 address resolution, and IGMP for multicast group membership. IPv6 consolidates all of these into **ICMPv6** (RFC 4443 and RFC 4861).
+
+ICMPv6 carries:
+- **Error messages** — Destination Unreachable, Packet Too Big, Time Exceeded, Parameter Problem
+- **Informational messages** — Echo Request / Echo Reply (ping)
+- **Neighbor Discovery Protocol (NDP)** messages — replaces ARP entirely
+- **Multicast Listener Discovery (MLD)** messages — replaces IGMP
+
+This consolidation means IPv6 devices only need to implement a single protocol for all these functions. It also means that blocking ICMPv6 entirely (a practice some administrators applied to ICMPv4 for security) is strongly inadvisable — doing so breaks NDP, PMTUD, and other essential operations.
+
+### Neighbor Discovery Protocol (NDP)
+
+NDP, defined in RFC 4861, is the set of ICMPv6 messages that IPv6 uses to discover and maintain information about neighboring devices. It replaces ARP completely and adds router discovery on top. The four core NDP message types are:
+
+| Message | Abbreviation | Purpose |
+|---|---|---|
+| Neighbor Solicitation | NS | Discover the MAC address of a known IPv6 address (like ARP Request) |
+| Neighbor Advertisement | NA | Reply with MAC address (like ARP Reply) |
+| Router Solicitation | RS | Host asks routers to announce themselves |
+| Router Advertisement | RA | Router announces its link-local address, prefix(es), and configuration flags |
+
+NDP also handles **Duplicate Address Detection (DAD)** — before using any newly configured unicast address, a host sends an NS for that address; if another device responds with an NA, the address is a duplicate and cannot be used.
+
+---
+
+## No Broadcast — Multicast and Solicited-Node Addresses
+
+One of the most impactful design decisions in IPv6 is the complete elimination of broadcast. IPv4 broadcast (255.255.255.255 or the subnet broadcast address) forces every device on a segment to process a packet even if the content is irrelevant to them. At scale, broadcast storms and high broadcast domains become a significant problem.
+
+IPv6 replaces broadcast with carefully scoped multicast. The most elegant example is the **solicited-node multicast address**, used by NDP for MAC address resolution. Rather than broadcasting to all devices on a segment (as ARP does), a node computing the solicited-node address for a target takes the last 24 bits of the target's IPv6 address and appends them to the prefix `FF02::1:FF00:0000/104`. The resulting multicast group is typically shared by only one or two devices on a segment, making neighbor resolution far more efficient than ARP.
+
+---
+
+## Summary
+
+IPv6 was not designed to be a minor revision of IPv4 — it is a rearchitecting of the Internet Protocol. The 128-bit address space resolves exhaustion definitively. The fixed 40-byte header with no checksum and no router-level fragmentation simplifies forwarding. The elimination of broadcast in favor of multicast reduces unnecessary processing. The consolidation of ARP, ICMP, and IGMP into ICMPv6 and NDP creates a coherent and extensible protocol family.
+
+Understanding these fundamentals is the prerequisite for the next two articles: how IPv6 addresses are actually assigned to interfaces (EUI-64, SLAAC, DHCPv6), and how IPv6 routing works in practice with static routes and OSPFv3.

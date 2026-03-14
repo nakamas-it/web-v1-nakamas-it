@@ -1,0 +1,283 @@
+---
+title: "IPv6 — Routing and OSPFv3"
+layer: "layer3"
+protocol: "ipv6"
+summary: "How IPv6 packets are routed — static IPv6 routes, OSPFv3 as the IPv6 routing protocol, and key differences from IPv4 routing."
+tags: ["ipv6", "layer3", "ospfv3", "static-routing", "routing"]
+order: 15
+draft: false
+---
+
+## Overview
+
+Routing IPv6 packets works on exactly the same logical foundation as routing IPv4 packets: a router receives a packet, looks up the destination address in its routing table using longest-prefix match, and forwards the packet out the appropriate interface toward the next hop. The mechanics — de-encapsulate the frame, examine the IP destination, consult the table, re-encapsulate, transmit — are identical. What changes are the specifics: the address format, the routing table commands, how static routes reference next hops, and which routing protocols carry IPv6 prefixes.
+
+This article covers IPv6 routing in depth: how connected and local routes are generated, how to configure static routes including the link-local next-hop nuance, OSPFv3 as the primary link-state routing protocol for IPv6, RIPng for completeness, and the dual-stack and tunnelling transition strategies.
+
+---
+
+## Enabling IPv6 Routing
+
+On Cisco IOS, IPv6 routing is disabled by default. A router with IPv6 addresses configured on its interfaces will participate in NDP and can send and receive IPv6 traffic on its own behalf, but it will not forward IPv6 packets between interfaces — it behaves as an IPv6 host, not a router. The single command that enables IPv6 forwarding is:
+
+```
+ipv6 unicast-routing
+```
+
+This is a global configuration command. Without it, IPv6 traffic will not be routed regardless of what addresses or routing protocols are configured. This is a common troubleshooting point: a network appears correctly configured but IPv6 traffic does not pass between subnets — the first thing to verify is whether `ipv6 unicast-routing` is present.
+
+---
+
+## Connected and Local Routes
+
+As soon as an IPv6 interface comes up with a configured global unicast or unique local address, the router automatically installs two entries in the IPv6 routing table:
+
+- A **connected route (C)** for the subnet prefix (e.g., `2001:DB8:1111:1::/64`) — equivalent to a connected route in IPv4
+- A **local route (L)** as a /128 for the specific interface address (e.g., `2001:DB8:1111:1::1/128`) — equivalent to a host route
+
+Link-local addresses do **not** generate connected or local routes. They are always on-link and are never forwarded, so they do not appear in the routing table as destinations.
+
+Routes are added when the interface reaches up/up state and removed when the interface fails, exactly as with IPv4.
+
+```
+show ipv6 route              # Full IPv6 routing table
+show ipv6 route connected    # Only connected routes
+show ipv6 route local        # Only local /128 host routes
+show ipv6 route static       # Only static routes
+```
+
+**Routing table codes for IPv6:**
+| Code | Meaning |
+|---|---|
+| `C` | Connected |
+| `L` | Local (host route) |
+| `S` | Static |
+| `O` | OSPF intra-area |
+| `OI` | OSPF inter-area |
+| `OE1` / `OE2` | OSPF external type 1 / type 2 |
+| `D` | EIGRP |
+| `R` | RIP |
+| `ND` | NDP default route (from RA) |
+| `NDp` | NDP on-link prefix (from RA) |
+
+---
+
+## Static IPv6 Routes
+
+The syntax for a static IPv6 route follows the same logic as IPv4 but with an important nuance around link-local addresses as next hops.
+
+**General syntax:**
+```
+ipv6 route <prefix/length> { outgoing-interface | next-hop-address | outgoing-interface next-hop-address }
+```
+
+**Options for forwarding instructions:**
+
+| Option | Serial link | Ethernet link |
+|---|---|---|
+| Outgoing interface only | Works | Accepted but non-functional for forwarding |
+| GUA/ULA next-hop address only | Works | Works (router does iterative lookup) |
+| Interface + GUA/ULA next-hop | Works | Works |
+| Interface + link-local next-hop | Works | Works |
+| Link-local next-hop only | **Rejected** | **Rejected** |
+
+The key restriction: **a link-local address can never be used as a standalone next hop**. It must always be accompanied by the outgoing interface. The reason is that link-local addresses are not globally unique — the address `FE80::1` might exist on every router in the network, one per link. Without specifying which interface, the router cannot determine which `FE80::1` is meant. Adding the interface resolves the ambiguity.
+
+**Static route examples:**
+```
+! Next-hop is a GUA (works on any link type)
+ipv6 route 2001:DB8:1111:2::/64 2001:DB8:1111:13::3
+
+! Next-hop is a link-local — MUST include interface
+ipv6 route 2001:DB8:1111:2::/64 GigabitEthernet0/0/1 FE80::FF:FE01:3
+
+! Serial interface — outgoing interface alone is sufficient
+ipv6 route 2001:DB8:1111:2::/64 Serial0/0/1
+
+! Interface + GUA
+ipv6 route 2001:DB8:1111:2::/64 GigabitEthernet0/0/1 2001:DB8:1111:13::3
+```
+
+### IPv6 Default Route
+
+The default route in IPv6 uses the prefix `::/0` — the IPv6 all-zeros prefix with a /0 length, exactly analogous to `0.0.0.0/0` in IPv4.
+
+```
+ipv6 route ::/0 GigabitEthernet0/0/1 FE80::FF:FE02:1    # Via LLA + interface
+ipv6 route ::/0 2001:DB8:1111:13::1                      # Via GUA
+```
+
+Note: the IPv4 routing table displays a "Gateway of Last Resort" line when a default route is present. The IPv6 routing table does not — the `::/0` entry simply appears in the table like any other route.
+
+### Host Routes (/128)
+
+An IPv6 /128 route points to a specific host address rather than a subnet:
+
+```
+ipv6 route 2001:DB8:1111:D::4/128 GigabitEthernet0/0/1 2001:DB8:1111:12::2
+```
+
+These are used for traffic engineering to specific devices, or sometimes to attract traffic to a loopback address.
+
+### Floating Static Routes
+
+A floating static route has an administrative distance higher than the primary routing protocol, so it stays in the configuration but does not enter the routing table until the primary route is removed (when the primary interface or protocol fails):
+
+```
+ipv6 route 2001:DB8:1111:7::/64 Cellular0/1/0 130   # AD 130 > OSPF 110
+```
+
+When the OSPF-learned route for this prefix disappears, the floating static route with AD 130 becomes active.
+
+### IPv6 Administrative Distances
+
+| Source | AD |
+|---|---|
+| Connected | 0 |
+| Static | 1 |
+| NDP default route (from RA) | 2 |
+| eBGP | 20 |
+| EIGRP internal | 90 |
+| OSPF | 110 |
+| IS-IS | 115 |
+| RIP (RIPng) | 120 |
+| EIGRP external | 170 |
+| iBGP | 200 |
+
+Note the addition of **NDP (AD 2)** — routes learned from NDP Router Advertisements have an administrative distance of 2, making them preferred over any routing protocol but below static routes.
+
+---
+
+## Longest-Prefix Match in IPv6
+
+The longest-prefix match algorithm works identically in IPv6 and IPv4. When multiple routes could match a destination, the most specific match — the one with the longest prefix length — wins. A /64 route beats a /48 route, which beats a /32 route, which beats a ::/0 default route.
+
+To verify which route a router would use for a specific destination address:
+
+```
+show ipv6 route 2001:DB8:1111:3::33
+show ipv6 static detail          # Shows whether static routes are in the RIB
+```
+
+---
+
+## OSPFv3
+
+OSPFv3 is the version of OSPF adapted for IPv6. It is defined in RFC 5340 and replaces OSPFv2 (which was IPv4-only). The underlying algorithm is identical — Dijkstra's Shortest Path First, the same area structure, the same DR/BDR election on multi-access segments, the same neighbor states (Down, Init, 2-Way, ExStart, Exchange, Loading, Full), the same LSA flooding mechanism. The differences are in how the protocol transports itself and identifies addresses.
+
+### Key Differences from OSPFv2
+
+**OSPFv3 runs per-link, not per-subnet.** OSPFv2 required a subnet to be configured on an interface before OSPF could form a neighbor relationship over that link. OSPFv3 uses the interface's link-local address to form adjacencies — it does not need a routable prefix. This means you can enable OSPFv3 on a WAN link configured with only `ipv6 enable` (link-local only, no GUA), which conserves address space on transit links.
+
+**Neighbor adjacency uses link-local addresses.** In OSPFv3, Hello packets are sourced from the link-local address, and next-hop information in LSAs uses link-local addresses. The result is that OSPFv3 neighbor relationships and the routing information derived from them are independent of which global prefixes are configured — they operate at the link level.
+
+**The Router ID is still a 32-bit value.** Even though OSPFv3 is an IPv6 routing protocol, it still identifies routers with a 32-bit Router ID, written in dotted decimal. If no IPv4 addresses are configured on the router, the Router ID must be configured manually; OSPFv3 will not start without one.
+
+**OSPFv3 uses IPv6 multicast addresses.** OSPFv3 Hello packets are sent to `FF02::5` (all-OSPF-routers) on every OSPF-enabled interface, and DR/BDR messages use `FF02::6` (all-OSPF-DR-routers).
+
+**Modern OSPFv3 supports multiple address families.** RFC 5838 extended OSPFv3 to carry IPv4 prefixes as well as IPv6, making it a single routing protocol instance that can manage both address families simultaneously. This is the "Address Family" model and is supported on modern platforms.
+
+### OSPFv3 Configuration (Cisco IOS — Traditional)
+
+The traditional OSPFv3 configuration uses interface-level commands rather than the `network` statement approach of OSPFv2:
+
+```
+ipv6 unicast-routing
+
+ipv6 router ospf 1
+ router-id 1.1.1.1
+
+interface GigabitEthernet0/0/0
+ ipv6 ospf 1 area 0
+
+interface GigabitEthernet0/0/1
+ ipv6 ospf 1 area 0
+```
+
+The `router-id` must be explicitly set if no IPv4 addresses exist on the router. The `ipv6 ospf <process-id> area <area>` command on each interface is the equivalent of the `network` statement in OSPFv2, but it is applied per-interface.
+
+### Verification
+
+```
+show ipv6 ospf neighbor            # Neighbor adjacencies
+show ipv6 ospf interface brief     # Per-interface OSPF state
+show ipv6 ospf database            # Link-state database
+show ipv6 route ospf               # Routes learned from OSPF
+```
+
+---
+
+## RIPng — RIP Next Generation
+
+RIPng (RFC 2080) is the IPv6 adaptation of RIP. It retains all of RIP's characteristics — distance-vector algorithm, hop count metric (maximum 15), split horizon, triggered updates — and adapts them to IPv6. RIPng uses `FF02::9` (all-RIPng-routers) as its multicast address and UDP port 521.
+
+RIPng is rarely used in production (the 15-hop limit makes it unsuitable for large networks), but it appears in lab environments and on the CCNA exam. Its simplicity makes it easy to configure for learning purposes:
+
+```
+ipv6 unicast-routing
+
+ipv6 router rip RIP_PROCESS
+
+interface GigabitEthernet0/0/0
+ ipv6 rip RIP_PROCESS enable
+
+interface GigabitEthernet0/0/1
+ ipv6 rip RIP_PROCESS enable
+```
+
+---
+
+## Dual Stack
+
+**Dual stack** is the most straightforward IPv6 transition strategy: a device runs both IPv4 and IPv6 simultaneously, maintaining separate routing tables for each. Every interface has both an IPv4 address and an IPv6 address. IPv4 traffic is routed using the IPv4 routing table; IPv6 traffic is routed using the IPv6 routing table.
+
+Dual stack is the recommended approach for the foreseeable future because:
+- It requires no translation — each packet travels natively in its protocol
+- Applications can choose IPv4 or IPv6 based on DNS response (AAAA record → IPv6, A record → IPv4)
+- The network can transition incrementally — not everything needs to support IPv6 simultaneously
+- Modern operating systems prefer IPv6 when both are available (Happy Eyeballs algorithm, RFC 8305)
+
+A dual-stack router has both an IPv4 and an IPv6 routing protocol running in parallel, or both IPv4 and IPv6 static routes, depending on network design.
+
+---
+
+## Tunnelling — Carrying IPv6 Over IPv4
+
+Where the network infrastructure between two IPv6 islands is IPv4-only, **tunnelling** encapsulates IPv6 packets inside IPv4 packets for transport across the IPv4 network. The IPv6 packet becomes the payload of an IPv4 packet; at the tunnel exit point, the outer IPv4 header is stripped and the IPv6 packet is forwarded natively.
+
+Several tunnelling mechanisms exist:
+
+**Manual GRE tunnels** are the simplest: a GRE tunnel is configured between two routers, each end explicitly specified. IPv6 traffic entering the tunnel is encapsulated in GRE-over-IPv4. This requires manual configuration at both ends but is predictable and straightforward.
+
+**6to4 (RFC 3056)** is an automatic tunnelling mechanism that embeds the IPv4 address of the tunnel endpoint within the IPv6 address. A 6to4 address begins with `2002:` followed by the 32-bit IPv4 address in hex. No manual tunnel configuration is needed at the remote end. 6to4 is largely deprecated in modern networks due to reliability issues with relay routers.
+
+**ISATAP (Intra-Site Automatic Tunnel Addressing Protocol, RFC 5214)** is a host-to-router tunnelling mechanism where IPv6 hosts on an IPv4-only intranet use ISATAP to reach IPv6 resources. The ISATAP interface identifier encodes the IPv4 address as `::5EFE:<IPv4 address>`. It is designed for gradual intranet migration.
+
+In modern networks, the preference is for native dual-stack deployment wherever possible, with manual GRE tunnels for specific point-to-point IPv6-over-IPv4 needs. Automatic tunnelling mechanisms are generally avoided due to their complexity and potential for routing loops.
+
+---
+
+## Troubleshooting Static IPv6 Routes
+
+Static IPv6 routes have several common failure modes:
+
+**Routes present in the table but traffic not working:**
+1. Typo in the prefix or prefix length — the route matches but points to the wrong destination
+2. Link-local next-hop configured without specifying the outgoing interface — IOS will reject this
+3. Link-local next-hop configured with the wrong outgoing interface — route installs but frames go out the wrong interface
+4. Link-local next-hop is the router's own LLA — traffic loops back to the router itself
+5. GUA next-hop that no other route reaches — router cannot resolve the next-hop, route is in the table but unreachable
+6. Ethernet interface specified as outgoing interface without a next-hop — route appears in the table but the router does not know the destination MAC
+
+**Routes not appearing in the table:**
+1. Outgoing interface is down — IOS does not add the route when the interface is down
+2. GUA next-hop is not reachable — recursive lookup fails
+3. A route for the same prefix with lower administrative distance already exists
+
+Use `show ipv6 static detail` to see all configured static routes along with their RIB installation status — whether each route has been successfully added to the routing table or is being held back for one of the above reasons.
+
+---
+
+## Summary
+
+IPv6 routing builds directly on the routing concepts established by IPv4: same longest-prefix match logic, same connected/local route generation, same static route syntax patterns, same link-state and distance-vector protocol families. The key operational differences are the requirement to enable `ipv6 unicast-routing` explicitly, the link-local next-hop restriction requiring an outgoing interface to be specified, and OSPFv3's per-link operation using link-local addresses for adjacency formation. Dual stack is the standard deployment model, allowing IPv4 and IPv6 to coexist indefinitely while the internet completes its transition to the newer protocol.

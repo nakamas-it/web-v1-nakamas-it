@@ -1,0 +1,189 @@
+---
+title: "Cisco FTD and FMC — Platform Overview"
+category: "cisco"
+topic: "ftd-fmc"
+summary: "Cisco Firepower Threat Defense (FTD) and Firepower Management Center (FMC) — architecture, platform options, management modes, and how FTD differs from ASA."
+tags: ["cisco", "ftd", "fmc", "firepower", "ngfw", "security"]
+order: 14
+draft: false
+---
+
+## Overview
+
+Cisco's Next-Generation Firewall story went through a confusing middle chapter before arriving at its current form. For several years, enterprises ran an **ASA with a FirePOWER module** — a traditional stateful firewall with a bolted-on intrusion prevention engine. The two ran as separate processes, required separate management consoles, and had limited integration between their policy engines.
+
+**Firepower Threat Defense (FTD)** resolved this by combining the ASA stateful firewall engine and the Snort-based FirePOWER services into a single unified image with a single policy model. FTD is not ASA plus FirePOWER as two processes side by side — it is a new OS that incorporates both into a cohesive platform. The management interface, the deployment model, and the policy architecture are all different from the legacy ASA.
+
+**Firepower Management Center (FMC)** is the centralised management platform for FTD devices. It is the control plane for the entire FTD fleet — the system where policies are authored, devices are configured, events are collected, and reports are generated. Understanding the FMC ↔ FTD relationship is the first step to understanding how the Firepower platform functions as a whole.
+
+---
+
+## FTD vs ASA vs ASA with FirePOWER
+
+| Platform | Architecture | Management | Next-Gen Features |
+|---|---|---|---|
+| **ASA** | Traditional stateful FW; single OS | ASDM | None |
+| **ASA with FirePOWER** | ASA OS + FirePOWER module as separate process; two management systems | ASDM (ASA) + FMC or ASDM module (FirePOWER) | IPS, AMP, URL — but via separate module |
+| **FTD** | Unified OS combining ASA stateful FW + Snort IPS + FirePOWER services | FMC (preferred) or FDM (on-box) | Full NGFW: IPS, AMP, URL, App-ID, SSL inspection, Identity |
+
+The ASA with FirePOWER is the legacy hybrid. FTD replaced it on all new hardware starting with the Firepower 2100 and 4100 series. On older ASA 5500-X hardware, FTD can be installed as a replacement image, though some features differ from native FTD hardware.
+
+---
+
+## FTD Hardware Platforms
+
+Cisco offers FTD across a wide range of hardware designed for different performance tiers:
+
+| Platform | Throughput | Use Case |
+|---|---|---|
+| **Firepower 1100 series** (1120, 1140, 1150) | 1.5–2.6 Gbps | Small branch offices; integrated switch ports on 1120/1140 |
+| **Firepower 2100 series** (2110, 2120, 2130, 2140) | 3–8.5 Gbps | Mid-range; dedicated NGFW or IPS |
+| **Firepower 4100 series** (4110, 4120, 4140, 4150) | 20–60 Gbps | High-performance data centre or internet edge; full FXOS chassis |
+| **Firepower 9300 series** | Up to 225 Gbps | Carrier and service provider; modular blade chassis |
+| **FTDv** | 100 Mbps–15 Gbps (depending on vCPU/RAM) | Virtual; runs on VMware ESXi, KVM, AWS, Azure, GCP |
+| **ASA 5500-X with FTD image** | Varies by model | FTD on legacy ASA hardware; limited vs native FTD |
+
+The Firepower 1100 and 2100 series run a simplified form of the chassis OS (FXOS lite) that does not require separate chassis manager interaction for day-to-day operations. The 4100 and 9300 series use the full FXOS chassis, which introduces a two-layer management model described later.
+
+---
+
+## FMC Deployment Options
+
+FMC can be deployed as physical hardware or as a virtual appliance:
+
+| FMC Type | Managed Device Capacity | Notes |
+|---|---|---|
+| **FMC 1000** | Up to 25 devices | 1U physical appliance |
+| **FMC 2500** | Up to 150 devices | 2U physical appliance |
+| **FMC 4500** | Up to 300 devices | 2U physical appliance; high event storage |
+| **FMCv10** | Up to 10 devices | Virtual on VMware/KVM |
+| **FMCv25** | Up to 25 devices | Virtual on VMware/KVM/AWS/Azure |
+| **FMCv300** | Up to 300 devices | Virtual; large deployments |
+
+For most new deployments, FMCv on a VMware or cloud platform is the preferred choice because it avoids dedicated hardware, supports snapshots for backup, and scales with the virtualisation infrastructure.
+
+---
+
+## Management Options for FTD
+
+Three management options exist for FTD. Only one can be active at a time for a given device:
+
+| Option | Description | Limitations |
+|---|---|---|
+| **FMC** | Full-featured centralised management; required for multi-device deployments and advanced policies (IPS, malware, SSL, identity, RA-VPN) | Separate appliance or VM required; licensing cost |
+| **FDM** (Firepower Device Manager) | On-box browser-based management; single device only; good for small or standalone deployments | No multi-device management; no multi-context; no advanced IPS policy tuning; no SSL inspection |
+| **CDO** (Cisco Defence Orchestrator) | Cloud-based SaaS management; manages both FTD and legacy ASA; low operational overhead | Requires reliable internet from management station; subset of FMC capabilities |
+
+A device cannot be simultaneously managed by FMC and FDM. Switching between management modes requires a factory reset.
+
+---
+
+## FMC ↔ FTD Communication
+
+FMC and FTD communicate over a dedicated management channel:
+
+- FTD has a dedicated **management interface** (a separate physical port from the data-plane interfaces). This interface is used exclusively for FMC communication, software updates, and health monitoring.
+- The channel is an **SSL/TLS encrypted connection** initiated by FTD toward FMC during registration.
+- Traffic carried over this channel includes: policy deployments, event data (connection events, intrusion events, file events), health status, and software image transfers.
+
+### Registration Process
+
+```
+On FTD CLI (via console or SSH to management interface):
+  configure manager add <FMC-IP-or-hostname> <registration-key>
+
+On FMC GUI:
+  Devices → Device Management → Add → Add Device
+  Enter: FTD IP address, registration key, initial ACP, device group
+```
+
+The registration key is a shared secret used once to authenticate the FTD to FMC. After registration, the SSL channel takes over and the key is no longer used. The FTD becomes visible in FMC's device inventory and is ready to receive policy deployments.
+
+---
+
+## Policy Deployment Workflow
+
+Changes in FMC do not take effect until they are explicitly deployed to devices. This is by design — it allows an operator to stage multiple related changes (update the ACP, modify a NAT rule, adjust an IPS policy) and push them as a single atomic deployment.
+
+The workflow:
+
+1. Make changes in FMC GUI (policy edits, object updates, interface configuration)
+2. FMC displays a **"X changes pending"** banner in the top navigation bar
+3. Click **Deploy**, select the target devices, review the pending changes summary
+4. FMC validates the configuration for consistency errors
+5. FMC pushes the compiled policy to each selected FTD device
+6. Devices apply the new configuration — no reboot required for policy changes
+
+Any out-of-band changes made directly on the FTD CLI will be overwritten the next time a full policy deployment occurs from FMC. The FTD is designed to be managed entirely through FMC; direct CLI modification is supported only for troubleshooting and initial setup.
+
+---
+
+## FXOS Chassis Manager (4100/9300 Series)
+
+The Firepower 4100 and 9300 series use a two-layer architecture:
+
+**Layer 1 — FXOS (Firepower eXtensible Operating System)**: manages the physical chassis — hardware health, interface assignment, security module configuration, inter-blade communication, and software installs.
+
+**Layer 2 — Logical Device (FTD)**: the FTD instance running on top of FXOS. Each chassis can run one or more FTD instances (multi-instance mode on 4100/9300).
+
+The Firepower 9300 is modular: it accepts up to three security module blades (SM-24, SM-36, SM-44, or SM-56). Each blade can host an independent FTD instance, managed separately by FMC.
+
+To configure a 4100/9300:
+1. Access the FXOS chassis manager (FCM) via HTTPS to the chassis management IP, or via the FXOS CLI
+2. Assign physical interfaces to the logical FTD device
+3. Install the FTD logical device on the chassis
+4. Register the FTD logical device to FMC as normal
+
+---
+
+## Security Zones
+
+Security zones are logical groupings of interfaces used as match criteria in Access Control Policy rules, NAT rules, and identity rules. Before writing any ACP rules, the standard practice is to define zones that reflect the security posture of each network segment:
+
+- `outside-zone`: internet-facing interfaces
+- `inside-zone`: internal LAN interfaces
+- `dmz-zone`: demilitarised zone for public-facing servers
+- `vpn-zone`: VPN termination interfaces
+
+An ACP rule that says "allow HTTP from inside-zone to outside-zone" applies to any interface that belongs to either zone, regardless of how many physical interfaces are involved. Zones abstract the policy from interface-level specifics and make it portable across deployments.
+
+---
+
+## Interface Modes
+
+FTD interfaces can operate in several modes depending on how the device is deployed:
+
+| Mode | Description |
+|---|---|
+| **Routed** | Default; FTD acts as a Layer 3 router; interfaces have IP addresses; supports routing protocols |
+| **Transparent** | FTD acts as a Layer 2 bridge; no IP on data interfaces; inserted inline without IP changes to existing network |
+| **Inline** | Traffic physically passes through FTD; Snort can block malicious packets in real time |
+| **Inline Tap** | Copy of traffic sent to FTD; passive detection only; cannot block |
+| **Passive** | SPAN or TAP port; IPS analysis without affecting traffic flow |
+
+Routed mode is the most common deployment for a perimeter firewall. Transparent mode is used when inserting FTD into an existing network without renumbering. Inline and passive modes are more common for IPS-only deployments inside the network.
+
+---
+
+## Management Interface vs Data Interfaces
+
+A frequent source of confusion is the distinction between the FTD management interface and data interfaces:
+
+- **Management interface** (dedicated physical port, labelled `Management0/0` or similar): out-of-band; carries FMC ↔ FTD communication only; never carries user traffic; should be on a dedicated management network
+- **Data interfaces** (`GigabitEthernet0/0`, `GigabitEthernet0/1`, etc.): carry user traffic through the firewall; can optionally be configured to also accept SSH/HTTPS management access (called "on-data-plane management")
+
+Best practice is to keep the management interface on a dedicated management VLAN or network, isolated from user traffic, so that FMC communication is never dependent on the firewall's own data-plane health.
+
+---
+
+## FTD Licence Tiers Recap
+
+| Licence | Enables |
+|---|---|
+| Base | Stateful FW, routing, S2S VPN — included with hardware |
+| Threat | Snort IPS, Security Intelligence feeds |
+| Malware | AMP file inspection and AMP Cloud lookups |
+| URL Filtering | URL category and reputation rules in ACP |
+| RA VPN (AnyConnect Plus or Apex) | Remote access VPN; requires AnyConnect client licence |
+
+All licences above Base require Smart Licensing and are consumed from the CSSM virtual account when assigned to a device via FMC.

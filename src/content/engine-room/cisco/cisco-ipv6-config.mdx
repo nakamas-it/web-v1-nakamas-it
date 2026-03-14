@@ -1,0 +1,287 @@
+---
+title: "Cisco IOS — IPv6 Configuration"
+category: "cisco"
+topic: "ipv6"
+summary: "Configuring IPv6 on Cisco IOS routers and switches — interface addressing, EUI-64, static routes, OSPFv3, and dual-stack operation."
+tags: ["cisco", "ios", "ipv6", "ospfv3", "dual-stack", "routing"]
+order: 7
+draft: false
+---
+
+## Overview
+
+IPv6 was developed to address the exhaustion of IPv4's 32-bit address space. With approximately 4 billion addresses, IPv4 was insufficient for global growth, and by 2011 IANA had exhausted its /8 allocations. IPv6 expands addressing to 128 bits, providing roughly 3.4 × 10^38 unique addresses. On Cisco IOS, IPv6 can run alongside IPv4 in a dual-stack configuration, allowing a gradual migration rather than an abrupt cutover.
+
+This article covers the IOS commands required to configure IPv6 on routers and switches, including interface addressing methods, static routes, OSPFv3, and verification tools.
+
+---
+
+## Enabling IPv6 Routing
+
+Before a Cisco router will forward IPv6 packets on behalf of other hosts, you must issue a single global command. Without it, the router handles IPv6 only for its own stack — it will not route transit traffic.
+
+```
+Router(config)# ipv6 unicast-routing
+```
+
+This command activates the IPv6 forwarding engine and enables the router to participate in IPv6 routing protocols. It is the IPv6 equivalent of the default behaviour of IPv4 routing (which is always on). Forgetting this command is one of the most common causes of IPv6 connectivity failures on IOS.
+
+---
+
+## Interface IPv6 Address Configuration
+
+### Static Global Unicast Address
+
+The most direct method is assigning a full 128-bit address to an interface:
+
+```
+interface GigabitEthernet0/0
+ ipv6 address 2001:DB8:1::1/64
+ no shutdown
+```
+
+The `/64` prefix length is the recommended default for all deployed subnets. When you assign a global unicast address (GUA), IOS also automatically generates a link-local address (LLA) using EUI-64 from the interface MAC address.
+
+### Link-Local Address (Manual)
+
+Every IPv6 interface requires a link-local address in the FE80::/10 range. IOS generates one automatically, but it can be overridden for clarity and to produce a more memorable address:
+
+```
+interface GigabitEthernet0/0
+ ipv6 address FE80::1 link-local
+```
+
+Using a simple, predictable LLA (like FE80::1) is common in lab and production environments because LLAs appear as next-hop addresses in routing tables and are easier to reference when troubleshooting.
+
+### EUI-64 Address Generation
+
+EUI-64 lets the router auto-generate the 64-bit interface ID (IID) portion of an IPv6 address from the interface's MAC address. You provide only the 64-bit prefix:
+
+```
+interface GigabitEthernet0/0
+ ipv6 address 2001:DB8::/64 eui-64
+```
+
+The IOS EUI-64 process works as follows:
+
+1. Take the 48-bit MAC address and split it into two 24-bit halves.
+2. Insert `FFFE` in the middle, creating a 64-bit value.
+3. Invert the 7th bit (Universal/Local bit) of the result.
+
+For example, a MAC of `0200.1111.1111` becomes IID `0000:11FF:FE11:1111`, and the full address would be `2001:DB8::11FF:FE11:1111/64`. EUI-64 is useful when you want consistent addressing tied to hardware identity without manually specifying each interface ID.
+
+### SLAAC (Stateless Address Autoconfiguration)
+
+Interfaces can learn their IPv6 address dynamically from a router's RA (Router Advertisement) message via SLAAC:
+
+```
+interface GigabitEthernet0/0
+ ipv6 address autoconfig
+```
+
+The router listens for RA messages, extracts the on-link prefix, and combines it with a locally generated IID (either EUI-64 or a random privacy extension value). SLAAC is commonly used on client-facing interfaces.
+
+### Link-Local Only (ipv6 enable)
+
+If you want to activate IPv6 on an interface without assigning a routable global address — for instance on a WAN link where only a next-hop relationship is needed — use:
+
+```
+interface GigabitEthernet0/1
+ ipv6 enable
+```
+
+This generates a link-local address only, with no GUA. Routing protocols such as OSPFv3 can use LLAs as next-hops, so a fully-addressed subnet is not required on every link.
+
+---
+
+## Dual-Stack Operation
+
+Dual-stack means both `ip address` and `ipv6 address` are configured on the same interface simultaneously. The router processes IPv4 and IPv6 packets independently using separate routing tables:
+
+```
+interface GigabitEthernet0/0
+ ip address 192.168.1.1 255.255.255.0
+ ipv6 address 2001:DB8:1::1/64
+ no shutdown
+```
+
+Dual-stack is the standard transition strategy. It requires no tunnelling overhead and allows hosts to use whichever protocol they prefer. Both stacks operate independently, so an issue on one does not affect the other.
+
+---
+
+## Verification Commands
+
+### Interface Status
+
+```
+show ipv6 interface brief
+```
+
+Displays all interfaces with their IPv6 addresses in condensed form. For each interface you see the GUA, the automatically generated or manually configured LLA, and the interface state.
+
+```
+show ipv6 interface GigabitEthernet0/0
+```
+
+Provides detailed output including all unicast and multicast addresses assigned to the interface, including solicited-node multicast addresses used by NDP.
+
+### Routing Table
+
+```
+show ipv6 route
+show ipv6 route connected
+show ipv6 route static
+```
+
+The IPv6 routing table is separate from the IPv4 table. Route codes include:
+- `C` — Connected
+- `L` — Local (/128 host route for each interface address)
+- `S` — Static
+- `O` — OSPFv3 intra-area
+- `OI` — OSPFv3 inter-area
+- `ND` — NDP-derived default route
+
+### NDP Neighbor Table
+
+NDP (Neighbor Discovery Protocol) replaces ARP for IPv6. The neighbor table stores IPv6-to-MAC mappings:
+
+```
+show ipv6 neighbors
+```
+
+This is the IPv6 equivalent of `show arp`. Entries move through states: INCOMPLETE → REACHABLE → STALE → DELAY → PROBE.
+
+---
+
+## Static IPv6 Routes
+
+IPv6 static routes follow the same logic as IPv4 but use the `ipv6 route` command and support link-local next-hops (which require specifying an outgoing interface because LLAs are not globally unique).
+
+### Network Route
+
+```
+ipv6 route 2001:DB8:2::/64 GigabitEthernet0/1 FE80::2
+```
+
+Using a link-local address as the next-hop is the recommended practice on Ethernet links. The outgoing interface must be specified alongside the LLA.
+
+### GUA Next-Hop (without interface)
+
+```
+ipv6 route 2001:DB8:3::/64 2001:DB8:1::2
+```
+
+If the next-hop is a GUA, the interface is determined by recursive lookup and does not need to be specified explicitly.
+
+### Default Route
+
+```
+ipv6 route ::/0 GigabitEthernet0/1 FE80::1
+```
+
+The IPv6 default route uses `::/0` (all zeros, prefix length zero). Unlike IPv4, IOS does not display a "Gateway of Last Resort" line — only the `::/0` entry appears in the routing table.
+
+### Host Route (/128)
+
+```
+ipv6 route 2001:DB8:1::100/128 GigabitEthernet0/0 FE80::2
+```
+
+A /128 host route targets a specific device and has the highest specificity in longest-prefix matching.
+
+### Floating Static Route (Backup)
+
+```
+ipv6 route 2001:DB8:2::/64 cellular0/1 130
+```
+
+Setting an administrative distance higher than the primary protocol (OSPFv3 uses 110) creates a backup route that enters the routing table only when the preferred route is gone.
+
+---
+
+## OSPFv3 Configuration
+
+OSPFv3 is the IPv6-capable version of OSPF (RFC 5340). On IOS, OSPFv3 is configured primarily at the interface level rather than through a `network` statement.
+
+### Global Process Configuration
+
+```
+ipv6 router ospf 1
+ router-id 1.1.1.1
+```
+
+A router ID must be explicitly configured for OSPFv3 because there may be no IPv4 addresses on the router. The RID is still a 32-bit dotted-decimal value used only as an identifier — it does not need to match any actual address.
+
+### Interface Activation
+
+```
+interface GigabitEthernet0/0
+ ipv6 ospf 1 area 0
+```
+
+This single interface command enrolls the interface in OSPFv3 process 1, area 0. Unlike OSPFv2, there is no `network` command under the process. Each interface is enabled individually, giving precise control.
+
+### Passive Interface
+
+```
+ipv6 router ospf 1
+ passive-interface GigabitEthernet0/2
+```
+
+A passive interface advertises its connected prefix into OSPF but does not send or receive Hello messages. Use this on LAN interfaces facing end hosts to prevent unnecessary adjacency attempts.
+
+### Default Route Origination
+
+```
+ipv6 router ospf 1
+ default-information originate always
+```
+
+Advertises `::/0` into OSPFv3. The `always` keyword causes advertisement even if the router has no default route itself — useful on edge routers where the upstream default is known to exist.
+
+### OSPFv3 Verification
+
+```
+show ipv6 ospf neighbor
+show ipv6 ospf interface brief
+show ipv6 ospf database
+show ipv6 route ospf
+```
+
+The `show ipv6 ospf neighbor` output shows neighbor RIDs, states (Full/DR, Full/BDR, 2WAY/DROTHER), and interface. The neighbour must reach Full state for route exchange to complete.
+
+---
+
+## OSPFv3 vs OSPFv2 Key Differences
+
+| Feature | OSPFv2 | OSPFv3 |
+|---------|--------|--------|
+| Address family | IPv4 only | IPv6 (also supports IPv4 in newer implementations) |
+| Network command | Used to activate interfaces | Not used; activation is per-interface |
+| Router ID | Can derive from interface IPs | Must be explicitly configured (no IPv4 addresses may exist) |
+| Next-hop addresses | GUA or interface IP | Link-local addresses |
+| Authentication | Under router process | Uses IPsec AH/ESP |
+| Multicast addresses | 224.0.0.5 / 224.0.0.6 | FF02::5 / FF02::6 |
+
+---
+
+## Common Troubleshooting Steps
+
+When IPv6 connectivity fails, work through these checks in order:
+
+1. Confirm `ipv6 unicast-routing` is configured globally.
+2. Verify interface IPv6 addresses with `show ipv6 interface brief` — check both GUA and LLA are present.
+3. Check the routing table with `show ipv6 route` — confirm the expected prefixes appear.
+4. Use `show ipv6 neighbors` to confirm NDP is resolving MAC addresses on local segments.
+5. For OSPFv3 issues, verify `show ipv6 ospf neighbor` shows Full adjacency and that router IDs are unique.
+6. For static route issues, remember that LLA next-hops require the outgoing interface to be specified; a bare LLA without an interface is rejected by IOS.
+
+---
+
+## References
+
+- RFC 8200 — Internet Protocol Version 6 Specification
+- RFC 4861 — Neighbor Discovery for IP version 6
+- RFC 4862 — IPv6 Stateless Address Autoconfiguration
+- RFC 5340 — OSPF for IPv6
+- CCNA 200-301 Official Cert Guide Vol. 1 (Odom) — Chapters 25–29
