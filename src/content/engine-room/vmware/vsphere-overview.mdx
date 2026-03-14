@@ -33,7 +33,7 @@ vCenter Server is the centralised management plane that changes this picture. It
 
 ESXi licensing is **per CPU socket**, not per server or per core. Each physical CPU socket on a host requires one ESXi licence. Starting with vSphere 7.0, a socket with more than 32 cores consumes an additional licence — a two-socket host with 48-core CPUs uses two sockets but each CPU exceeds 32 cores, so it requires four licence units in total.
 
-Two main ESXi editions exist for the exam:
+Two main ESXi editions exist:
 
 | Feature | Standard | Enterprise Plus |
 |---|---|---|
@@ -56,7 +56,7 @@ The legacy Flash-based vSphere Web Client was deprecated and removed in vSphere 
 
 ## Optional and Add-On Components
 
-Several components extend the core vSphere platform and appear on the exam at varying depths:
+Several components extend the core vSphere platform:
 
 | Component | Purpose |
 |---|---|
@@ -68,7 +68,7 @@ Several components extend the core vSphere platform and appear on the exam at va
 | **VMware Aria Automation** | Self-service IT provisioning and infrastructure automation |
 | **NSX** | Software-defined networking and micro-segmentation |
 
-vSAN is the add-on most heavily tested on the VCP-DCV exam — it integrates deeply with SPBM storage policies and vSphere cluster features. The others — NSX, SRM, Aria — are tested conceptually rather than in operational depth.
+vSAN integrates most deeply with SPBM storage policies and vSphere cluster features. The others — NSX, SRM, Aria — are used at a higher conceptual level rather than in operational depth.
 
 ## Summary
 

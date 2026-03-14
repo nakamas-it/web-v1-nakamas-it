@@ -1,0 +1,166 @@
+---
+title: "WPA2 & WPA3 — Wireless Security Protocols"
+layer: "layer2"
+protocol: "wpa2-wpa3"
+summary: "How WPA2's 4-way handshake and WPA3's SAE replace shared secrets with per-session encryption keys."
+tags: ["wpa2", "wpa3", "eap", "802.1x", "4-way-handshake", "sae", "wifi-security", "layer2"]
+order: 10
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+The 802.11 association process authenticates at Layer 2 using **Open System Authentication** — it always succeeds. Real security is layered on top by WPA2 or WPA3, which solve two separate problems:
+
+1. **Authentication** — proving the client knows the passphrase or has valid credentials
+2. **Key derivation** — establishing unique per-session encryption keys so traffic is unreadable to other stations
+
+WEP (1997) was cryptographically broken. WPA (2003) was a stopgap. **WPA2** (802.11i, 2004) introduced AES-CCMP and remains the baseline. **WPA3** (2018) closed the remaining offline-attack vulnerabilities.
+
+## WPA2 — Two Modes
+
+### Personal (PSK)
+
+A pre-shared passphrase is the only credential. Both client and AP know it before connection. No RADIUS server needed. Authentication and key derivation happen entirely via the **4-way handshake**.
+
+### Enterprise (802.1X / EAP)
+
+No shared secret on the client. A RADIUS server authenticates the client using EAP (Extensible Authentication Protocol). The AP acts as an **authenticator** — it passes EAP frames between the client (supplicant) and RADIUS, blocking all data traffic until auth succeeds.
+
+<FlowDiagram
+  parties={["Client (Supplicant)", "AP (Authenticator)", "RADIUS Server"]}
+  steps={[
+    { from: "AP (Authenticator)", to: "Client (Supplicant)", label: "EAP-Request/Identity", sub: "AP blocks data port, requests identity" },
+    { from: "Client (Supplicant)", to: "AP (Authenticator)", label: "EAP-Response/Identity (username)", sub: "" },
+    { from: "AP (Authenticator)", to: "RADIUS Server", label: "RADIUS Access-Request (EAP payload)", sub: "AP proxies EAP over RADIUS/UDP" },
+    { from: "RADIUS Server", to: "AP (Authenticator)", label: "RADIUS Access-Challenge", sub: "Server challenges client (PEAP, EAP-TLS, etc.)" },
+    { from: "AP (Authenticator)", to: "Client (Supplicant)", label: "EAP-Request (challenge)", sub: "" },
+    { from: "Client (Supplicant)", to: "AP (Authenticator)", label: "EAP-Response (credential / certificate)", sub: "" },
+    { from: "RADIUS Server", to: "AP (Authenticator)", label: "RADIUS Access-Accept + MSK", sub: "Auth success — Master Session Key delivered to AP" },
+    { from: "AP (Authenticator)", to: "Client (Supplicant)", label: "EAP-Success", sub: "4-way handshake begins next" },
+  ]}
+/>
+
+The **MSK** (Master Session Key) delivered by RADIUS becomes the **PMK** (Pairwise Master Key) used in the 4-way handshake. In PSK mode, PMK is derived directly from the passphrase: `PMK = PBKDF2-HMAC-SHA1(passphrase, SSID, 4096 iterations, 256 bits)`.
+
+## The 4-Way Handshake
+
+After the PMK is established, both sides derive session keys without ever transmitting the PMK. All four messages are **EAPOL** (EAP over LAN) frames sent as 802.11 data frames.
+
+<FlowDiagram
+  parties={["Client (Supplicant)", "Access Point (Authenticator)"]}
+  steps={[
+    { from: "Access Point (Authenticator)", to: "Client (Supplicant)", label: "Msg 1: EAPOL-Key (ANonce)", sub: "AP's random nonce — no encryption yet" },
+    { from: "Client (Supplicant)", to: "Access Point (Authenticator)", label: "Msg 2: EAPOL-Key (SNonce + MIC)", sub: "Client derives PTK, sends nonce + MIC proving PMK knowledge" },
+    { from: "Access Point (Authenticator)", to: "Client (Supplicant)", label: "Msg 3: EAPOL-Key (GTK encrypted + MIC + Install)", sub: "AP verifies Msg 2 MIC, sends group key encrypted with KEK" },
+    { from: "Client (Supplicant)", to: "Access Point (Authenticator)", label: "Msg 4: EAPOL-Key (ACK)", sub: "Client confirms — both sides install keys and start encrypting" },
+  ]}
+/>
+
+### Key Hierarchy
+
+```
+PMK (256 bits)  +  ANonce  +  SNonce  +  AP MAC  +  Client MAC
+       ↓  PRF-512
+PTK — Pairwise Transient Key (512 bits total)
+  ├─ KCK (128b) — Key Confirmation Key — generates MIC in msgs 2 & 3
+  ├─ KEK (128b) — Key Encryption Key — encrypts GTK in msg 3
+  └─ TK  (128b) — Temporal Key — AES-CCMP data encryption
+```
+
+The **GTK** (Group Temporal Key) encrypts broadcast and multicast traffic, shared by all clients in the BSS. It is rotated when a client deassociates and periodically on a timer.
+
+## WPA2 Encryption — AES-CCMP
+
+WPA2 mandatory cipher: **AES-CCMP** (Counter Mode with CBC-MAC Protocol, RFC 3610).
+
+- **AES-CTR mode** provides confidentiality — encrypts the payload
+- **CBC-MAC** provides integrity — 8-byte MIC covering both the header and payload
+- 128-bit Temporal Key, 48-bit Packet Number (PN) as IV — prevents replay attacks
+
+<PacketDiagram
+  label="802.11 CCMP Data Frame"
+  fields={[
+    { name: "802.11 MAC Header", bytes: 4 },
+    { name: "CCMP Header: PN0-PN1 / Rsvd / KeyID / PN2-PN5 (8B)", bytes: 4, highlight: true },
+    { name: "Encrypted Payload", bytes: 6 },
+    { name: "MIC (8B)", bytes: 2, highlight: true },
+    { name: "FCS (4B)", bytes: 2 },
+  ]}
+/>
+
+The CCMP header's Packet Number (PN) increments with every frame. A receiver that sees a PN lower than or equal to the last seen PN discards the frame as a replay.
+
+## WPA3 — What Changed
+
+### SAE — Simultaneous Authentication of Equals
+
+WPA3-Personal replaces PSK with **SAE** (Dragonfly handshake, RFC 7664). The key difference: both sides prove knowledge of the password through a zero-knowledge proof — neither side transmits the password or anything derived from it that could be brute-forced offline.
+
+<FlowDiagram
+  parties={["Client", "Access Point"]}
+  steps={[
+    { from: "Client", to: "Access Point", label: "SAE Commit (scalar + element)", sub: "Both derive an elliptic curve point from password + MAC addresses" },
+    { from: "Access Point", to: "Client", label: "SAE Commit (scalar + element)", sub: "Simultaneous exchange — neither reveals the password" },
+    { from: "Client", to: "Access Point", label: "SAE Confirm (MIC over token)", sub: "Proves knowledge of shared secret" },
+    { from: "Access Point", to: "Client", label: "SAE Confirm (MIC)", sub: "Mutual authentication complete — PMK derived" },
+    { from: "Client", to: "Access Point", label: "4-Way Handshake (PTK/GTK derivation)", sub: "Same as WPA2 from this point" },
+  ]}
+/>
+
+In WPA2-PSK, PMK is directly derived from the passphrase — any captured 4-way handshake can be brute-forced offline (PMKID attack, dictionary attacks). SAE derives a unique PMK per session via a Diffie-Hellman style exchange, so a captured handshake provides no offline attack surface even if the passphrase is later compromised — this is **forward secrecy**.
+
+### OWE — Opportunistic Wireless Encryption
+
+WPA3 adds **OWE** for open networks (captive portals, guest Wi-Fi). No password, but a Diffie-Hellman exchange during association establishes a unique encryption key per client. Protects against passive eavesdropping without any user configuration.
+
+### WPA3-Enterprise
+
+Requires **AES-192-GCMP** (vs AES-128-CCMP in WPA2) and mandates **EAP-TLS** — certificate-based mutual authentication. The RADIUS server must present a certificate, eliminating the credential-phishing risk of PEAP/MSCHAPv2 deployments. Also mandates **Management Frame Protection** (802.11w, PMF).
+
+## Management Frame Protection (802.11w)
+
+WPA2 management frames (Deauth, Disassoc) are unauthenticated — anyone can forge them to kick clients off the network. This is how deauth-based attacks work. **MFP** (802.11w) adds cryptographic protection to unicast management frames using the PTK, and uses a multicast cipher for broadcast management frames. WPA3 makes MFP mandatory.
+
+## WPA2 vs WPA3
+
+| Feature | WPA2 | WPA3 |
+|---------|------|------|
+| Personal auth | PSK | SAE (Dragonfly) |
+| Forward secrecy | No | Yes |
+| Open network encryption | None | OWE |
+| Minimum cipher | AES-128-CCMP | AES-128-CCMP (personal) / AES-192-GCMP (enterprise) |
+| Offline dictionary attack | Possible | Not possible |
+| Management frame protection | Optional | Mandatory |
+| KRACK / PMKID attack | Vulnerable | Not vulnerable |
+
+## Common Attack Surface (WPA2)
+
+| Attack | Method | Mitigation |
+|--------|--------|-----------|
+| Offline dictionary attack | Capture 4-way handshake, brute-force PMK | Strong passphrase (20+ chars) |
+| PMKID attack | Capture PMKID from Message 1, brute-force without full handshake | Strong passphrase / migrate to WPA3 |
+| KRACK | Force nonce reuse by retransmitting Message 3 | Patched in firmware (2017) |
+| Evil twin + deauth | Forge Deauth, capture reassociation to rogue AP | 802.11w MFP, WPA3 |
+
+## EAP Methods Comparison
+
+| Method | Client auth | Server auth | Inner protocol |
+|--------|-------------|-------------|----------------|
+| EAP-TLS | Certificate | Certificate | TLS — strongest |
+| PEAP/MSCHAPv2 | Password | Certificate | MSCHAPv2 inside TLS tunnel |
+| EAP-TTLS | Password | Certificate | Various inside TLS tunnel |
+| EAP-FAST | PAC token or cert | Certificate | Cisco proprietary |
+
+EAP-TLS is the gold standard — both client and server present certificates. PEAP/MSCHAPv2 is widely deployed but the server certificate is often not validated, enabling credential phishing via rogue RADIUS.
+
+## References
+
+- IEEE 802.11i-2004 — RSN (Robust Security Network) specification
+- RFC 7664 — Dragonfly Key Exchange (SAE)
+- RFC 3610 — AES Counter with CBC-MAC (CCM)
+- Wi-Fi Alliance WPA3 Specification v3.0
+- NIST SP 800-97 — Establishing Wireless Robust Security Networks

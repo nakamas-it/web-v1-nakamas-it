@@ -1,0 +1,145 @@
+---
+title: "VXLAN — Virtual Extensible LAN"
+layer: "layer2"
+protocol: "vxlan"
+summary: "How VXLAN tunnels Layer 2 Ethernet frames over a Layer 3 IP network to build scalable overlay segments."
+tags: ["vxlan", "overlay", "vtep", "tunnel", "layer2", "sdn", "data-center", "evpn"]
+order: 11
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+Traditional VLANs (802.1Q) are limited to 4,094 IDs — inadequate for large multi-tenant data centers where thousands of isolated Layer 2 segments are needed. VLANs also require every switch in the broadcast domain to participate in the same Spanning Tree instance, creating scalability problems across large fabrics.
+
+**VXLAN** (Virtual Extensible LAN, RFC 7348) solves both problems by encapsulating Layer 2 Ethernet frames inside **UDP packets** and tunneling them over an existing Layer 3 IP network (the **underlay**). The virtual Layer 2 network carried inside is the **overlay**. The VXLAN ID space is 24 bits — supporting up to **16,777,216** isolated segments.
+
+## Core Concepts
+
+| Term | Meaning |
+|------|---------|
+| **VNI** | VXLAN Network Identifier — 24-bit segment ID, equivalent to a VLAN ID |
+| **VTEP** | VXLAN Tunnel Endpoint — encapsulates outgoing and decapsulates incoming VXLAN traffic |
+| **Underlay** | The physical IP/routed network connecting all VTEPs |
+| **Overlay** | The virtual Layer 2 segment carried inside VXLAN tunnels |
+| **BUM traffic** | Broadcast, Unknown unicast, Multicast — requires special handling |
+
+VTEPs can be physical switches (top-of-rack hardware), hypervisor vSwitches (VMware, OVS), or router software. In VMware NSX-T and AWS VPC, VTEPs run directly in the hypervisor kernel.
+
+## Encapsulation Format
+
+VXLAN adds four header layers around the original Ethernet frame:
+
+<PacketDiagram
+  label="VXLAN Encapsulated Packet"
+  fields={[
+    { name: "Outer Ethernet Header (14B)", bytes: 3 },
+    { name: "Outer IP Header (20B)", bytes: 4 },
+    { name: "Outer UDP Header — dst port 4789 (8B)", bytes: 2, highlight: true },
+    { name: "VXLAN Header (8B)", bytes: 2, highlight: true },
+    { name: "Inner Ethernet Header (14B)", bytes: 3 },
+    { name: "Inner IP + Payload", bytes: 4 },
+  ]}
+/>
+
+The VXLAN header:
+
+<PacketDiagram
+  label="VXLAN Header (8 bytes)"
+  fields={[
+    { name: "Flags (RRRRIRRR — I bit = VNI valid)", bytes: 1 },
+    { name: "Reserved (24 bits)", bytes: 3 },
+    { name: "VNI (24 bits)", bytes: 3, highlight: true },
+    { name: "Reserved (8 bits)", bytes: 1 },
+  ]}
+/>
+
+The **I flag** must be set to indicate the VNI field is valid. The outer IP headers carry the packet between VTEPs — the underlay sees nothing but IP/UDP traffic and has no awareness of the inner Ethernet frames or VNIs.
+
+Total overhead: **50 bytes** (14 outer Eth + 20 outer IP + 8 UDP + 8 VXLAN). If the underlay MTU is 1500 bytes, inner frames must be ≤ 1450 bytes. For standard 1500-byte inner frames, underlay MTU must be **≥ 1550 bytes**. Most data center fabrics use **jumbo frames (MTU 9000)** to accommodate this without fragmentation.
+
+## Unicast Packet Flow (Known MAC)
+
+<FlowDiagram
+  parties={["VM-A on VTEP-1", "IP Underlay", "VM-B on VTEP-2"]}
+  steps={[
+    { from: "VM-A on VTEP-1", to: "VM-A on VTEP-1", label: "Inner frame: Eth(MAC-A→MAC-B) / IP(10.0.0.1→10.0.0.2)", sub: "VM-A sends a normal Ethernet frame" },
+    { from: "VM-A on VTEP-1", to: "IP Underlay", label: "VXLAN encapsulate: outer IP src=VTEP-1 dst=VTEP-2, VNI=5000", sub: "UDP dst port 4789 — underlay routes this as any IP packet" },
+    { from: "IP Underlay", to: "VM-B on VTEP-2", label: "Packet arrives at VTEP-2", sub: "VTEP-2 strips outer Eth+IP+UDP+VXLAN headers" },
+    { from: "VM-B on VTEP-2", to: "VM-B on VTEP-2", label: "Inner frame delivered to VM-B", sub: "VTEP-2 learns: MAC-A is reachable via VTEP-1" },
+  ]}
+/>
+
+VTEP-2 caches the mapping of MAC-A → VTEP-1 in its local **VTEP MAC table**. Subsequent frames to MAC-A are encapsulated directly to VTEP-1 without any flooding.
+
+## BUM Traffic Handling
+
+When a VTEP receives a frame for an unknown MAC (or broadcast/multicast), it must flood to all VTEPs in the same VNI. Three approaches:
+
+### 1. Multicast-Based Flooding
+
+Each VNI maps to an IP multicast group. VTEPs join the group using PIM in the underlay. BUM traffic is sent to the multicast group address and the underlay replicates it to all group members.
+
+**Requires**: Multicast-capable underlay (PIM, IGMP). Common in campus and some data center deployments.
+
+### 2. Ingress Replication (Unicast Flooding)
+
+The sending VTEP maintains a **flood list** — a list of all remote VTEPs in the VNI — and sends a separate unicast copy of the BUM frame to each. More CPU-intensive but requires no multicast support in the underlay.
+
+**Common in**: Cloud environments (AWS VPC, Azure VNet) where underlay multicast is unavailable.
+
+### 3. BGP EVPN Control Plane (No Flooding)
+
+Modern deployments use **BGP EVPN** (RFC 7432) to distribute MAC/IP reachability before traffic flows. VTEPs advertise their MAC and IP bindings as BGP EVPN routes. Flood-and-learn is eliminated entirely.
+
+<FlowDiagram
+  parties={["VTEP-2", "BGP Route Reflector", "VTEP-1"]}
+  steps={[
+    { from: "VTEP-2", to: "BGP Route Reflector", label: "EVPN Type-2 route: MAC=VM-B, IP=10.0.0.2, VTEP=192.168.1.2, VNI=5000", sub: "VM-B comes online — VTEP-2 advertises immediately" },
+    { from: "BGP Route Reflector", to: "VTEP-1", label: "EVPN Type-2 update distributed", sub: "" },
+    { from: "VTEP-1", to: "VTEP-2", label: "First frame to VM-B → encapsulated directly to VTEP-2", sub: "No ARP flooding — VTEP-1 already knows the destination" },
+  ]}
+/>
+
+BGP EVPN also distributes **ARP suppression** information — VTEPs answer ARP requests locally from their EVPN-learned MAC/IP table, eliminating broadcast ARP from crossing the underlay entirely.
+
+## BGP EVPN Route Types
+
+| Type | Name | Purpose |
+|------|------|---------|
+| Type 1 | Ethernet Auto-Discovery | Multi-homing fast convergence |
+| Type 2 | MAC/IP Advertisement | MAC and IP binding — most common |
+| Type 3 | Inclusive Multicast | BUM traffic handling (flood lists) |
+| Type 4 | Ethernet Segment | Multi-homing designated forwarder election |
+| Type 5 | IP Prefix | Route leaking between VNIs (inter-VRF) |
+
+## Underlay Requirements
+
+The underlay must:
+1. **Route between all VTEPs** — standard IP routing (OSPF, BGP) is sufficient
+2. **Support MTU ≥ 1550** (or use jumbo frames for full 9000-byte inner payloads)
+3. **Hash ECMP flows on the inner packet** — load balancing across multiple paths
+
+ECMP hashing is critical. Older hardware hashed only on outer IP headers, placing all traffic between two VTEPs on one link. Modern hardware and software VTEPs use the UDP source port as an entropy field — the source port is derived from a hash of the inner frame's 5-tuple, ensuring good load balancing across ECMP paths.
+
+## VXLAN in Practice
+
+| Platform | VTEP implementation |
+|----------|-------------------|
+| VMware NSX-T | Hypervisor kernel (N-VDS) |
+| AWS VPC | Nitro hypervisor hardware |
+| Proxmox VE | Linux kernel VXLAN interface (`ip link add vxlan0`) |
+| Cisco Nexus (NX-OS) | Hardware ASIC |
+| Open vSwitch | Software VTEP (OpenFlow-programmable) |
+
+VXLAN with BGP EVPN is the standard for modern spine-leaf data center fabrics and underlies virtually all large-scale cloud virtual networking.
+
+## References
+
+- RFC 7348 — Virtual eXtensible Local Area Network (VXLAN)
+- RFC 7432 — BGP MPLS-Based Ethernet VPN (BGP EVPN)
+- RFC 8365 — A Network Virtualization Overlay Solution Using EVPN
+- RFC 7938 — Use of BGP for Routing in Large-Scale Data Centers

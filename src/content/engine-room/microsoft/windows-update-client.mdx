@@ -3,7 +3,7 @@ title: "Windows Update — Client Servicing, WSUS, and Repair"
 category: "microsoft"
 topic: "windows-update-client"
 summary: "How Windows 10 and 11 receive and apply updates — the servicing model separating quality from feature updates, deferral policies for controlling update timing, WSUS for centralised on-premises update management, and DISM plus SFC for repairing a corrupted Windows component store."
-tags: ["windows", "windows-update", "wsus", "dism", "sfc", "md-100"]
+tags: ["windows", "windows-update", "wsus", "dism", "sfc"]
 order: 89
 draft: false
 ---
@@ -62,7 +62,7 @@ WSUS downloads approved updates from Microsoft and caches them locally. Client m
 
 WSUS listens on HTTP port 8530 and HTTPS port 8531 by default. It requires either SQL Server or the bundled Windows Internal Database. Update content is downloaded during scheduled synchronisation with Microsoft Update and stored on the WSUS server's local disk.
 
-A critical exam point: WSUS-managed clients do not contact Windows Update directly. If a client cannot reach the WSUS server — due to a network failure or misconfigured URL — it receives no updates at all. It will not fall back to Microsoft's CDN.
+An important detail: WSUS-managed clients do not contact Windows Update directly. If a client cannot reach the WSUS server — due to a network failure or misconfigured URL — it receives no updates at all. It will not fall back to Microsoft's CDN.
 
 ---
 
@@ -104,7 +104,7 @@ DISM /Online /Cleanup-Image /RestoreHealth /Source:wim:D:\sources\install.wim:1 
 
 `/LimitAccess` prevents DISM from contacting Windows Update even if it cannot read from the specified source — useful when the WSUS environment should not be bypassed.
 
-The exam trap: running `sfc /scannow` first on a corrupted component store may fail or silently leave files unrepaired, because SFC relies on the CBS store as its reference. Always run DISM RestoreHealth before SFC.
+A common mistake: running `sfc /scannow` first on a corrupted component store may fail or silently leave files unrepaired, because SFC relies on the CBS store as its reference. Always run DISM RestoreHealth before SFC.
 
 ---
 

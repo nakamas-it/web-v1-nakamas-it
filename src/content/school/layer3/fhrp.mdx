@@ -1,0 +1,149 @@
+---
+title: "FHRP — First Hop Redundancy Protocols"
+layer: "layer3"
+protocol: "fhrp"
+summary: "How HSRP, VRRP, and GLBP create a virtual gateway that survives individual router failures."
+tags: ["fhrp", "hsrp", "vrrp", "glbp", "layer3", "redundancy", "gateway"]
+order: 16
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+When a host sends traffic off its subnet it forwards packets to its default gateway — a single IP address configured statically or via DHCP. If that router fails, every host on the subnet loses connectivity regardless of whether other routers are available. First Hop Redundancy Protocols (FHRPs) solve this by making two or more physical routers appear as a single virtual router with one shared IP and one shared MAC address.
+
+The three main FHRPs are:
+
+- **HSRP** (Hot Standby Router Protocol) — Cisco proprietary, Active/Standby model
+- **VRRP** (Virtual Router Redundancy Protocol) — IEEE open standard, nearly identical to HSRP
+- **GLBP** (Gateway Load Balancing Protocol) — Cisco proprietary, adds load balancing across multiple routers simultaneously
+
+All three share the same idea: one virtual IP, one virtual MAC, one router answers ARP at any given moment — but the physical router doing the answering can change without the hosts knowing.
+
+## How HSRP Works
+
+HSRP routers on a shared segment exchange hello messages via UDP multicast to elect an **Active** router (forwards traffic) and a **Standby** router (takes over if Active fails). All other routers in the group sit in **Listen** state.
+
+### HSRP State Machine
+
+| State | Description |
+|-------|-------------|
+| Initial | Interface just came up |
+| Learn | Waiting to hear the virtual IP from the Active router |
+| Listen | Knows the virtual IP but is neither Active nor Standby |
+| Speak | Sending hellos and participating in election |
+| Standby | Backup — monitors Active, ready to take over |
+| Active | Forwarding traffic for the virtual IP |
+
+### Election and Preemption
+
+Priority (0–255, default 100) determines who wins. Highest priority wins; ties go to the highest interface IP. **Preemption is disabled by default** — the current Active router stays Active even if a higher-priority router rejoins. Enable with `standby preempt`.
+
+<FlowDiagram
+  parties={["Router A (Pri 110)", "Router B (Pri 100)", "Hosts"]}
+  steps={[
+    { from: "Router A (Pri 110)", to: "Router B (Pri 100)", label: "HSRP Hello (priority=110, state=Speak)", sub: "UDP 224.0.0.2 port 1985" },
+    { from: "Router B (Pri 100)", to: "Router A (Pri 110)", label: "HSRP Hello (priority=100, state=Speak)", sub: "Lower priority — yields" },
+    { from: "Router A (Pri 110)", to: "Router B (Pri 100)", label: "HSRP Hello (state=Active)", sub: "Router A wins election" },
+    { from: "Router B (Pri 100)", to: "Router A (Pri 110)", label: "HSRP Hello (state=Standby)", sub: "Router B monitors Active" },
+    { from: "Router A (Pri 110)", to: "Hosts", label: "Gratuitous ARP: virtual IP → 0000.0c07.acXX", sub: "Virtual MAC advertised to subnet" },
+  ]}
+/>
+
+### Failover
+
+<FlowDiagram
+  parties={["Router A (Active)", "Router B (Standby)", "Hosts"]}
+  steps={[
+    { from: "Router A (Active)", to: "Router B (Standby)", label: "Hello every 3 s (holdtime 10 s)", sub: "Normal operation" },
+    { from: "Router A (Active)", to: "Router B (Standby)", label: "— silence — (failure)", sub: "Holdtime expires after 3 missed hellos" },
+    { from: "Router B (Standby)", to: "Hosts", label: "Gratuitous ARP: same virtual MAC", sub: "Router B becomes Active — hosts need no ARP refresh" },
+  ]}
+/>
+
+The virtual MAC (`0000.0c07.acXX` for HSRPv1, `0000.0c9f.fXXX` for HSRPv2) stays identical through failover, so hosts with cached ARP entries continue forwarding without interruption.
+
+## HSRP Hello Packet
+
+<PacketDiagram
+  label="HSRP Hello (UDP payload)"
+  fields={[
+    { name: "Version", bytes: 1 },
+    { name: "Op Code (Hello = 1)", bytes: 1 },
+    { name: "State", bytes: 1 },
+    { name: "Hellotime (s)", bytes: 1 },
+    { name: "Holdtime (s)", bytes: 1 },
+    { name: "Priority", bytes: 1, highlight: true },
+    { name: "Group", bytes: 1 },
+    { name: "Reserved", bytes: 1 },
+    { name: "Authentication Data", bytes: 8 },
+    { name: "Virtual IP Address", bytes: 4, highlight: true },
+  ]}
+/>
+
+Sent every **3 seconds** to `224.0.0.2:1985`. A router is declared failed after **10 seconds** (holdtime). Both timers are configurable — sub-second timers (e.g. 200 ms / 700 ms) are supported in HSRPv2 for faster convergence.
+
+## VRRP — The Open Standard
+
+VRRP (RFC 5798) works almost identically to HSRP with different names and defaults:
+
+| Feature | HSRP | VRRP |
+|---------|------|------|
+| Active role | Active | Master |
+| Backup role | Standby | Backup |
+| Group range | 0–255 | VRID 1–255 |
+| Multicast | 224.0.0.2:1985 | 224.0.0.18 (proto 112) |
+| Hello / Hold | 3 s / 10 s | 1 s / 3 s |
+| Virtual MAC | 0000.0c07.acXX | 0000.5e00.01XX |
+| Preemption default | Off | On |
+
+VRRP's key difference: the Master router can use **its own interface IP as the virtual IP** (IP address owner). That router always wins with priority 255.
+
+## GLBP — Load Balancing Across Routers
+
+GLBP extends FHRP by allowing all routers in a group to actively forward traffic simultaneously. One router is elected **AVG** (Active Virtual Gateway) — it answers all ARP requests for the virtual IP but returns a different virtual MAC to each client (round-robin, weighted, or host-dependent). Each router is an **AVF** (Active Virtual Forwarder) for its assigned virtual MAC.
+
+```
+Virtual IP: 10.0.0.1  (one IP, all clients use this)
+GLBP Group:
+  Router A → virtual MAC 0007.b400.0101 (AVG + AVF)
+  Router B → virtual MAC 0007.b400.0102 (AVF)
+  Router C → virtual MAC 0007.b400.0103 (AVF)
+
+Host 1 ARPs → gets MAC of Router A
+Host 2 ARPs → gets MAC of Router B
+Host 3 ARPs → gets MAC of Router C
+```
+
+GLBP hellos go to `224.0.0.102:3222`.
+
+## Interface Tracking
+
+HSRP and VRRP support **object tracking** — if an upstream interface goes down, the local router decrements its priority automatically, triggering failover even while the LAN interface is still up:
+
+```
+! HSRP example — track WAN interface
+track 1 interface GigabitEthernet0/0 line-protocol
+standby 1 track 1 decrement 20
+```
+
+If the tracked object fails, priority drops by 20. If that places it below the Standby's priority and preemption is enabled, failover occurs within the holdtime.
+
+## HSRP vs VRRP vs GLBP
+
+| Feature | HSRP | VRRP | GLBP |
+|---------|------|------|------|
+| Standard | Cisco proprietary | RFC 5798 | Cisco proprietary |
+| Active forwarders | 1 | 1 | All (up to 4) |
+| Load balancing | No | No | Yes |
+| Preemption default | Off | On | Off |
+| Multicast | 224.0.0.2 | 224.0.0.18 | 224.0.0.102 |
+
+## References
+
+- RFC 5798 — Virtual Router Redundancy Protocol (VRRPv3)
+- RFC 2281 — Cisco Hot Standby Router Protocol (informational)
+- Cisco IOS documentation — HSRP and GLBP configuration guide

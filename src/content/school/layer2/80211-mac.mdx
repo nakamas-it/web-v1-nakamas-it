@@ -1,0 +1,178 @@
+---
+title: "802.11 — Wireless LAN MAC Layer"
+layer: "layer2"
+protocol: "80211-mac"
+summary: "How Wi-Fi devices share a half-duplex medium using CSMA/CA, frame types, and the association state machine."
+tags: ["802.11", "wifi", "csma-ca", "layer2", "wireless", "mac", "rts-cts"]
+order: 9
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+The Layer 1 Wireless article covered frequencies, modulation, and signal propagation. This article covers Layer 2: how 802.11 devices take turns on a shared half-duplex RF medium, how a client joins a BSS, and what an 802.11 frame actually contains.
+
+Unlike Ethernet, wireless is inherently **half-duplex** and **broadcast**. Every station on the same channel hears every transmission. Because a transmitting station cannot simultaneously detect collisions from other stations (the hidden terminal problem), 802.11 uses **collision avoidance** rather than collision detection — CSMA/CA instead of CSMA/CD.
+
+## CSMA/CA — Carrier Sense Multiple Access with Collision Avoidance
+
+Before transmitting, a station listens to the medium. If it detects activity, it waits until the medium is idle, then waits an additional **DIFS** (Distributed Interframe Space) period, then starts a random **backoff timer**. The timer counts down only while the medium remains idle. When it reaches zero the station transmits.
+
+<FlowDiagram
+  parties={["Station A", "Medium", "Station B"]}
+  steps={[
+    { from: "Station A", to: "Medium", label: "Sense idle → wait DIFS (34 μs)", sub: "802.11g values" },
+    { from: "Station A", to: "Medium", label: "Backoff: random 0–CW slots", sub: "Initial contention window CW = 0–15 slots" },
+    { from: "Station A", to: "Medium", label: "DATA frame", sub: "Transmits when backoff reaches 0" },
+    { from: "Medium", to: "Station B", label: "DATA received — B defers", sub: "B's backoff pauses while medium is busy" },
+    { from: "Medium", to: "Station A", label: "ACK after SIFS (16 μs)", sub: "Shortest IFS — highest priority" },
+  ]}
+/>
+
+Each successfully received unicast frame is acknowledged with an **ACK** sent after a **SIFS** (Short Interframe Space). If no ACK arrives the sender assumes a collision and retransmits after doubling the contention window (binary exponential backoff).
+
+### Interframe Spaces
+
+| IFS | Duration (802.11g) | Purpose |
+|-----|--------------------|---------|
+| SIFS | 16 μs | ACKs, CTS — highest priority, no backoff |
+| DIFS | 34 μs | Normal data frames |
+| AIFS | Variable | QoS differentiation (802.11e / WMM) |
+| EIFS | Extended | After a frame error — gives time to clear |
+
+### RTS/CTS — Solving the Hidden Terminal Problem
+
+Two stations may be in range of the AP but out of range of each other. Both sense the medium as idle, transmit simultaneously, and collide at the AP. RTS/CTS (Request to Send / Clear to Send) solves this:
+
+<FlowDiagram
+  parties={["Station A", "Access Point", "Station B (hidden)"]}
+  steps={[
+    { from: "Station A", to: "Access Point", label: "RTS (duration = DATA + ACK time)", sub: "Small frame — low collision cost" },
+    { from: "Access Point", to: "Station A", label: "CTS (broadcast, same duration)", sub: "Heard by all stations including B" },
+    { from: "Station B (hidden)", to: "Station B (hidden)", label: "NAV timer set — defers", sub: "B saw CTS duration, knows medium is reserved" },
+    { from: "Station A", to: "Access Point", label: "DATA", sub: "No collision from B" },
+    { from: "Access Point", to: "Station A", label: "ACK", sub: "" },
+  ]}
+/>
+
+The **NAV** (Network Allocation Vector) is a virtual carrier sense timer stations set when they read a duration field in any frame. A station with a non-zero NAV defers without physically sensing the medium.
+
+## 802.11 Frame Types
+
+| Type | Subtypes | Purpose |
+|------|---------|---------|
+| **Management** | Beacon, Probe Req/Resp, Auth, Assoc Req/Resp, Disassoc, Deauth | BSS management — discovery, joining, leaving |
+| **Control** | RTS, CTS, ACK, Block ACK, PS-Poll | Medium access and flow control |
+| **Data** | Data, Null, QoS Data | Actual payload delivery |
+
+## 802.11 MAC Frame Format
+
+<PacketDiagram
+  label="802.11 MAC Frame"
+  fields={[
+    { name: "Frame Control (2B)", bytes: 2, highlight: true },
+    { name: "Duration / ID (2B)", bytes: 2 },
+    { name: "Address 1 — Receiver (6B)", bytes: 6 },
+    { name: "Address 2 — Transmitter (6B)", bytes: 6 },
+    { name: "Address 3 — Dest / BSSID (6B)", bytes: 6, highlight: true },
+    { name: "Sequence Control (2B)", bytes: 2 },
+    { name: "Address 4 — WDS only (6B)", bytes: 6 },
+    { name: "QoS Control — optional (2B)", bytes: 2 },
+    { name: "Frame Body (0–7951 B)", bytes: 8 },
+    { name: "FCS — CRC-32 (4B)", bytes: 4 },
+  ]}
+/>
+
+802.11 uses up to **four address fields** — more than Ethernet's two. Their meaning depends on the **To DS** and **From DS** bits in Frame Control:
+
+| To DS | From DS | Addr 1 | Addr 2 | Addr 3 | Addr 4 |
+|-------|---------|--------|--------|--------|--------|
+| 0 | 0 | Destination | Source | BSSID | — |
+| 0 | 1 | Destination | BSSID | Source | — |
+| 1 | 0 | BSSID | Source | Destination | — |
+| 1 | 1 | Receiver AP | Transmitter AP | Destination | Source |
+
+The 1/1 case applies only in WDS (AP-to-AP wireless backhaul) links.
+
+### Frame Control Field
+
+<PacketDiagram
+  label="Frame Control (2 bytes)"
+  fields={[
+    { name: "Protocol Version (2b)", bytes: 1 },
+    { name: "Type (2b)", bytes: 1 },
+    { name: "Subtype (4b)", bytes: 1, highlight: true },
+    { name: "To DS (1b)", bytes: 1, highlight: true },
+    { name: "From DS (1b)", bytes: 1, highlight: true },
+    { name: "More Frag", bytes: 1 },
+    { name: "Retry", bytes: 1 },
+    { name: "Power Mgmt", bytes: 1 },
+    { name: "More Data", bytes: 1 },
+    { name: "Protected Frame", bytes: 1 },
+    { name: "Order", bytes: 1 },
+  ]}
+/>
+
+Type `00` = Management, `01` = Control, `10` = Data. The **Protected Frame** bit indicates the frame body is encrypted (WPA2/WPA3).
+
+## BSS, SSID, and ESS
+
+| Term | Meaning |
+|------|---------|
+| BSS | Basic Service Set — one AP and its associated clients |
+| BSSID | MAC address of the AP radio — identifies the BSS |
+| SSID | Network name — human-readable string |
+| ESS | Extended Service Set — multiple APs sharing one SSID |
+| IBSS | Independent BSS — ad-hoc, no AP |
+
+Clients roam between APs in an ESS by reassociating to the AP with the strongest signal. The DS (Distribution System) interconnects APs — typically Ethernet or a wireless backhaul.
+
+## Association State Machine
+
+A client must step through three states before passing data frames.
+
+<FlowDiagram
+  parties={["Client (STA)", "Access Point (AP)"]}
+  steps={[
+    { from: "Client (STA)", to: "Access Point (AP)", label: "Probe Request (broadcast or directed)", sub: "Active scanning — client broadcasts to find SSIDs" },
+    { from: "Access Point (AP)", to: "Client (STA)", label: "Probe Response", sub: "AP capabilities, supported rates, SSID, security info" },
+    { from: "Client (STA)", to: "Access Point (AP)", label: "Authentication Request (Open System)", sub: "Always succeeds at L2 — real auth is WPA2/3" },
+    { from: "Access Point (AP)", to: "Client (STA)", label: "Authentication Response (status = 0)", sub: "Client moves to State 2: Authenticated, Unassociated" },
+    { from: "Client (STA)", to: "Access Point (AP)", label: "Association Request (capabilities, SSID, rates)", sub: "" },
+    { from: "Access Point (AP)", to: "Client (STA)", label: "Association Response (AID assigned)", sub: "Client in State 3 — data frames now allowed" },
+  ]}
+/>
+
+| State | Description | Permitted frames |
+|-------|-------------|-----------------|
+| 1 | Unauthenticated, Unassociated | Management only |
+| 2 | Authenticated, Unassociated | Management + Control |
+| 3 | Authenticated, Associated | All frames — data traffic flows |
+
+**Passive scanning**: instead of sending Probe Requests, a client listens for **Beacon** frames sent by APs every 102.4 ms (default). Slower to discover networks, but uses no airtime.
+
+## Beacons
+
+APs broadcast Beacon frames at the **DTIM interval** to announce the BSS. Beacons contain:
+- SSID (or blank for hidden networks)
+- BSSID
+- Supported data rates
+- Security capabilities (RSN Information Element — WPA2/3 parameters)
+- TIM (Traffic Indication Map) — which sleeping clients have buffered frames waiting
+
+## Power Save Mode
+
+Clients indicate **doze** state in their Association Request. The AP buffers frames for sleeping clients and announces which clients have buffered traffic in the **TIM** element of each Beacon. Clients wake at the DTIM interval to receive buffered multicast/broadcast, and send **PS-Poll** frames to retrieve buffered unicast.
+
+## Block ACK
+
+High-throughput amendments (802.11n/ac/ax) use **Block ACK** to acknowledge multiple frames at once. The sender transmits a burst of frames (A-MPDU — aggregated MAC Protocol Data Units), then the receiver sends one Block ACK bitmap confirming which frames arrived. This dramatically reduces the overhead of individual per-frame ACKs at high data rates.
+
+## References
+
+- IEEE 802.11-2020 (consolidated standard)
+- CWNA Certified Wireless Network Administrator Study Guide
+- Cisco Wireless LAN Controller Configuration Guide

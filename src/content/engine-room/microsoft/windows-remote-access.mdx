@@ -3,7 +3,7 @@ title: "Windows Remote Access — RDP, VPN Protocols, and Remote Assistance"
 category: "microsoft"
 topic: "windows-remote-access"
 summary: "How Windows enables remote access — through Remote Desktop Protocol for full graphical sessions, Quick Assist and Remote Assistance for helpdesk support, and the VPN protocols Windows supports natively for secure tunnelled connectivity back to corporate networks."
-tags: ["windows", "rdp", "vpn", "remote-assistance", "md-100"]
+tags: ["windows", "rdp", "vpn", "remote-assistance"]
 order: 85
 draft: false
 ---
@@ -12,7 +12,7 @@ draft: false
 
 Remote access in Windows covers three distinct use cases. **Remote Desktop Protocol** provides a full interactive graphical session to a remote machine, allowing a user or administrator to operate that machine as if sitting in front of it. **Remote Assistance** and its modern replacement **Quick Assist** allow a helper to view and optionally control the screen of a user who is already logged in, used primarily for helpdesk support. **VPN** creates an encrypted tunnel from a Windows client to a corporate gateway, extending the corporate network to the remote device.
 
-Each of these mechanisms operates over different ports, requires different infrastructure, and has different edition requirements in Windows. Understanding which mechanism applies to which scenario and how each is configured is central to both the MD-100 exam and practical Windows administration.
+Each of these mechanisms operates over different ports, requires different infrastructure, and has different edition requirements in Windows. Understanding which mechanism applies to which scenario and how each is configured is central to practical Windows administration.
 
 ---
 
@@ -22,7 +22,7 @@ Each of these mechanisms operates over different ports, requires different infra
 
 ### Edition Requirements
 
-RDP hosting is available on Windows 10 and 11 **Pro, Enterprise, and Education** editions. **Windows Home cannot host an inbound RDP session** — it can only act as a client connecting to another machine. This is a common exam-trap distinction: any machine on Windows Home that needs to be accessed remotely must either be upgraded to Pro or use an alternative tool such as Quick Assist.
+RDP hosting is available on Windows 10 and 11 **Pro, Enterprise, and Education** editions. **Windows Home cannot host an inbound RDP session** — it can only act as a client connecting to another machine. Any machine on Windows Home that needs to be accessed remotely must either be upgraded to Pro or use an alternative tool such as Quick Assist.
 
 ### Enabling RDP
 
@@ -34,7 +34,7 @@ The user account being used for remote connection must be a member of the **Remo
 
 **NLA (Network Level Authentication)** is enabled by default on Windows 10 and 11. With NLA, the user must authenticate — providing credentials — before the full RDP session is established and the Windows logon screen is rendered. This prevents unauthenticated connections from consuming server resources and protects against denial-of-service attacks targeting the RDP logon screen. Without NLA, any machine that can reach TCP 3389 can cause a full session setup before being prompted for credentials.
 
-Older clients that do not support NLA (such as Windows XP without the relevant update) cannot connect to machines that require NLA. This is rarely a concern in modern environments but appears in exam scenarios.
+Older clients that do not support NLA (such as Windows XP without the relevant update) cannot connect to machines that require NLA. This is rarely a concern in modern environments.
 
 ### Remote Desktop Gateway
 

@@ -3,14 +3,14 @@ title: "Windows Networking — IPv4, IPv6, and Network Troubleshooting"
 category: "microsoft"
 topic: "windows-networking"
 summary: "How Windows configures and troubleshoots network connectivity — covering IPv4 addressing including APIPA fallback, IPv6 address types and transition technologies, network profiles, and the command-line tools used to diagnose connectivity issues from name resolution to packet loss."
-tags: ["windows", "networking", "ipv4", "ipv6", "troubleshooting", "md-100"]
+tags: ["windows", "networking", "ipv4", "ipv6", "troubleshooting"]
 order: 83
 draft: false
 ---
 
 ## Overview
 
-Windows networking is built on a layered TCP/IP stack that supports both IPv4 and IPv6 simultaneously. Every Windows 10 and 11 installation runs a dual-stack configuration by default — both protocols are active on every network adapter, and Windows prefers IPv6 when both are available for a given destination. For the MD-100 exam and for day-to-day administration, understanding how Windows acquires and assigns addresses, how it falls back when assignment fails, and how to diagnose the resulting conditions is foundational.
+Windows networking is built on a layered TCP/IP stack that supports both IPv4 and IPv6 simultaneously. Every Windows 10 and 11 installation runs a dual-stack configuration by default — both protocols are active on every network adapter, and Windows prefers IPv6 when both are available for a given destination. For day-to-day administration, understanding how Windows acquires and assigns addresses, how it falls back when assignment fails, and how to diagnose the resulting conditions is foundational.
 
 Network configuration in Windows is managed through Settings > Network and Internet, the legacy Control Panel's Network and Sharing Centre (`ncpa.cpl` for adapters directly), and a set of command-line tools that have remained consistent across Windows versions while gaining PowerShell equivalents.
 
@@ -32,7 +32,7 @@ An **alternate configuration** can be configured on the adapter to use a specifi
 
 ## IPv6 Address Types
 
-IPv6 addresses are 128 bits expressed in eight groups of four hexadecimal digits. Windows configures several types of IPv6 address on each interface simultaneously, and understanding which type serves which purpose is important for both troubleshooting and exam questions.
+IPv6 addresses are 128 bits expressed in eight groups of four hexadecimal digits. Windows configures several types of IPv6 address on each interface simultaneously, and understanding which type serves which purpose is important for troubleshooting.
 
 | Address Type | Range | Purpose |
 |---|---|---|

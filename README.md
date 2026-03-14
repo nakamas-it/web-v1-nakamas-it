@@ -14,13 +14,13 @@ Bio, work experience, interests, and a contact form backed by Formspree. Availab
 ### The School (`/school/`)
 A protocol library covering how networking actually works — from the physics of copper and fiber at Layer 1 up through TCP, RTP, and application-layer signalling. Each article walks through packet structure, protocol mechanics, and real-world behaviour. Articles use custom Astro components (`PacketDiagram`, `FlowDiagram`) to render packet field diagrams and message-sequence charts inline. Includes a live client-side search bar — press `/` to focus.
 
-**Current coverage — 62 articles:**
+**Current coverage — 67 articles:**
 
 | Layer | Articles |
 |-------|----------|
 | Layer 1 — Physical | Copper, Fiber, Wireless, Coaxial, Signaling & Encoding, Ethernet Standards, Cables & Connectors |
-| Layer 2 — Data Link | Ethernet Frame, MAC Addressing, ARP, VLANs, STP, EtherChannel, CDP & LLDP, PPP |
-| Layer 3 — Network | IPv4, DHCP, Subnetting, DNS, ICMP, Static Routing, RIP, OSPF, BGP, NAT/PAT, IGMP, EIGRP, IPv6 Fundamentals, IPv6 Addressing, IPv6 Routing |
+| Layer 2 — Data Link | Ethernet Frame, MAC Addressing, ARP, VLANs, STP, EtherChannel, CDP & LLDP, PPP, 802.11 MAC, WPA2/WPA3, VXLAN |
+| Layer 3 — Network | IPv4, DHCP, Subnetting, DNS, ICMP, Static Routing, RIP, OSPF, BGP, NAT/PAT, IGMP, EIGRP, IPv6 Fundamentals, IPv6 Addressing, IPv6 Routing, FHRP, DSCP/DiffServ |
 | Layer 4 — Transport | TCP, UDP, TCP vs UDP, Ports & Sockets, RTP |
 | Application Layer | HTTP/HTTPS, TLS/SSL, FTP/SFTP/FTPS, SSH, SMTP, IMAP/POP3, SNMP, NTP, LDAP, RADIUS, Syslog, Telnet, TACACS+, Kerberos, NetBIOS, RTSP, iSCSI, rsync, MySQL, iperf, SIP, SMB, MSSQL, VPN, SSL VPN, IPsec VPN, DMVPN |
 

@@ -1,0 +1,166 @@
+---
+title: "DSCP & DiffServ — IP Quality of Service"
+layer: "layer3"
+protocol: "dscp-diffserv"
+summary: "How the IP header's DS field classifies and prioritises traffic hop-by-hop across routed networks."
+tags: ["dscp", "diffserv", "qos", "tos", "layer3", "ecn", "802.1p", "cos"]
+order: 17
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+import PacketDiagram from '../../../components/PacketDiagram.astro';
+
+## Overview
+
+All IP packets are not equal. A VoIP RTP packet is useless if it arrives 300 ms late. A bulk file transfer can wait. **Quality of Service (QoS)** gives network devices the tools to make those trade-offs — classifying traffic and applying different forwarding treatment based on importance.
+
+**DiffServ** (Differentiated Services, RFC 2474) is the dominant QoS framework in IP networks. It marks packets at the ingress edge of a network and trusts downstream devices to honour those markings, providing **per-hop behaviour** (PHB) at each router without per-flow state in the network core. The marking field lives in the IP header itself.
+
+## The DS Field
+
+The original IPv4 header included a **Type of Service (ToS)** byte (RFC 791). DiffServ repurposed it as the **DS field**:
+
+<PacketDiagram
+  label="DS Field (1 byte — formerly IPv4 ToS)"
+  fields={[
+    { name: "DSCP — 6 bits (64 possible values)", bytes: 3, highlight: true },
+    { name: "ECN — 2 bits", bytes: 1 },
+  ]}
+/>
+
+<PacketDiagram
+  label="IPv4 Header (DS field highlighted)"
+  fields={[
+    { name: "Version + IHL (1B)", bytes: 1 },
+    { name: "DS Field: DSCP + ECN (1B)", bytes: 1, highlight: true },
+    { name: "Total Length (2B)", bytes: 2 },
+    { name: "Identification (2B)", bytes: 2 },
+    { name: "Flags + Fragment Offset (2B)", bytes: 2 },
+    { name: "TTL (1B)", bytes: 1 },
+    { name: "Protocol (1B)", bytes: 1 },
+    { name: "Header Checksum (2B)", bytes: 2 },
+    { name: "Source IP (4B)", bytes: 4 },
+    { name: "Destination IP (4B)", bytes: 4 },
+  ]}
+/>
+
+IPv6 uses the equivalent **Traffic Class** byte (same 6-bit DSCP + 2-bit ECN layout).
+
+## Per-Hop Behaviours (PHBs)
+
+A PHB defines the forwarding treatment a router applies to packets carrying a given DSCP value. RFC 4594 defines the standard PHBs used in practice.
+
+### Default PHB — Best Effort (DSCP 0)
+
+No special treatment. Baseline for all unclassified traffic. Dropped first under congestion. Binary: `000000`.
+
+### Expedited Forwarding — EF (DSCP 46)
+
+**Low latency, low jitter, low loss** — the premium PHB. Routers must service the EF queue before all others (strict priority queuing). Designed for VoIP RTP, video conferencing, and any real-time stream where delay matters more than bandwidth.
+
+EF traffic must be **policed at ingress** — if it exceeds its committed rate it is dropped (not buffered) to prevent EF queue buildup that would defeat its low-latency purpose. Binary: `101110`.
+
+### Assured Forwarding — AF (DSCP classes)
+
+Four **AF classes** (AF1x–AF4x) each with three **drop precedences** (1 = low, 2 = medium, 3 = high). Under congestion, **WRED** (Weighted Random Early Detection) drops packets with higher drop precedence first within each class, incentivising senders to use lower drop-precedence markings.
+
+| Class | Low Drop | Medium Drop | High Drop | Typical use |
+|-------|----------|-------------|-----------|-------------|
+| AF41 | 34 | 36 | 38 | Interactive video |
+| AF31 | 26 | 28 | 30 | Call signalling / SIP |
+| AF21 | 18 | 20 | 22 | Transactional data |
+| AF11 | 10 | 12 | 14 | Bulk data / backups |
+
+DSCP formula: AF*xy* = 8x + 2y (x = class 1–4, y = drop precedence 1–3).
+
+### Class Selector — CS (DSCP backward-compatible values)
+
+CS0–CS7 preserve backward compatibility with the old 3-bit IP Precedence field. CS DSCP values are `xxx000` in binary. CS6 is used for routing protocol traffic (OSPF, BGP). CS7 is reserved for network control.
+
+## Complete DSCP Reference
+
+| Name | Decimal | Binary | Use |
+|------|---------|--------|-----|
+| CS0 / BE | 0 | 000000 | Best effort |
+| AF11 | 10 | 001010 | Bulk — low drop |
+| AF12 | 12 | 001100 | Bulk — med drop |
+| AF13 | 14 | 001110 | Bulk — high drop |
+| AF21 | 18 | 010010 | Transactional |
+| AF31 | 26 | 011010 | Signalling |
+| AF41 | 34 | 100010 | Interactive video |
+| EF | 46 | 101110 | VoIP / real-time |
+| CS6 | 48 | 110000 | Routing protocols |
+| CS7 | 56 | 111000 | Reserved |
+
+## End-to-End Flow — Trust Boundary and Remarking
+
+<FlowDiagram
+  parties={["IP Phone", "Access Switch", "WAN Edge Router", "Core / SP"]}
+  steps={[
+    { from: "IP Phone", to: "Access Switch", label: "RTP packets marked EF (DSCP 46)", sub: "Phone self-marks — access switch trusts phone DSCP" },
+    { from: "Access Switch", to: "WAN Edge Router", label: "PC traffic remarked CS0 at trust boundary", sub: "Users cannot self-elevate to EF — switch overwrites" },
+    { from: "WAN Edge Router", to: "Core / SP", label: "EF → LLQ (Low Latency Queue, strict priority)", sub: "DSCP honoured hop by hop — no per-flow state needed" },
+    { from: "Core / SP", to: "Core / SP", label: "AF13 dropped before AF11 under congestion (WRED)", sub: "Drop precedence enforced within each AF class" },
+  ]}
+/>
+
+The **trust boundary** is the point where incoming DSCP markings start being trusted. Managed IP phones and access points are typically trusted. Traffic from user PCs is remarked (or zeroed) at the access layer — otherwise any user could mark their traffic EF.
+
+## ECN — Explicit Congestion Notification
+
+The 2 ECN bits allow routers to signal congestion without dropping packets (RFC 3168):
+
+| ECN bits | Meaning |
+|----------|---------|
+| `00` | Not ECN-capable |
+| `01` or `10` | ECN-capable transport (ECT) |
+| `11` | Congestion Experienced (CE) — router sets this under congestion |
+
+When a CE-marked packet reaches the receiver, the TCP receiver echoes congestion via the **ECE** flag. The sender sees it in the **CWR** acknowledgement and reduces its sending rate — same effect as a packet drop, without actually dropping anything. ECN requires both endpoints and every router in the path to support it.
+
+## Layer 2 Equivalent — 802.1p CoS
+
+Inside an 802.1Q VLAN tag, 3 bits are the **PCP** (Priority Code Point), also called **CoS** (Class of Service) or 802.1p:
+
+<PacketDiagram
+  label="802.1Q VLAN Tag (4 bytes)"
+  fields={[
+    { name: "TPID — 0x8100 (2B)", bytes: 2 },
+    { name: "PCP / CoS (3 bits)", bytes: 1, highlight: true },
+    { name: "DEI (1 bit)", bytes: 1 },
+    { name: "VLAN ID (12 bits)", bytes: 1 },
+  ]}
+/>
+
+| CoS | Typical use |
+|-----|-------------|
+| 7 | Network control |
+| 6 | Voice |
+| 5 | Video |
+| 4 | Controlled load |
+| 3 | Excellent effort |
+| 0 | Best effort |
+
+When a packet crosses a Layer 2 / Layer 3 boundary, QoS policy **remaps** CoS ↔ DSCP. Common mapping: CoS 5 → DSCP EF (46) for VoIP voice.
+
+## DSCP and QoS Queuing
+
+DSCP alone is a marking — it means nothing without a router that acts on it. Queuing mechanisms that consume DSCP markings:
+
+| Mechanism | Behaviour |
+|-----------|-----------|
+| **LLQ** (Low Latency Queue) | Strict priority queue for EF — services before all other queues |
+| **CBWFQ** (Class-Based Weighted Fair Queuing) | Bandwidth guarantees per DSCP class |
+| **WRED** (Weighted Random Early Detection) | Probabilistic drops — drops AF high-drop before low-drop under congestion |
+| **Shaping / Policing** | Rate-limits traffic — shaping buffers excess, policing drops it |
+
+A typical voice/video policy stack: LLQ for EF → CBWFQ for AF41/AF31 → WRED for AF11-21 → BE for CS0.
+
+## References
+
+- RFC 2474 — Definition of the Differentiated Services Field in IPv4/IPv6 Headers
+- RFC 2597 — Assured Forwarding PHB Group
+- RFC 3246 — An Expedited Forwarding PHB
+- RFC 3168 — The Addition of Explicit Congestion Notification (ECN) to IP
+- RFC 4594 — Configuration Guidelines for DiffServ Service Classes
