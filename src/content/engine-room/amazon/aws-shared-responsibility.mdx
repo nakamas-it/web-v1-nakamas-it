@@ -1,0 +1,243 @@
+---
+title: "AWS Shared Responsibility Model"
+category: "amazon"
+topic: "aws-shared-responsibility"
+summary: "The dividing line between what AWS secures and what you secure — and how that line shifts by service type."
+tags: ["aws", "shared-responsibility", "security", "compliance"]
+order: 3
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+The shared responsibility model is the foundational framework for thinking about security in AWS. It defines, clearly and contractually, which security controls belong to AWS and which belong to the customer. Misunderstanding this boundary is one of the most common causes of cloud security incidents — not because AWS failed to protect its infrastructure, but because customers assumed AWS was protecting something that was explicitly the customer's responsibility.
+
+The model has one core principle: **AWS is responsible for security OF the cloud; you are responsible for security IN the cloud.**
+
+---
+
+## AWS's Responsibilities — Security OF the Cloud
+
+AWS is responsible for protecting the infrastructure that runs all AWS services. This encompasses every layer below the service API — hardware, facilities, global network, and the hypervisor.
+
+### Physical Security
+
+AWS designs, builds, and operates its own data centers. Physical security controls include:
+- Unmarked facility exteriors with no public signage indicating an AWS presence
+- Multi-factor physical access requiring badge + biometric at perimeter and interior checkpoints
+- Continuous 24/7 video surveillance
+- Visitor escort requirements with permanent-employee accompaniment
+- Shredding and degaussing procedures for decommissioned hardware that exceed NIST 800-88 requirements
+
+Third parties conduct physical security audits and the results are included in AWS SOC 2 Type II reports, which customers can access via AWS Artifact.
+
+### Hardware and Global Network
+
+AWS is responsible for the servers, switches, routers, and fiber infrastructure that comprise the AWS global network and regional infrastructure. This includes:
+- Procurement and lifecycle management of all hardware
+- Firmware and microcode updates on physical hosts
+- Decommissioning and destruction of failed hardware
+- Capacity management across regions and AZs
+
+### Hypervisor
+
+For services that use virtualization (EC2, ECS, and underlying infrastructure for managed services), AWS is responsible for the hypervisor. This includes the Nitro System — AWS's custom hypervisor built on dedicated hardware with a minimal attack surface. Customers cannot access or modify the hypervisor.
+
+Nitro moves hypervisor functions to dedicated hardware rather than running them as software on the same CPU as VM workloads. This reduces the attack surface and removes the hypervisor from the data path, meaning customer workloads achieve near-bare-metal performance while remaining isolated.
+
+### Managed Service Internal Security
+
+For managed services (RDS, DynamoDB, Lambda, S3, EKS), AWS is responsible for the underlying infrastructure — the OS, the runtime, the database engine software, patching, availability infrastructure, and internal network security. Customers never see this layer.
+
+---
+
+## Customer Responsibilities — Security IN the Cloud
+
+Everything that runs on top of the infrastructure is the customer's responsibility. The exact boundary varies by service type (covered in the next section), but customer responsibilities universally include:
+
+### Data Classification and Protection
+
+You decide what data goes into AWS, how sensitive it is, and what protections it requires. AWS provides the tools — encryption, access controls, replication — but does not classify your data or make data governance decisions for you.
+
+Key data responsibilities:
+- **Encryption at rest**: Choosing whether to encrypt, which key management model (AWS managed keys, customer managed keys in KMS, customer-provided keys), and applying encryption consistently
+- **Encryption in transit**: Enforcing TLS, configuring HTTPS-only bucket policies, using AWS Certificate Manager for certificates
+- **Data retention and deletion**: Configuring S3 lifecycle rules, RDS automated backup retention, ensuring data is properly destroyed when no longer needed
+
+### Identity and Access Management
+
+IAM is entirely the customer's domain. AWS provides IAM as a service, but the configuration — who gets what access, how permissions are structured, whether least privilege is actually enforced — is the customer's responsibility. Common failures here:
+
+- Overly permissive IAM policies (e.g., `s3:*` on `*`)
+- No MFA on privileged accounts
+- Unused access keys for departed employees still active
+- EC2 instance profiles with more permissions than the application needs
+
+### Network Configuration
+
+VPCs, subnets, security groups, and network ACLs are customer-configured. AWS provides the network fabric; you configure the logical network.
+
+- **Security groups**: Stateful firewall at the instance level. If you open port 22 to `0.0.0.0/0`, that is your configuration and your exposure.
+- **Network ACLs**: Stateless firewall at the subnet level. Optional additional control.
+- **VPC design**: Public vs private subnets, NAT Gateway placement, VPC peering topology, Transit Gateway configuration — all customer decisions.
+- **VPN and Direct Connect**: Customer configures and manages the customer-side equipment.
+
+### Operating System and Application Security (EC2)
+
+For EC2 and any service where you manage the OS, you are responsible for:
+- **Patching**: Applying OS updates and security patches. AWS does not patch the OS running inside your EC2 instance.
+- **Endpoint protection**: Installing and maintaining antivirus, endpoint detection and response agents.
+- **Hardening**: Disabling unused services, removing default accounts, applying CIS benchmarks or your organization's hardening standards.
+- **Application security**: Vulnerabilities in your application code are your responsibility. AWS WAF can help block common exploits but is not a substitute for secure application development.
+
+---
+
+## How Responsibility Shifts by Service Type
+
+The shared responsibility line is not fixed — it moves depending on how much management AWS takes on for a given service.
+
+<FlowDiagram
+  parties={["Customer Layer", "AWS Layer"]}
+  steps={[
+    { from: "Customer Layer", to: "AWS Layer", label: "EC2 (IaaS): Customer manages OS, runtime, middleware, application, data", sub: "AWS manages: hypervisor, hardware, facilities, network" },
+    { from: "Customer Layer", to: "AWS Layer", label: "RDS (PaaS): Customer manages schema, data, users, DB parameters", sub: "AWS manages: OS patches, DB engine upgrades, storage, replication" },
+    { from: "Customer Layer", to: "AWS Layer", label: "Lambda (Serverless): Customer manages code, dependencies, IAM, data", sub: "AWS manages: runtime, OS, scaling, availability, patching" },
+    { from: "Customer Layer", to: "AWS Layer", label: "S3 (Storage SaaS): Customer manages classification, policies, encryption config, access", sub: "AWS manages: hardware, durability replication, infrastructure security" },
+  ]}
+/>
+
+### IaaS — Amazon EC2
+
+EC2 represents the most customer responsibility of any AWS compute service. The division:
+
+| Layer | Responsible Party |
+|-------|-----------------|
+| Application code and dependencies | Customer |
+| Runtime (JVM, Python interpreter, Node.js) | Customer |
+| Middleware (web server, app server) | Customer |
+| Operating system (installation, configuration, patching) | Customer |
+| Guest OS firewall | Customer |
+| EC2 instance configuration (IAM role, security groups, key pair) | Customer |
+| EBS encryption and backups | Customer |
+| Hypervisor | AWS |
+| Physical server and storage | AWS |
+| Physical network | AWS |
+| Physical facility | AWS |
+
+EC2 gives the most control and the most responsibility. If a vulnerability in your OS is exploited because you did not apply a patch, that is a customer security failure, not an AWS failure.
+
+### PaaS — Amazon RDS
+
+RDS manages the database engine and OS, shifting significant responsibility to AWS:
+
+| Layer | Responsible Party |
+|-------|-----------------|
+| Application queries and connection handling | Customer |
+| Database user accounts and permissions | Customer |
+| Schema design | Customer |
+| Data classification and encryption (at-rest encryption toggle, TDE) | Customer |
+| Parameter group configuration | Customer |
+| Backup retention period | Customer |
+| DB engine software patching | AWS |
+| Operating system patching | AWS |
+| Underlying EC2 instance management | AWS |
+| Storage provisioning and replication (Multi-AZ) | AWS |
+| Hardware and facilities | AWS |
+
+You still manage who can connect to your database and what they can do once connected. AWS manages keeping the database engine software patched and the underlying hardware running.
+
+### Serverless — AWS Lambda
+
+Lambda pushes the responsibility line even higher toward AWS:
+
+| Layer | Responsible Party |
+|-------|-----------------|
+| Function code | Customer |
+| Libraries and dependencies packaged with the function | Customer |
+| IAM execution role | Customer |
+| Environment variables (including secrets management) | Customer |
+| Function triggers and event source configuration | Customer |
+| Runtime (Python 3.12, Node.js 20, etc.) | AWS |
+| Runtime patching and security updates | AWS |
+| Operating system | AWS |
+| Scaling and concurrency management | AWS |
+| Underlying compute hardware | AWS |
+
+The customer's residual responsibility is narrower but still significant: your function code, its dependencies, and how it handles data and credentials.
+
+### Object Storage — Amazon S3
+
+S3 is often misunderstood as the AWS service with the most AWS responsibility. In practice, many S3 breaches have been customer-caused:
+
+| Layer | Responsible Party |
+|-------|-----------------|
+| Data content and classification | Customer |
+| Bucket policy (public access settings) | Customer |
+| IAM policies controlling access | Customer |
+| Server-side encryption selection (SSE-S3, SSE-KMS, SSE-C) | Customer |
+| S3 Object Lock configuration | Customer |
+| Cross-Origin Resource Sharing (CORS) | Customer |
+| Versioning and replication configuration | Customer |
+| Lifecycle rules | Customer |
+| Hardware providing 11 9s durability | AWS |
+| Internal replication across AZs | AWS |
+| Physical storage and network | AWS |
+
+The infamous "S3 bucket exposed publicly" class of incidents is entirely customer responsibility — AWS provides the Block Public Access feature (which should be enabled at the account level), but customers configure (or misconfigure) their bucket policies.
+
+---
+
+## Compliance Inheritance
+
+When AWS achieves certifications and attestations, customers inherit the coverage that AWS owns:
+
+| What AWS Certifies | What Customers Inherit | What Customers Still Own |
+|--------------------|----------------------|--------------------------|
+| SOC 2 Type II (physical, logical, availability controls for infrastructure) | AWS infrastructure controls are certified | Controls over your applications, data, and configurations |
+| PCI DSS (for in-scope AWS services) | AWS infrastructure is a certified PCI-compliant environment | Customers must still certify their application's PCI compliance |
+| ISO 27001 / 27017 / 27018 | AWS's ISMS certification | Customers' own ISMS scope |
+| FedRAMP (for govcloud and some commercial services) | AWS infrastructure authorization | Customer application must obtain its own ATO |
+| HIPAA Business Associate Agreement (BAA) | AWS signs a BAA covering HIPAA-eligible services | Customer is still responsible for PHI handling within those services |
+
+Compliance inheritance means you do not have to audit AWS's data center physical security for your own SOC 2 audit — AWS's SOC 2 report covers that. Your auditors review the AWS SOC 2 report (available in AWS Artifact) and focus your audit scope on your application and configuration controls.
+
+However, inheritance is not a free pass. You cannot claim PCI DSS compliance simply because you run on AWS. Your application's data handling, your IAM configuration, your network segmentation, your encryption choices — all of these are customer scope and must be audited and controlled independently.
+
+---
+
+## AWS Artifact
+
+**AWS Artifact** is the self-service portal for accessing AWS's compliance documentation:
+
+- **SOC 1, 2, and 3 reports**: Financial and operational controls audit reports
+- **PCI DSS Attestation of Compliance (AoC)**: AWS's PCI compliance attestation
+- **ISO certifications**: 27001, 27017, 27018, 9001
+- **GDPR Data Processing Addendum (DPA)**
+- **HIPAA Business Associate Agreement (BAA)**
+- **FedRAMP packages**: For government workloads
+
+Access AWS Artifact from the AWS Management Console. Reports are signed NDAs — you must accept terms before downloading. Most reports are updated annually or semi-annually. Share these with your auditors, legal team, or enterprise customers who ask for AWS compliance documentation.
+
+---
+
+## Practical Security Baseline
+
+Translating the shared responsibility model into a practical checklist for what customers should implement in every AWS account:
+
+| Control | Service / Feature |
+|---------|-------------------|
+| **MFA on root and all IAM users** | IAM |
+| **No active root access keys** | IAM credentials report |
+| **CloudTrail enabled in all regions** | CloudTrail |
+| **GuardDuty enabled** | GuardDuty (threat detection across VPC flow logs, CloudTrail, DNS logs) |
+| **S3 Block Public Access at account level** | S3 account settings |
+| **Default EBS encryption enabled** | EC2 account-level setting |
+| **Config rules enabled** | AWS Config (compliance drift detection) |
+| **Security Hub enabled** | Security Hub (aggregated findings from GuardDuty, Inspector, Macie, Config) |
+| **VPC Flow Logs enabled** | VPC |
+| **Password policy enforced** | IAM password policy |
+| **Unused access keys identified and removed** | IAM credentials report + Access Analyzer |
+
+These controls address the customer-side responsibilities most commonly missed in early AWS deployments. AWS will not enable them for you — that is your side of the shared responsibility line.

@@ -1,0 +1,406 @@
+---
+title: "AWS Auto Scaling & Elastic Load Balancing"
+category: "amazon"
+topic: "aws-auto-scaling-elb"
+summary: "How AWS scales compute horizontally and distributes traffic — Launch Templates, Auto Scaling Groups, ALB/NLB/GWLB, and the patterns that make stateless architectures resilient."
+tags: ["aws", "auto-scaling", "elb", "alb", "nlb", "load-balancing", "high-availability"]
+order: 6
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Horizontal scaling and load balancing are two of the most foundational patterns in AWS architecture. Rather than buying a larger server to handle more traffic (vertical scaling), horizontal scaling adds more instances of the same server — and a load balancer distributes requests across all of them. The combination means capacity can grow and shrink automatically in response to real demand, instances can be replaced without downtime, and no single instance is a single point of failure.
+
+AWS implements this with two closely integrated services: **Auto Scaling Groups (ASG)** manage the fleet of EC2 instances, deciding when to add or remove capacity and ensuring instances are healthy. **Elastic Load Balancing (ELB)** sits in front of that fleet, distributing incoming requests and directing traffic only to healthy instances. Together they enable the stateless application tier pattern: any instance can serve any request, so replacing instances — for scaling, patching, or failure recovery — is transparent to clients.
+
+This design appears at every layer of a production AWS architecture. Web tiers, API tiers, and microservices all follow the same structure: stateless compute behind a load balancer, with an Auto Scaling Group ensuring the right number of instances are running.
+
+---
+
+## Launch Templates
+
+A **Launch Template** is the blueprint that an Auto Scaling Group uses to launch new EC2 instances. Every time the ASG needs to add capacity, it consults the Launch Template to know exactly what to provision.
+
+### What a Launch Template Contains
+
+| Parameter | Description |
+|-----------|-------------|
+| **AMI ID** | The base image — typically a Golden AMI with OS, agents, and runtime pre-baked |
+| **Instance type** | e.g., `m7g.large`, `c6i.xlarge` — can be overridden per ASG with a mixed instance policy |
+| **Key pair** | SSH key for emergency console access (not needed if using SSM Session Manager) |
+| **Security groups** | One or more security group IDs attached to launched instances |
+| **IAM instance profile** | The IAM role attached to the instance, granting API access via IMDS |
+| **User data** | Bootstrap script that runs at first launch — fetches secrets, registers with discovery, applies env-specific config |
+| **EBS configuration** | Root volume type, size, encryption. Additional volumes and their mount points. Delete-on-termination flag. |
+| **Network settings** | Whether to assign a public IP, subnet type preferences |
+| **Metadata options** | `HttpTokens: required` to enforce IMDSv2 on all launched instances |
+| **Placement group** | Optional cluster/spread/partition placement group reference |
+| **Tags** | Tags propagated to launched instances and their volumes |
+
+### Versioning
+
+Launch Templates support versioning. Every change creates a new version — you can designate a `$Default` and always reference `$Latest`. ASGs can be pinned to a specific version or always use `$Default`, which gives you controlled rollout of changes: update the AMI or instance type in a new template version, validate it, update the ASG to use it, then trigger an Instance Refresh to roll it out to running instances without downtime.
+
+### Launch Templates vs Launch Configurations
+
+Launch Configurations are the legacy predecessor to Launch Templates. They are immutable — every change requires creating an entirely new Launch Configuration — and they do not support versioning, T2/T3 Unlimited, Dedicated Hosts, capacity reservations, or mixed instance policies. AWS has deprecated Launch Configurations. All new deployments must use Launch Templates. Existing Launch Configurations should be migrated.
+
+---
+
+## Auto Scaling Groups
+
+An **Auto Scaling Group** is a managed fleet of EC2 instances. The ASG enforces a desired instance count, distributes instances across Availability Zones, monitors instance health, and adjusts capacity in response to scaling policies.
+
+### Capacity Parameters
+
+Every ASG has three capacity settings:
+
+- **Minimum capacity** — the floor. The ASG will never terminate instances below this count, regardless of scaling policies or reduced demand.
+- **Maximum capacity** — the ceiling. Scaling policies can never push the instance count above this. Prevents runaway scaling from a metrics spike or misconfigured alarm.
+- **Desired capacity** — the current target. The ASG continuously reconciles actual running instance count toward desired capacity. Scaling policies adjust desired capacity, and the ASG acts on the change immediately.
+
+### AZ Distribution
+
+The ASG distributes instances across the subnets you assign it — typically one subnet per AZ. When launching, it targets the AZ with fewest instances to maintain balance. When terminating, it removes instances from the most-populated AZ first. This rebalancing behavior (called **AZ Rebalancing**) runs automatically when the distribution drifts — for example, after a scale-in event or after an AZ becomes temporarily unavailable and then recovers.
+
+### Health Checks
+
+The ASG continuously evaluates whether its instances are healthy and replaces any that are not. Two health check types are available:
+
+**EC2 health checks** (default): Mark an instance unhealthy if it is stopped, terminated, or its underlying hardware/system status check fails. This is infrastructure-level health — it catches hardware failures and OS crashes but does not know whether the application is actually serving requests correctly.
+
+**ELB health checks**: Use the results of the load balancer's own application-level health check. An instance that is running fine from EC2's perspective but returning HTTP 500 from the application will be marked unhealthy by the ELB and the ASG will replace it. ELB health checks are strongly preferred for application tiers — they catch application-layer failures that the EC2 health check would never detect.
+
+When an instance is marked unhealthy, the ASG terminates it and launches a replacement. The default termination policy targets the instance with the oldest Launch Template version first, which naturally drains older configurations as new ones roll out.
+
+### Cooldown Period
+
+After a scaling activity completes (launching or terminating instances), the ASG waits out a **cooldown period** (default 300 seconds) before evaluating scaling policies again. This gives new instances time to come online and start absorbing load before another scaling action is triggered. Without a cooldown, a burst of traffic could cause the ASG to launch multiple waves of instances in rapid succession, overshooting the required capacity.
+
+Target Tracking and Predictive policies have their own warmup and cooldown settings. Simple/Step policies use the group-level cooldown by default.
+
+### Instance Refresh
+
+When you update a Launch Template (new AMI, new instance type, updated user data), running instances are not automatically replaced — they continue running on the old configuration. **Instance Refresh** performs a rolling replacement of the fleet:
+
+1. The ASG terminates a batch of instances (up to the percentage that puts it at the minimum healthy threshold).
+2. Replacement instances launch from the new Launch Template version.
+3. The ASG waits for replacements to pass health checks and the configured warmup period.
+4. The next batch is processed.
+
+You configure:
+- **Minimum healthy percentage**: The fraction of instances that must remain in service during the refresh (e.g., 90% means no more than 10% can be unavailable at once)
+- **Instance warmup**: Time to allow a new instance to pass health checks before counting it as healthy and proceeding to the next batch
+- **Checkpoint configuration**: Pause at N% completion for manual validation before proceeding
+
+Instance Refresh is the correct mechanism for rolling out AMI updates. It is safer than manually terminating instances and more controlled than destroying and recreating the ASG.
+
+---
+
+## Scaling Policies
+
+Auto Scaling Groups support four scaling policy types, each suited to a different demand pattern.
+
+### Simple / Step Scaling
+
+The original scaling policy type. A CloudWatch alarm fires when a metric crosses a threshold, and the policy defines a discrete action: add N instances, remove N instances, or set desired capacity to N.
+
+Step scaling extends simple scaling by defining multiple threshold bands — add 1 instance when CPU is 60–75%, add 3 when CPU is 75–90%, add 5 when CPU is above 90%. This gives a proportional response to the severity of the load increase.
+
+Simple and Step policies have limitations: the scale-out action is a fixed size regardless of how long the metric has been elevated, and they are subject to the group cooldown, which can delay reaction to sustained load. Target Tracking supersedes Step scaling for the majority of workloads.
+
+### Target Tracking Scaling
+
+The preferred policy type for most workloads. You specify a target value for a metric — for example, maintain average CPU utilization at 60%. The ASG continuously adjusts desired capacity to keep the metric near the target, adding instances when the metric rises above target and removing instances when it falls below.
+
+The ASG computes required instance count from the current metric and target:
+
+```
+Required instances ≈ Current instances × (Current metric / Target metric)
+```
+
+Target Tracking creates and manages its own CloudWatch alarms automatically. It handles both scale-out and scale-in with a single policy, responds proportionally to the degree of deviation, and includes built-in scale-in protection (it waits longer before scaling in to avoid flapping). Common predefined target metrics:
+
+- `ASGAverageCPUUtilization` — average CPU across all instances in the group
+- `ALBRequestCountPerTarget` — requests per instance per minute from an ALB target group
+- `ASGAverageNetworkIn` / `ASGAverageNetworkOut` — average network throughput
+
+For custom metrics (queue depth, active WebSocket connections, downstream latency), publish the metric to CloudWatch and reference it in a custom metric Target Tracking policy.
+
+### Scheduled Scaling
+
+For predictable, time-based load patterns. You define a schedule using a cron expression or a specific datetime, and the ASG sets min, max, and/or desired capacity at that time. Examples:
+
+- Increase desired capacity from 2 to 10 at 08:00 UTC weekdays (pre-warm before business hours)
+- Scale back to 2 at 20:00 UTC weekdays
+- Set minimum to 0 on weekends for non-critical environments
+
+Scheduled scaling acts in advance of demand — it is appropriate when load patterns are regular and predictable. It does not react to actual real-time metrics, so it is typically combined with Target Tracking: Scheduled pre-warms capacity to handle the expected baseline, Target Tracking handles deviations from the expected pattern.
+
+### Predictive Scaling
+
+Predictive scaling uses a machine learning model trained on the ASG's historical CloudWatch metrics (at least 14 days of history). It analyzes daily and weekly patterns, forecasts future load, and proactively adjusts desired capacity up to one hour before the predicted spike — before the CloudWatch alarms that Target Tracking relies on would even fire.
+
+The key advantage over Scheduled scaling is that Predictive scaling learns recurring patterns automatically. It identifies daily traffic peaks, weekly cycles, and seasonal trends without manual schedule configuration. It is particularly effective for workloads with consistent but not perfectly rigid cycles — an application that peaks on Monday mornings, but the exact peak time varies by 30–90 minutes depending on the week.
+
+Predictive can run in **forecast-only** mode — it generates predictions and shows them in CloudWatch without actually changing desired capacity. This lets you validate accuracy over one or two weeks before enabling automatic scaling. Predictive and Target Tracking are designed to be combined: Predictive pre-warms capacity proactively, Target Tracking corrects real-time deviations from the forecast.
+
+---
+
+## Lifecycle Hooks
+
+By default, when an ASG launches an instance it transitions from `Pending` directly to `InService` once the EC2 status check passes. **Lifecycle hooks** intercept this transition and hold the instance in a wait state while external processes run.
+
+### Hook States
+
+| Hook | Instance State | Purpose |
+|------|---------------|---------|
+| **Scale-out hook** | `Pending:Wait` | Instance is running but not yet registered with the load balancer. Use for: configuration management, cache warm-up, agent registration, connection pool establishment |
+| **Scale-in hook** | `Terminating:Wait` | Instance is deregistered from the load balancer but not yet terminated. Use for: flushing buffered data to S3, draining task queues, deregistering from external service registries, writing final log lines |
+
+The hook holds the instance for a configurable timeout (default 3600 seconds, maximum 7200 seconds). The external process must call `CompleteLifecycleAction` to release the instance — specifying either `CONTINUE` (proceed with the transition) or `ABANDON` (abort: terminate on scale-out, keep on scale-in).
+
+Lifecycle hooks deliver a notification via Amazon SNS, SQS, or EventBridge. A Lambda function or worker process consumes the notification, does the work, and sends the completion signal.
+
+### Use Cases
+
+**Pre-warm caches**: An application tier needs 60 seconds to warm its local query cache from a remote store before it can serve traffic at production SLA. A `Pending:Wait` hook delays the `InService` transition until a Lambda function confirms the warm-up is complete.
+
+**Drain external registries**: An instance registered in Consul or a custom service discovery system needs to deregister gracefully before the ASG terminates it. A `Terminating:Wait` hook triggers the deregistration before the instance disappears.
+
+**Flush logs**: A logging agent that batches to disk needs to ship buffered logs to CloudWatch Logs or S3 before the instance is terminated. The hook provides a window to flush without loss.
+
+**Run configuration management**: A lifecycle hook at `Pending:Wait` can trigger an Ansible playbook or Chef converge against the new instance before it enters service, ensuring configuration is applied and verified.
+
+---
+
+## Warm Pools
+
+**Warm pools** reduce scale-out latency by maintaining a pool of pre-initialized instances that can be moved into the active ASG on demand, rather than launching and initializing new instances from scratch.
+
+### The Problem Warm Pools Solve
+
+Normally, when the ASG needs to add capacity:
+1. EC2 provisions a new virtual machine (30–60 seconds)
+2. OS boots from the AMI
+3. User data script runs (seconds to minutes depending on complexity)
+4. Application starts and initializes (JVM startup, cache warming, connection pool fill)
+
+For a complex application, this sequence can take 5–10 minutes — exactly when you need capacity most urgently, during a traffic spike.
+
+### How Warm Pools Work
+
+1. The ASG maintains a configured number of instances in `Stopped`, `Hibernated`, or `Running` state outside the active group.
+2. These instances have already completed initialization — user data has run, the application is ready, agents are registered.
+3. When the ASG needs to scale out, it pulls instances from the warm pool. A stopped instance starts in 20–30 seconds; a hibernated instance restores memory state even faster.
+4. After a warm pool instance enters service, the ASG launches a new instance into the warm pool to replenish it.
+
+### When to Use Warm Pools
+
+Warm pools are most valuable when:
+- Golden AMI bake time is long (large runtime dependencies, complex pre-configuration)
+- User data scripts take significant time (downloading large model files, compiling configuration)
+- Application initialization adds substantial latency (JVM startup, in-memory cache fill, large ML model loading)
+- Workloads experience sudden, unpredictable spikes where scale-out lag causes visible degradation
+
+The cost tradeoff: warm pool instances in `Stopped` state incur EBS storage costs only. Instances in `Running` state incur full compute costs. Size the pool to the expected burst depth, not to maximum possible demand.
+
+---
+
+## Elastic Load Balancing — Family Overview
+
+AWS Elastic Load Balancing is a managed, highly available service that distributes incoming traffic across registered targets — EC2 instances, containers, IP addresses, or Lambda functions. ELB operates within a VPC, spans multiple Availability Zones automatically, and scales its own fleet of load balancer nodes transparently to handle whatever traffic is presented to it.
+
+The ELB service provides three distinct load balancer types. Choosing the correct type depends on the network layer, protocol, and routing requirements of the workload.
+
+| Load Balancer | OSI Layer | Protocols | Primary Use Case |
+|---------------|-----------|-----------|-----------------|
+| **ALB** — Application | 7 (HTTP) | HTTP, HTTPS, WebSocket, HTTP/2, gRPC | Content-based routing for web applications and APIs |
+| **NLB** — Network | 4 (TCP/UDP) | TCP, UDP, TLS | Non-HTTP protocols, ultra-low latency, client IP preservation, static IPs |
+| **GWLB** — Gateway | 3/4 | Any (GENEVE encapsulation) | Transparent inline traffic inspection via third-party security appliances |
+
+---
+
+## Application Load Balancer (ALB)
+
+The ALB operates at Layer 7. It terminates the HTTP or HTTPS connection from the client, inspects the request content, evaluates listener rules, and forwards to the appropriate target group. Because the ALB understands HTTP, it can make routing decisions based on anything in the HTTP request — path, host, headers, query strings, HTTP method, source IP.
+
+### Content-Based Routing
+
+ALB listener rules are evaluated in priority order. Each rule has one or more conditions and an action. Rules are processed from the lowest priority number to the highest (highest number = default rule that matches everything).
+
+| Condition Type | Example | Use Case |
+|----------------|---------|---------|
+| **Path pattern** | `/api/*` | Route API requests to a backend target group, static assets to a separate group or S3 |
+| **Host header** | `admin.example.com` | Multi-subdomain routing from a single ALB |
+| **HTTP header** | `X-Version: v2` | Canary releases or A/B testing via custom request header |
+| **Query string** | `?platform=mobile` | Route mobile clients to a mobile-optimized backend |
+| **HTTP method** | `POST` | Separate write traffic from read-only traffic |
+| **Source IP** | `10.0.0.0/8` | Route internal vs. external traffic to different backends |
+
+### Target Groups
+
+Each ALB listener rule forwards to a **target group** — a named set of registered endpoints that receive requests. Target types:
+
+- **Instance**: EC2 instances registered by instance ID. Standard for ASG-backed services.
+- **IP**: Any IP address reachable from the VPC — ECS containers with awsvpc networking, EKS pods, on-premises hosts via Direct Connect/VPN, or other services.
+- **Lambda**: Invoke a Lambda function directly. ALB serializes the HTTP request into a JSON event payload, Lambda returns a JSON response, ALB translates it back to HTTP.
+
+Target groups are independent of the ALB — the same target group can be referenced by multiple ALBs, and one ALB can route to many target groups. This independence enables blue/green deployments: create a new target group with the new version, shift the ALB listener rule, then tear down the old group.
+
+### Sticky Sessions
+
+By default, the ALB routes each request independently using the least-outstanding-requests algorithm — the instance with fewest active connections receives the next request. **Sticky sessions** bind a client to a specific target using a cookie, so all requests from that client within the session go to the same instance.
+
+Two stickiness modes:
+- **Duration-based** (`AWSALB` cookie): ALB generates and manages the cookie, with a configurable TTL.
+- **Application-based**: ALB uses a cookie your application sets, forwarding the client to whichever instance it was on previously.
+
+Sticky sessions introduce coupling between client and instance. If that instance is terminated (health failure, scale-in), the client's cookie points to a dead target and must be re-routed. This is a primary reason stateless architectures store session state externally (ElastiCache, DynamoDB) rather than in instance memory — eliminating the need for stickiness entirely.
+
+### Connection Draining (Deregistration Delay)
+
+When an instance is removed from a target group (scale-in, deployment, health failure), the ALB stops sending new requests to it but allows in-flight requests to complete during the **deregistration delay** (default 300 seconds). Set this lower (30–60 seconds) for APIs with short request durations to speed up deployments. Keep it higher for workloads with long-running requests (file uploads, batch API calls).
+
+### Additional ALB Capabilities
+
+**WebSocket**: Long-lived WebSocket connections are supported natively. The ALB maintains the connection and routes WebSocket frames to the same target for the life of the connection.
+
+**HTTP/2**: HTTP/2 is supported between client and ALB, multiplexing multiple requests over a single connection. ALB forwards to targets over HTTP/1.1 by default, or HTTP/2 when the target supports it.
+
+**gRPC**: ALB supports gRPC traffic end-to-end (HTTP/2 + binary protobuf). Route gRPC traffic to a dedicated target group using path-based rules on the service name.
+
+**WAF integration**: AWS WAF can be attached to an ALB to inspect HTTP requests and enforce rules — OWASP Top 10 protections, IP rate limiting, IP reputation filtering, custom string match conditions. WAF is evaluated before the request reaches any target.
+
+**Access logs**: ALB writes detailed request logs to S3 at a configurable interval. Each log entry includes client IP, request processing time, target processing time, response code, request URI, user agent, and SSL cipher.
+
+**Cross-zone load balancing**: Enabled by default on ALB at no extra charge. Each ALB node distributes requests across all healthy targets in all AZs, not only targets in its own AZ. This eliminates imbalance when AZ instance counts differ.
+
+---
+
+## Network Load Balancer (NLB)
+
+The NLB operates at Layer 4. It routes TCP, UDP, and TLS packets without inspecting application-layer content. There is no HTTP parsing — the NLB makes routing decisions based on IP and port only. This means lower latency, higher throughput, and support for any TCP- or UDP-based protocol.
+
+### Key Characteristics
+
+**Client IP preservation**: The NLB passes the client's original source IP address to the target unchanged. The instance sees the real client IP directly in the TCP connection — no `X-Forwarded-For` header required. This is critical for protocols that embed source IP in their logic (SIP, FTP data connections, financial market data), or for applications that enforce per-client rate limiting at the IP level.
+
+**Static Elastic IP per AZ**: Each NLB AZ endpoint can be assigned an Elastic IP address, giving the load balancer a stable, predictable IP address per AZ. External parties (clients, upstream firewalls) can whitelist specific IPs. ALBs have no stable IPs — their fleet of load balancer nodes scales dynamically and changes over time.
+
+**TLS termination**: NLBs can terminate TLS using ACM certificates, or pass TLS through transparently to the backend (TLS passthrough mode) if the application must handle its own certificate — for example, when mutual TLS (mTLS) is required between client and application.
+
+**Performance**: NLB handles millions of requests per second with single-digit millisecond latency. There is no HTTP header parsing overhead, which makes the NLB appropriate when ALB processing latency is measurable in the application's performance budget.
+
+**UDP load balancing**: ALB does not support UDP. NLB is the only ELB option for UDP-based protocols (DNS, syslog, SNMP, streaming media protocols, gaming protocols).
+
+### Cross-Zone Load Balancing on NLB
+
+Unlike ALB, cross-zone load balancing is **off by default** on NLB. When disabled, each NLB AZ node only sends traffic to targets in its own AZ. When enabled, traffic is spread across all AZs — but cross-AZ data transfer is charged. The choice depends on whether AZ-local routing (lower cost, lower latency) or even distribution (potentially better balance) is preferred.
+
+### When to Use NLB
+
+- Non-HTTP protocols: MQTT, custom binary protocols, game server connections, database protocols exposed via load balancer
+- Client IP must reach the backend without proxying or header injection
+- Static Elastic IPs are required for external firewall whitelisting or DNS pinning
+- UDP load balancing
+- Ultra-low latency where ALB HTTP parsing overhead is measurable
+
+---
+
+## Gateway Load Balancer (GWLB)
+
+The GWLB solves a specific architectural problem: how to route all traffic through a fleet of third-party network security appliances — IDS/IPS, firewalls, deep packet inspection engines — without modifying the application network topology and without the appliance needing to be in-path via network address translation.
+
+### How GWLB Works
+
+GWLB uses **GENEVE encapsulation** (Generic Network Virtualization Encapsulation) on port 6081. Traffic arriving at the GWLB is wrapped in GENEVE frames and forwarded to the security appliance target group. The appliance decapsulates, inspects or manipulates the original IP packet, and re-encapsulates it, returning it to the GWLB. The GWLB then forwards the inspected packet to its original destination.
+
+From the perspective of the traffic source and destination, the appliance is entirely transparent — source and destination IPs are unchanged. The routing insertion is invisible to both endpoints.
+
+### Gateway Load Balancer Endpoint (GWLBe)
+
+GWLB integrates with VPC routing tables via a **Gateway Load Balancer Endpoint (GWLBe)** — a PrivateLink-based VPC endpoint that appears in routing tables as a route target. You insert the GWLBe into the routing path (in the Internet Gateway route table, subnet route table, or Transit Gateway route table) so all traffic in scope passes through the GWLB before reaching its destination.
+
+### Use Cases
+
+**Centralized security inspection**: A dedicated security VPC owns the GWLB and the appliance fleet. Spoke VPCs send ingress and egress traffic through the security VPC via Transit Gateway. All internet-bound and internet-inbound traffic is inspected by the appliance fleet before reaching application VPCs.
+
+**East-west inspection**: Traffic between application VPCs or subnets passes through the security appliance fleet. Lateral movement across environments is inspected and potentially blocked.
+
+**Compliance enforcement**: Regulated workloads that require certified IDS/IPS to inspect all traffic without modifying the application or network architecture.
+
+**Auto-scaling appliance fleets**: GWLB distributes traffic across the appliance target group using a 5-tuple hash (source IP, destination IP, source port, destination port, protocol), ensuring that all packets of a flow reach the same appliance (stateful inspection requires session affinity). The fleet scales with ASG like any other target group.
+
+---
+
+## ALB Target Group Health Checks
+
+Health checks determine which targets receive traffic. ALB health checks are configurable per target group:
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| **Protocol** | HTTP | Use HTTPS if the backend terminates its own TLS |
+| **Path** | `/` | Use a dedicated health endpoint (`/health`, `/healthz`) rather than `/` |
+| **Interval** | 30s | How often the ALB checks each target |
+| **Healthy threshold** | 5 | Consecutive successes before marking a target healthy |
+| **Unhealthy threshold** | 2 | Consecutive failures before marking a target unhealthy |
+| **Timeout** | 5s | Time to wait per health check before counting as a failure |
+| **Success codes** | `200` | HTTP response codes considered healthy — accepts ranges (`200-299`) |
+
+### Health Check Best Practices
+
+A dedicated `/health` endpoint should verify that the application is actually functional — database connectivity reachable, critical configuration loaded, downstream dependencies responding — not just that the HTTP server is accepting connections. A health endpoint that always returns 200 regardless of application state defeats the purpose entirely. The ALB will continue sending traffic to an instance whose application is broken.
+
+**Slow start mode**: Newly registered targets can receive a reduced proportion of traffic for a configurable ramp period (30–900 seconds). This prevents a freshly launched instance — whose connection pool is empty, caches are cold, and JIT compilation is incomplete — from immediately receiving the same request rate as a warmed instance.
+
+---
+
+## Scale-Out Event Flow
+
+<FlowDiagram
+  parties={["CloudWatch", "Auto Scaling Group", "EC2 + Launch Template", "Lifecycle Hook", "ALB Target Group"]}
+  steps={[
+    { from: "CloudWatch", to: "Auto Scaling Group", label: "Alarm: ALBRequestCountPerTarget > 1000", sub: "Target Tracking policy triggers scale-out" },
+    { from: "Auto Scaling Group", to: "Auto Scaling Group", label: "Desired capacity: 4 → 6", sub: "Two new instances required" },
+    { from: "Auto Scaling Group", to: "EC2 + Launch Template", label: "Launch 2 instances", sub: "AMI, instance type, SGs, IAM profile, user data from Launch Template v7 (or warm pool)" },
+    { from: "EC2 + Launch Template", to: "Lifecycle Hook", label: "Instance enters Pending:Wait", sub: "Lifecycle hook intercepts before InService" },
+    { from: "Lifecycle Hook", to: "Lifecycle Hook", label: "User data + warm-up runs", sub: "App starts, cache warms, agent registers — Lambda sends CompleteLifecycleAction: CONTINUE" },
+    { from: "Lifecycle Hook", to: "ALB Target Group", label: "Instance transitions to InService", sub: "ALB registers instance, begins health checks" },
+    { from: "ALB Target Group", to: "ALB Target Group", label: "Health check: GET /health → 200 OK (×3)", sub: "Three consecutive successes → instance marked Healthy" },
+    { from: "ALB Target Group", to: "ALB Target Group", label: "Traffic distributes across 6 instances", sub: "Alarm resolves; Target Tracking stabilizes at target metric" },
+  ]}
+/>
+
+---
+
+## Architectural Patterns
+
+### Stateless Tier Behind ALB + ASG
+
+The canonical AWS application tier pattern: sessions stored in ElastiCache (Redis) or DynamoDB, no local state. Any instance can serve any request. The ASG scales to demand using Target Tracking on `ALBRequestCountPerTarget`. The ALB distributes traffic and performs ELB health checks. Deployments happen via Instance Refresh with zero downtime.
+
+### Mixed Instance Policy with Spot
+
+Production ASGs should not be locked to a single instance type and purchasing model. A **mixed instance policy** specifies a primary instance type plus a list of alternates. The ASG diversifies across multiple EC2 Spot pools, reducing the probability that a single pool interruption removes significant capacity. Combine On-Demand base capacity (minimum guaranteed instances for stability) with Spot supplementary capacity (cost-optimized additional scaling) in the same ASG.
+
+### Blue/Green Deployment with Weighted Target Groups
+
+1. Blue ASG (current production) → ALB listener rule → 100% weight to Blue target group.
+2. Launch Green ASG with new version. Register to Green target group.
+3. Shift ALB rule weight: 90% Blue, 10% Green. Monitor error rates in CloudWatch.
+4. Gradually shift to 100% Green as confidence grows.
+5. Terminate Blue ASG. Blue becomes the next deployment target.
+
+ALB listener forward actions support per-target-group weight attributes (1–999). Weight distribution is proportional across all target groups in the rule. Rollback is instantaneous — shift weight back to 100% Blue.
+
+### Predictive + Target Tracking Combined
+
+For workloads with daily patterns (business-hours traffic): enable Predictive Scaling in forecast mode for two weeks to validate accuracy, then enable it alongside a Target Tracking policy. Predictive pre-warms capacity before the morning peak based on historical patterns. Target Tracking handles deviations — if traffic arrives heavier than predicted, Target Tracking scales out further; if the predicted peak is smaller than forecast, Target Tracking scales in. Neither policy conflicts with the other; the ASG uses the higher desired capacity at any given time.
+
+### Cross-Zone Load Balancing
+
+ALB enables cross-zone load balancing by default. Each ALB load balancer node distributes requests evenly across all registered targets in all AZs — not just targets in its own AZ. This eliminates imbalance when AZ instance counts differ (e.g., after an AZ rebalancing event puts one AZ temporarily ahead). For NLB, cross-zone is off by default and incurs per-AZ data transfer charges when enabled — leave it off unless uneven distribution is observable.

@@ -1,0 +1,385 @@
+---
+title: "AWS Governance & Observability"
+category: "amazon"
+topic: "aws-governance"
+summary: "Managing AWS at scale — Organizations, Control Tower, Service Control Policies, CloudTrail audit logging, AWS Config compliance, and CloudWatch observability."
+tags: ["aws", "organizations", "cloudtrail", "config", "cloudwatch", "governance", "compliance"]
+order: 19
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Governance in AWS is the set of controls that ensure environments are secure, compliant, cost-managed, and well-structured at scale. Without deliberate governance, accounts proliferate uncontrolled, permissions sprawl, audit trails disappear, and costs spike without warning.
+
+Observability is the ability to understand the internal state of a system from its external outputs — metrics, logs, and traces. AWS governance and observability operate across four layers:
+
+1. **Organizational structure and guardrails** — who can create accounts, what those accounts can do, and how accounts are grouped (AWS Organizations, SCPs, Control Tower)
+2. **API audit trail** — a tamper-evident log of every AWS API call across all accounts (CloudTrail)
+3. **Configuration compliance** — a continuous record of every resource's configuration state and whether that state matches policy (AWS Config)
+4. **Operational observability** — metrics, logs, alarms, dashboards, and anomaly detection for running workloads (CloudWatch, EventBridge)
+
+None of these layers is optional in a production environment. Together they form the control plane that sits above individual services.
+
+---
+
+## AWS Organizations
+
+AWS Organizations groups multiple AWS accounts under a single management account. Large environments typically run dozens or hundreds of AWS accounts — one per application, environment, team, or business unit — rather than one monolithic account. The multi-account model reduces blast radius, enforces least-privilege at the account boundary, simplifies billing, and allows independent audit trails.
+
+### Account Hierarchy
+
+```
+Root
+└── Management Account (Payer)
+    ├── Security OU
+    │   ├── Log Archive Account        ← centralized CloudTrail + Config logs
+    │   └── Security Tooling Account   ← GuardDuty aggregation, Security Hub
+    ├── Infrastructure OU
+    │   ├── Network Account            ← shared VPCs, Transit Gateway
+    │   └── Shared Services Account    ← Active Directory, monitoring
+    ├── Workloads OU
+    │   ├── Production OU
+    │   │   ├── App-A Production Account
+    │   │   └── App-B Production Account
+    │   └── Non-Production OU
+    │       ├── Staging Accounts
+    │       └── Dev Accounts
+    └── Sandbox OU
+        └── Developer sandbox accounts
+```
+
+The **management account** created the organization and is the billing payer. It should run minimal workloads — it is the most sensitive account because it can act on all member accounts and is exempt from SCP restrictions.
+
+### Consolidated Billing
+
+All member account charges roll up to the management account for a single monthly bill. Key benefits:
+
+- **Volume pricing aggregation**: AWS pricing tiers (S3 drops after the first 50 TB/month, data transfer discounts, etc.) aggregate across all accounts. Twenty accounts reach higher discount tiers faster than any single account would.
+- **Reserved Instance and Savings Plans sharing**: RIs and Savings Plans purchased in any account in the organization automatically apply to matching usage in other accounts (unless the management account disables sharing). This maximizes utilization of committed purchases.
+- **Single payment method**: One consolidated invoice with per-account line items.
+
+### Service Control Policies (SCPs)
+
+SCPs are the primary governance mechanism for controlling what actions are permissible in member accounts. They are JSON policy documents (same syntax as IAM policies) attached to the root, an OU, or an individual account.
+
+**Fundamental principles**:
+
+- SCPs define the **maximum permissions available** in an account — they are a permission ceiling, not a grant
+- An Allow in an SCP does not grant any permission; it only permits IAM policies in that account to grant the permission
+- A Deny in an SCP blocks that action for every identity in the account, including the account root user
+- Effective permissions = SCP does not deny AND IAM policy allows AND resource policy allows (for cross-account)
+- SCPs do **not** apply to the management account itself
+
+**Common SCP guardrails**:
+
+| Guardrail | Effect |
+|-----------|--------|
+| Deny actions outside approved regions | Prevent resource creation in unapproved regions |
+| Deny `cloudtrail:StopLogging`, `DeleteTrail` | Ensure audit logging cannot be disabled |
+| Deny `iam:CreateUser` | Force use of IAM Identity Center for all human access |
+| Deny `organizations:LeaveOrganization` | Prevent accounts from detaching from central control |
+| Deny `config:StopConfigurationRecorder` | Ensure compliance data collection continues |
+| Deny RI and Savings Plans purchases from member accounts | Centralize purchasing decisions in management account |
+| Deny creation of internet gateways outside the network account | Enforce centralized egress |
+
+SCPs are inherited down the OU hierarchy — an SCP on the Production OU applies to every account in that OU and any nested OUs beneath it.
+
+### AWS Resource Access Manager (RAM)
+
+RAM enables sharing of AWS resources across accounts within an Organization without duplicating infrastructure. Instead of creating a Transit Gateway in every account, a network account creates one and shares it.
+
+| Shareable Resource | Common Use Case |
+|--------------------|----------------|
+| VPC subnets | Central networking team creates subnets; business unit accounts deploy workloads into them |
+| Transit Gateway | Share TGW attachments across accounts — centralized routing |
+| Route 53 Resolver rules | Share DNS forwarding rules so all accounts resolve on-premises hostnames |
+| License Manager configurations | Track licensed software usage centrally |
+| AWS Glue Data Catalog databases | Share data catalog across analytics accounts |
+
+---
+
+## AWS Control Tower
+
+Control Tower orchestrates Organizations, SCPs, CloudTrail, Config, and IAM Identity Center into an opinionated, pre-built multi-account baseline called a **landing zone**. Instead of manually wiring these services together — a process that takes weeks and requires deep expertise — Control Tower provisions the full governance stack in hours.
+
+### Landing Zone Structure
+
+Control Tower creates three mandatory accounts in addition to the management account:
+
+| Account | Purpose |
+|---------|---------|
+| Management account | Payer, Control Tower administrator, SCP authority |
+| Log Archive account | Centralized destination for CloudTrail and Config logs from all accounts |
+| Audit account | Read-only access to all accounts for security teams; aggregates Security Hub, GuardDuty findings |
+
+### Guardrails (Controls)
+
+Control Tower uses the term "guardrails" for its governance rules. Two mechanism types:
+
+- **Preventive guardrails**: Implemented as SCPs. Block disallowed actions at the account level. Examples: disallow public S3 ACLs, disallow root user access keys, disallow changes to CloudTrail configuration.
+- **Detective guardrails**: Implemented as AWS Config rules. Detect non-compliant configurations after the fact without blocking them. Examples: detect whether MFA is enabled for root, detect whether EBS volumes are encrypted.
+
+Guardrail categories:
+- **Mandatory**: Always enforced. Cannot be disabled. Cover baseline security hygiene.
+- **Strongly recommended**: Disabled by default, recommended by AWS. Enable as needed for your compliance posture.
+- **Elective**: Optional. Enable for specific regulatory or organizational requirements.
+
+### Account Factory
+
+Account Factory is a Service Catalog product that vends new AWS accounts from a template. When a team requests a new account, Account Factory provisions it with:
+
+- CloudTrail enabled and reporting to the Log Archive account
+- Config enabled and reporting to the Log Archive account
+- IAM Identity Center permission sets assigned
+- Guardrails applied via SCPs from the OU
+- Baseline VPC and network configuration (if configured)
+
+**Account Factory for Terraform (AFT)** extends this with a GitOps model — account requests are submitted as pull requests, and Terraform applies the configuration. Enables version-controlled, auditable account lifecycle management.
+
+---
+
+## AWS CloudTrail
+
+CloudTrail records every API call made to AWS services — from the console, CLI, SDK, or another AWS service acting on your behalf. It is the foundational audit log for the entire AWS control plane.
+
+### Event Types
+
+| Event Type | What It Captures | Default | Cost |
+|------------|-----------------|---------|------|
+| **Management events** | Control plane operations: `CreateBucket`, `RunInstances`, `DeleteSecurityGroup`, `CreateUser`, `AssumeRole`, `AttachRolePolicy` | Enabled | First copy free per trail |
+| **Data events** | Data plane operations: S3 `GetObject`/`PutObject`, Lambda `Invoke`, DynamoDB `PutItem`/`GetItem` | Disabled | Paid — generates high volume |
+| **Insights events** | Unusual API activity: error rate spike, abnormal call volume for a given API | Disabled | Paid |
+
+Management events are the most critical for governance. Data events matter for PCI or HIPAA environments where every data access must be audited. Insights events are useful for detecting operational anomalies like a runaway automation script.
+
+### Event History vs Trails
+
+**Event History**: 90 days of management events accessible in the CloudTrail console at no cost. No delivery to S3. No filtering or customization. Sufficient for ad-hoc investigation, insufficient for compliance retention.
+
+**Trails**: A trail delivers a continuous stream of events to an S3 bucket and optionally to CloudWatch Logs and EventBridge.
+
+Trail configuration options:
+
+| Setting | Description |
+|---------|-------------|
+| All regions | Captures events from every region. Prevents blind spots. Strongly recommended. |
+| Organization trail | Created in the management account — captures events from all member accounts. Delivers to a centralized S3 bucket. |
+| Log file integrity validation | SHA-256 digest files, each referencing the previous — forms a hash chain. Validate with `aws cloudtrail validate-logs`. Proves logs have not been tampered with. |
+| KMS encryption | Encrypt log files with a CMK. Restricts who can read the logs. |
+| CloudWatch Logs delivery | Stream events to CloudWatch Logs for near-real-time alerting via metric filters and alarms. |
+
+### CloudTrail Lake
+
+CloudTrail Lake is a managed data lake for CloudTrail events — an alternative to the traditional pattern of S3 + Glue + Athena:
+
+- Events delivered directly to CloudTrail Lake (not S3)
+- Query with SQL directly in the console or via API — no Athena setup required
+- Aggregate events across all accounts and regions in a single query
+- Retention configurable up to 7 years
+- Cross-account analysis without cross-account S3 access configuration
+
+CloudTrail Lake eliminates significant operational overhead for audit-at-scale use cases.
+
+### Limitation: CloudTrail is Not Real-Time
+
+CloudTrail events are typically delivered within 15 minutes of the API call. CloudTrail is an audit log, not a real-time alerting system. For near-real-time detection, route CloudTrail to CloudWatch Logs and create metric filters that fire alarms on patterns of concern — root account logins, unauthorized API calls, SCP denials, or changes to security group rules.
+
+---
+
+## AWS Config
+
+CloudTrail records what happened (API calls). AWS Config records **what resources look like** — their configuration at every point in time. Config answers: "what was the configuration of this security group at 14:35 last Tuesday, and who changed it?"
+
+### How Config Works
+
+Config operates through four core concepts:
+
+1. **Configuration recorder**: Monitors supported AWS resource types. When a resource changes, Config captures a new configuration item.
+2. **Configuration item (CI)**: A snapshot of a resource's full configuration — attributes, relationships, tags, IAM permissions — at a specific moment. Includes a reference to the CloudTrail event that triggered the change.
+3. **Configuration history**: The complete timeline of CIs for a resource. Enables point-in-time reconstruction of any resource's configuration state.
+4. **Configuration delivery channel**: Delivers configuration snapshots and change notifications to an S3 bucket and optionally to an SNS topic.
+
+### Config Rules
+
+Config Rules evaluate resource configurations against desired-state policies and mark resources as COMPLIANT or NON_COMPLIANT.
+
+**AWS managed rules** (pre-built, no code required):
+
+| Rule | What It Checks |
+|------|---------------|
+| `s3-bucket-public-read-prohibited` | S3 buckets must not allow public read |
+| `ec2-instance-no-public-ip` | EC2 instances must not have public IPs |
+| `mfa-enabled-for-iam-console-access` | IAM users with console access must have MFA |
+| `root-account-mfa-enabled` | Root account must have MFA enabled |
+| `encrypted-volumes` | All EBS volumes must be encrypted |
+| `rds-instance-public-access-check` | RDS instances must not be publicly accessible |
+| `restricted-ssh` | Security groups must not allow unrestricted inbound SSH (0.0.0.0/0 on port 22) |
+| `cloudtrail-enabled` | CloudTrail must be enabled |
+| `vpc-flow-logs-enabled` | VPC Flow Logs must be enabled |
+
+**Custom rules**: Lambda-backed rules for organization-specific policies. The Lambda receives a resource's configuration as input and returns COMPLIANT, NON_COMPLIANT, or NOT_APPLICABLE. Example: every EC2 instance must have a `CostCenter` tag — instances missing the tag are flagged as non-compliant.
+
+**Proactive rules**: Some Config rules support proactive evaluation — check whether a resource would be compliant before it is created (via CloudFormation hooks or the `StartResourceEvaluation` API). Prevent non-compliant resources from being created in the first place.
+
+### Conformance Packs
+
+Conformance Packs bundle multiple Config rules and optional remediation actions into a single deployable unit. Pre-built packs exist for:
+
+| Framework | Config Pack |
+|-----------|-------------|
+| CIS AWS Foundations Benchmark | `Operational-Best-Practices-for-CIS-AWS-v1.4-Level1` |
+| PCI-DSS | `Operational-Best-Practices-for-PCI-DSS` |
+| HIPAA | `Operational-Best-Practices-for-HIPAA-Security` |
+| NIST 800-53 | `Operational-Best-Practices-for-NIST-800-53` |
+
+Deploy an Organization Conformance Pack from the management account and all member accounts immediately get all rules applied and a centralized compliance dashboard.
+
+### Automated Remediation
+
+Config rules integrate with AWS Systems Manager Automation to remediate non-compliant resources:
+
+| Non-Compliance | Automated Remediation |
+|---------------|----------------------|
+| S3 bucket with public access enabled | Invoke SSM Automation: enable S3 Block Public Access on the bucket |
+| Security group allows 0.0.0.0/0 on port 22 | Invoke SSM Automation: revoke the inbound rule |
+| IAM user missing MFA | Disable console access; notify user to configure MFA |
+| EBS volume unencrypted | Alert only (remediation requires snapshot + re-encryption — manual review recommended) |
+
+Remediation can be set to automatic (triggers immediately on non-compliance) or manual (human reviews non-compliance and triggers remediation on demand).
+
+### Config vs CloudTrail
+
+| Dimension | AWS Config | CloudTrail |
+|-----------|-----------|-----------|
+| Primary question | What is/was this resource configured to do? | Who called which API, when, and from where? |
+| Data model | Resource configuration snapshots over time | API call event records |
+| Retention | Indefinite (delivered to S3) | 90 days free; indefinite with trail |
+| Compliance use | Evaluate resource state against policy; detect drift | Audit who performed actions; detect unauthorized calls |
+| Best used together | Config shows a resource changed; CloudTrail shows what API call caused it |
+
+---
+
+## Amazon CloudWatch
+
+CloudWatch is the native AWS observability service. It collects and stores metrics, aggregates logs, evaluates alarms, renders dashboards, and applies ML to detect anomalies — across every AWS service and every custom application in your environment.
+
+### Metrics
+
+A metric is a time-ordered set of data points identified by a namespace, a metric name, and optional dimensions. AWS services publish metrics to CloudWatch automatically at no charge (at 5-minute resolution by default for most services).
+
+**Namespace**: Groups related metrics by service. `AWS/EC2`, `AWS/RDS`, `AWS/Lambda`, `AWS/ApplicationELB`. Custom metrics from your applications use your own namespace.
+
+**Dimensions**: Key-value pairs that identify a specific resource within a namespace. `InstanceId=i-0abc1234` narrows `CPUUtilization` from all EC2 instances to one specific instance.
+
+| Metric Source | Resolution | Notes |
+|--------------|-----------|-------|
+| EC2 basic monitoring | 5 minutes | Free; CPU, network, disk I/O |
+| EC2 detailed monitoring | 1 minute | Paid; same metrics, finer granularity |
+| CloudWatch Agent (on EC2) | Configurable | RAM, disk space, process counts, custom app metrics — not published by AWS by default |
+| Custom via `PutMetricData` API | Any resolution ≥ 1 second | Application-level metrics from any source |
+
+RAM utilization and disk space usage are **not** published by AWS automatically — the CloudWatch Agent must be installed and configured on each instance to collect OS-level metrics.
+
+### CloudWatch Alarms
+
+An alarm monitors a single metric (or metric math expression) and transitions between three states:
+
+| State | Meaning |
+|-------|---------|
+| `OK` | Metric is within the defined threshold |
+| `ALARM` | Metric has breached the threshold for the required evaluation periods |
+| `INSUFFICIENT_DATA` | Not enough data points to evaluate — often seen at startup |
+
+Alarm actions trigger on state transitions:
+
+- **EC2 actions**: Stop, start, terminate, or reboot the monitored instance
+- **Auto Scaling**: Scale out or scale in an Auto Scaling group
+- **SNS**: Publish a message to an SNS topic → email, SMS, HTTP endpoint, Lambda, PagerDuty, Slack
+
+**Composite Alarms**: Combine multiple alarms with Boolean logic (AND, OR). Instead of alerting on CPU > 80% alone (which might be a false alarm on a healthy batch job), combine CPU > 80% AND memory > 85% AND disk > 90% → alert only when all three conditions are true simultaneously. Reduces alert noise.
+
+### CloudWatch Logs
+
+CloudWatch Logs is the central log aggregation service for AWS. Services, applications, and the CloudWatch Agent stream log records to CloudWatch Logs.
+
+**Log structure**:
+- **Log group**: Container for related logs from one application or service. Configure retention policy (1 day to 10 years, or never expire) and KMS encryption at the log group level.
+- **Log stream**: A sequence of events from a single source within the group. An ECS task might write to a stream per container, per task run.
+
+**Metric Filters**: Scan incoming log records for a pattern and increment a custom CloudWatch metric when matched. Example: filter for `[ERROR]` in an application log → create the metric `ApplicationErrorRate` → alarm when it exceeds 50 per minute. This bridges unstructured logs into the metrics alerting system.
+
+**CloudWatch Logs Insights**: Interactive SQL-like query language for ad-hoc log analysis:
+
+```
+fields @timestamp, @message
+| filter @message like /ERROR/
+| stats count(*) by bin(5m)
+| sort @timestamp desc
+| limit 200
+```
+
+Query across multiple log groups simultaneously. Visualize time series, distribution histograms, or tabular results. Pin queries to dashboards.
+
+**Log subscriptions**: Stream log data to Kinesis Data Streams, Kinesis Data Firehose, or Lambda in real time. Use cases: forward logs to a third-party SIEM, transform and load logs to OpenSearch, archive logs to S3 with Firehose.
+
+### Additional CloudWatch Features
+
+**Anomaly Detection**: CloudWatch trains an ML model on a metric's historical behavior and creates a band of statistically expected values. Alarms fire when the metric falls outside the band without requiring manual threshold configuration. Automatically accounts for daily and weekly seasonality.
+
+**Composite Alarms with Anomaly Detection**: Combine anomaly-based alarms with threshold alarms for more intelligent alerting.
+
+**CloudWatch Dashboards**: Cross-account, cross-region dashboards that visualize any combination of metrics, log insights results, and alarm status in one view. Shared dashboards for NOC displays.
+
+**Container Insights**: Collect metrics and logs from ECS clusters and EKS clusters at the cluster, service, task, and container level. Standard EC2 metrics only report at the instance level — Container Insights provides task-level and container-level granularity.
+
+**Synthetics**: Scheduled canary scripts (Node.js or Python) that simulate user interactions with your application — loading a page, submitting a form, calling an API. Measures availability and latency from outside your application's own instrumentation. Alerts when canaries fail or exceed latency thresholds.
+
+**Evidently**: Feature flag management and A/B testing integrated with CloudWatch metrics. Gradually roll out features to a percentage of users, measure the metric impact, and roll back automatically if metrics degrade.
+
+---
+
+## Amazon EventBridge for Governance Automation
+
+EventBridge is the AWS event bus that connects AWS services, applications, and SaaS products in near real-time. For governance, EventBridge enables automated response to control plane events:
+
+| Source Event | EventBridge Rule | Target Action |
+|-------------|-----------------|--------------|
+| Config rule non-compliance detected | Rule: `source = aws.config, detail.newEvaluationResult.complianceType = NON_COMPLIANT` | Lambda: remediate the resource |
+| GuardDuty finding (high severity) | Rule: `source = aws.guardduty, detail.severity >= 7` | Step Functions: isolate instance, snapshot, notify security team |
+| CloudTrail root account login | Rule: `source = aws.signin, detail.userIdentity.type = Root` | SNS: immediate alert to security on-call |
+| EC2 instance launched without required tags | Rule: `source = aws.ec2, detail.eventName = RunInstances` | Lambda: tag check, stop instance if tag policy violated |
+
+EventBridge rules evaluate events in milliseconds — the closest thing to real-time governance response that AWS provides without custom infrastructure.
+
+---
+
+## Governance Flow Example
+
+<FlowDiagram
+  parties={["Developer", "AWS APIs", "CloudTrail", "CloudWatch", "Security Team"]}
+  steps={[
+    { from: "Developer", to: "AWS APIs", label: "ec2:TerminateInstances on prod account", sub: "SCP on Production OU: Deny ec2:TerminateInstances" },
+    { from: "AWS APIs", to: "Developer", label: "AccessDenied — request blocked", sub: "SCP evaluation: explicit Deny overrides any IAM Allow" },
+    { from: "AWS APIs", to: "CloudTrail", label: "Denied API call recorded", sub: "Event: errorCode=AccessDenied, eventName=TerminateInstances" },
+    { from: "CloudTrail", to: "CloudWatch", label: "Event streamed to CloudWatch Logs", sub: "Log group: /aws/cloudtrail/organization-trail" },
+    { from: "CloudWatch", to: "CloudWatch", label: "Metric filter: AccessDenied spike detected", sub: "Filter pattern: AccessDenied → metric FailedAPICallCount +1" },
+    { from: "CloudWatch", to: "Security Team", label: "Alarm → SNS notification", sub: "FailedAPICallCount > 5 in 5 min → email security-alerts@company.com" },
+  ]}
+/>
+
+---
+
+## References
+
+- [AWS Organizations documentation](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_introduction.html)
+- [Service Control Policies](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html)
+- [AWS Control Tower documentation](https://docs.aws.amazon.com/controltower/latest/userguide/what-is-control-tower.html)
+- [AWS CloudTrail documentation](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-user-guide.html)
+- [CloudTrail Lake](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-lake.html)
+- [AWS Config documentation](https://docs.aws.amazon.com/config/latest/developerguide/WhatIsConfig.html)
+- [AWS Config managed rules](https://docs.aws.amazon.com/config/latest/developerguide/managed-rules-by-aws-config.html)
+- [Amazon CloudWatch documentation](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html)
+- [Amazon EventBridge documentation](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html)

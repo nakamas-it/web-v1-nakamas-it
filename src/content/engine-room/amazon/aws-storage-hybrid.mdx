@@ -1,0 +1,246 @@
+---
+title: "AWS Block, File, and Hybrid Storage"
+category: "amazon"
+topic: "aws-storage-hybrid"
+summary: "EBS, EFS, FSx, Storage Gateway, and Snow Family — how AWS handles block, file, and hybrid on-premises storage scenarios."
+tags: ["aws", "ebs", "efs", "fsx", "storage-gateway", "snow-family", "hybrid-storage"]
+order: 10
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+AWS offers three distinct storage paradigms — block, file, and object — each optimised for different workload characteristics. Where object storage (S3) is addressed separately, this article covers EBS (block), EFS and FSx (file), and the services that bridge AWS storage into on-premises environments: Storage Gateway and the Snow Family.
+
+---
+
+## EBS — Elastic Block Store
+
+EBS provides persistent block storage volumes for EC2 instances. A block volume behaves like a physical disk attached to a server: the operating system formats it with a filesystem (ext4, NTFS, XFS) and treats it as a device. EBS volumes persist independently of the EC2 instance lifecycle — stopping or terminating an instance does not delete its EBS volume unless the "Delete on Termination" flag is set.
+
+Key characteristics:
+- **Network-attached**: EBS connects via the AWS network, not a physical bus. Sub-millisecond latency is typical, but EBS is not local NVMe.
+- **AZ-specific**: An EBS volume exists in one Availability Zone. To use it with an EC2 instance, both must be in the same AZ.
+- **One-to-one attachment** (except io2 Multi-Attach): A volume attaches to one EC2 instance at a time. Detach from one instance to attach to another.
+
+### Volume Types
+
+| Type | Category | Max IOPS | Max Throughput | Best For |
+|---|---|---|---|---|
+| **gp3** | General Purpose SSD | 16,000 | 1,000 MB/s | Default choice; IOPS/throughput set independently |
+| **gp2** | General Purpose SSD (legacy) | 16,000 | 250 MB/s | Legacy; IOPS tied to volume size (3 IOPS/GB) |
+| **io2** | Provisioned IOPS SSD | 64,000 | 1,000 MB/s | Latency-sensitive OLTP, databases |
+| **io2 Block Express** | Provisioned IOPS SSD | 256,000 | 4,000 MB/s | SAP HANA, mission-critical databases |
+| **st1** | Throughput HDD | 500 | 500 MB/s | Sequential large I/O: log streaming, Kafka, data warehouse ingest |
+| **sc1** | Cold HDD | 250 | 250 MB/s | Infrequently accessed archives, lowest cost HDD |
+
+**gp3** is now the default and recommended general-purpose volume. Unlike gp2, gp3 allows IOPS and throughput to be configured independently — you can provision 10,000 IOPS on a 100 GB volume without paying for a larger volume.
+
+**io2 Multi-Attach** allows a single io2 volume to be attached to up to 16 EC2 instances simultaneously within the same AZ. The application must manage concurrent writes — typically a clustered database engine or distributed file system that handles its own locking.
+
+### EBS Snapshots
+
+Snapshots are point-in-time backups stored in S3 (managed by AWS; you never see the underlying bucket). They are incremental: only changed blocks since the last snapshot are stored. Despite incremental storage, any snapshot can be used independently to restore a full volume.
+
+Snapshots can be:
+- Copied across regions (enabling region-to-region disaster recovery)
+- Shared with other AWS accounts
+- Used to create AMIs (Amazon Machine Images)
+- Managed by **Amazon Data Lifecycle Manager** — automated snapshot schedules with retention policies
+
+### EBS Encryption
+
+EBS encryption uses AES-256 with a KMS key. When enabled:
+- Data at rest on the volume is encrypted
+- Data in transit between the EC2 instance and the volume is encrypted
+- Snapshots of encrypted volumes are automatically encrypted
+- Volumes restored from encrypted snapshots are encrypted
+
+Encryption is set at volume creation and cannot be changed after creation. To encrypt an existing unencrypted volume: take a snapshot → copy the snapshot with encryption enabled → restore the encrypted snapshot copy as a new volume.
+
+---
+
+## EFS — Elastic File System
+
+EFS is a managed NFS v4.1/v4.2 file system. It is serverless, fully elastic (capacity automatically grows and shrinks), and designed for Linux workloads that need shared file storage across multiple EC2 instances, containers, or Lambda functions simultaneously.
+
+Unlike EBS, EFS is multi-AZ by default: mount targets are created in each AZ's subnet, and data is stored redundantly across multiple AZs.
+
+### Performance Modes
+
+- **General Purpose** (default): Sub-millisecond latency. Best for latency-sensitive applications (web serving, content management, application home directories). Supports up to 35,000 read operations/second and 7,000 write operations/second.
+- **Max I/O**: Slightly higher latency (single-digit milliseconds). Designed for massively parallel workloads (big data analytics, media processing) that prioritise aggregate throughput over per-operation latency.
+
+### Throughput Modes
+
+- **Bursting**: Baseline throughput scales with storage size (50 KB/s per GB stored). Builds burst credits when below baseline. Can burst to 100 MB/s (or higher for large file systems). Suitable for spiky workloads with average throughput below baseline.
+- **Provisioned**: Set MB/s regardless of storage size. Use when your throughput requirement exceeds what bursting provides for your current storage amount.
+- **Elastic** (recommended): Automatically scales to 3 MB/s per GB for reads and 1 MB/s per GB for writes, up to 10 GB/s. No burst credit model. Best for unpredictable or variable workloads.
+
+### Storage Classes and Lifecycle Management
+
+- **EFS Standard**: Multi-AZ, primary storage, no retrieval fee
+- **EFS Standard-IA**: Multi-AZ, lower cost, per-retrieval fee. Files auto-moved based on lifecycle policy.
+- **EFS One Zone**: Single-AZ, lower cost than Standard. For development or replicable data.
+- **EFS One Zone-IA**: Single-AZ, lowest cost, retrieval fee.
+
+Lifecycle management moves files to IA after a configurable period of inactivity (7, 14, 30, 60, or 90 days). Files are moved back to Standard/One Zone on access.
+
+### EFS Access Points
+
+Access points are application-specific entry points into an EFS file system. Each access point can enforce:
+- A specific root directory within the file system
+- A POSIX user identity (UID/GID) for all file operations through that access point
+
+Lambda functions benefit particularly from access points: each function can have an access point that enforces a specific home directory and user identity, even when multiple functions share the same EFS file system.
+
+---
+
+## FSx — Managed High-Performance File Systems
+
+FSx is AWS's family of managed file systems for specialised use cases where NFS (EFS) or SMB (basic S3 file gateway) are insufficient.
+
+### FSx for Windows File Server
+
+Fully managed Windows-native SMB file shares backed by Windows Server. Features:
+- Active Directory integration (join to existing on-premises or AWS Managed Microsoft AD)
+- NTFS permissions and Windows ACLs
+- DFS (Distributed File System) Namespaces for aggregating multiple FSx shares under one path
+- SMB 2.0–3.1.1, shadow copies (VSS), user quotas
+- Single-AZ or Multi-AZ deployment (Multi-AZ provides standby file server in a second AZ)
+
+Use FSx for Windows when migrating Windows workloads that depend on SMB, Windows ACLs, or DFS — scenarios where EFS (NFS, Linux permissions) is not compatible.
+
+### FSx for Lustre
+
+A high-performance parallel file system designed for compute-intensive workloads. Lustre disaggregates metadata and data operations, allowing clients to read/write directly to storage nodes in parallel without a single bottleneck.
+
+Capabilities:
+- Sub-millisecond latency, hundreds of GB/s throughput
+- Native S3 integration: mount an S3 bucket as a Lustre data repository. Files appear in the Lustre namespace and are loaded from S3 on first access. Modified files are exported back to S3.
+- Two deployment types:
+  - **Scratch**: No data replication, no persistence across file system recreation. For short-lived HPC jobs. Higher throughput per dollar.
+  - **Persistent**: Data replicated within the AZ, automatic failover, for long-term data processing pipelines.
+
+Use FSx for Lustre for HPC, ML training (feeding GPUs from a shared high-throughput store), video processing, and genomics workflows.
+
+### FSx for NetApp ONTAP
+
+A managed version of NetApp's ONTAP storage operating system. Provides:
+- Multi-protocol access: NFS (v3/v4.1), SMB, and iSCSI from the same file system
+- NetApp-native features: SnapMirror (replication), FlexClone (instant writable clones of volumes/files), deduplication, compression
+- Tiering to S3 for cold data
+- Snapshots with sub-second granularity
+
+Designed for lifting and shifting NetApp on-premises environments to AWS without re-platforming applications.
+
+### FSx for OpenZFS
+
+Managed ZFS (Zettabyte File System) with NFS access. Provides ZFS snapshots (instantaneous, space-efficient), writable clones from snapshots, compression (LZ4, ZSTD), and data integrity checking (checksumming). Access via NFS from Linux and macOS clients. Suited for migrating on-premises OpenZFS or Oracle Solaris ZFS workloads.
+
+---
+
+## AWS Storage Gateway
+
+Storage Gateway is a hybrid storage service: a virtual appliance (VMware ESXi, Hyper-V, KVM, or a physical AWS hardware appliance) deployed on-premises that presents a local storage interface to applications while storing data durably in AWS.
+
+Storage Gateway solves the "we have on-premises workloads that can't move to the cloud, but we want cloud economics and durability for our data" problem.
+
+### S3 File Gateway
+
+Presents NFS and SMB mount points to on-premises clients. Files written to the mount point are stored as native S3 objects in your specified bucket. The gateway maintains a local cache of recently accessed files, so reads of recent data are served locally. S3 objects are directly accessible from AWS services — applications can write through the gateway and then have AWS services (Glue, Athena, Lambda) process the data directly from S3.
+
+Active Directory authentication is supported for SMB shares.
+
+### FSx File Gateway
+
+Provides a local cache for FSx for Windows File Server. On-premises SMB clients mount the gateway, which maintains a cache of frequently accessed data locally and routes all traffic to FSx. Reduces WAN latency for FSx access. Supports DFS namespaces.
+
+### Volume Gateway — Cached Mode
+
+Presents iSCSI block devices (volumes) to on-premises servers. The primary copy of data lives in S3 (as EBS snapshots). Frequently accessed data is cached on-premises for low-latency access. Minimises on-premises storage hardware while keeping hot data locally accessible. Snapshots can be mounted in AWS as EBS volumes for restore or test/dev.
+
+### Volume Gateway — Stored Mode
+
+The full dataset lives on-premises (the gateway presents locally-stored iSCSI volumes). Data is asynchronously backed up to S3 as EBS snapshots. Used for disaster recovery: on-premises has full performance access, AWS holds the DR copy. In a failure, mount the latest snapshot as an EBS volume on EC2.
+
+### Tape Gateway
+
+Presents a Virtual Tape Library (VTL) via iSCSI to backup software (Veeam, Veritas NetBackup, Commvault, Arcserve). Virtual tapes write to S3 (active tapes). Archived tapes move to S3 Glacier or Glacier Deep Archive, appearing as an offline tape vault in the backup software. Replaces physical tape libraries with no application changes.
+
+<FlowDiagram
+  parties={["On-Prem NFS Clients", "S3 File Gateway", "Amazon S3", "S3 Lifecycle Rule", "Amazon Glacier"]}
+  steps={[
+    { from: "On-Prem NFS Clients", to: "S3 File Gateway", label: "NFS write (file share mount)", sub: "Application writes as if to local NFS" },
+    { from: "S3 File Gateway", to: "S3 File Gateway", label: "Cache recent files locally", sub: "Reads served from local cache if warm" },
+    { from: "S3 File Gateway", to: "Amazon S3", label: "Upload as S3 object (async)", sub: "Native S3 objects, AWS services can read directly" },
+    { from: "S3 Lifecycle Rule", to: "Amazon S3", label: "Evaluate transition rule", sub: "After configured inactivity period" },
+    { from: "Amazon S3", to: "Amazon Glacier", label: "Transition to Glacier storage class", sub: "Cost reduction for aged archive data" },
+  ]}
+/>
+
+---
+
+## Snow Family
+
+The Snow Family addresses scenarios where transferring data over the internet is impractical: the dataset is too large, the network is too slow, bandwidth is too expensive, or data residency requirements prevent cloud transit. AWS ships a physical encrypted device; you copy data locally, ship it back, and AWS imports it into S3.
+
+All Snow devices use AWS KMS for encryption (AES-256). The encryption key is never stored on the device. Data is inaccessible without the KMS key even if the device is lost or stolen.
+
+### Snowcone
+
+The smallest Snow device. Available in HDD (8 TB usable) and SSD (14 TB usable) variants. Ruggedized and battery-powered. Designed for edge computing and disconnected environments where carrying a larger device is impractical.
+
+Snowcone runs EC2-compatible edge compute (via AWS IoT Greengrass or EC2 API). It also runs a DataSync agent — data can be transferred back to AWS via DataSync over the network if connectivity is available, or by shipping the device.
+
+### Snowball Edge Storage Optimized
+
+80 TB of usable storage (128 TB raw). Designed for large-scale data migration. Includes limited compute capability (24 vCPU, 32 GB RAM) for pre-processing data locally before import. Cluster mode: 5–10 devices act as a distributed storage cluster for very large migrations.
+
+### Snowball Edge Compute Optimized
+
+28 TB of usable storage (with optional 7.68 TB of NVMe SSD) combined with 52 vCPU, 208 GB RAM, and an optional NVIDIA Tesla V100 GPU. Designed for edge machine learning inference, local video analysis, and compute-heavy preprocessing at sites without AWS connectivity. Storage is secondary to compute.
+
+### Snowmobile
+
+A 45-foot shipping container on a truck, capable of transferring up to 100 PB of data. Used for exabyte-scale data centre relocations where even multiple Snowball Edge clusters would take too long. AWS drives the truck to your data centre, you connect a fibre cable, copy data at up to 10 Gbps, and AWS drives it back.
+
+### Snow Device Workflow
+
+1. Order device through AWS Console
+2. AWS ships device (encrypted, locked to your account's KMS key)
+3. Connect to your network, copy data using the Snowball client or S3-compatible API
+4. Ship device back using the pre-paid shipping label
+5. AWS receives device, imports data into your S3 bucket, and destroys the device securely
+6. AWS sends an import job completion notification with data transfer audit logs
+
+---
+
+## Choosing the Right Storage Service
+
+| Need | Service |
+|---|---|
+| Block storage for EC2 (boot, databases) | EBS |
+| Shared NFS for Linux workloads | EFS |
+| Windows SMB with AD integration | FSx for Windows File Server |
+| HPC / ML / video parallel I/O | FSx for Lustre |
+| Lift-and-shift NetApp ONTAP | FSx for NetApp ONTAP |
+| Object storage, unlimited scale | S3 |
+| Hybrid: cloud backup of on-prem file shares | S3 File Gateway |
+| Hybrid: iSCSI block volumes with S3 backup | Volume Gateway |
+| Replace physical tape library | Tape Gateway |
+| Offline bulk data migration (under 100 TB) | Snowball Edge |
+| Edge compute in disconnected locations | Snowcone / Snowball Compute Optimized |
+| Exabyte-scale data centre migration | Snowmobile |
+
+---
+
+## References
+
+- [Amazon EBS Documentation](https://docs.aws.amazon.com/ebs/)
+- [Amazon EFS Documentation](https://docs.aws.amazon.com/efs/)
+- [Amazon FSx Documentation](https://docs.aws.amazon.com/fsx/)
+- [AWS Storage Gateway Documentation](https://docs.aws.amazon.com/storagegateway/)
+- [AWS Snow Family Documentation](https://docs.aws.amazon.com/snowball/)

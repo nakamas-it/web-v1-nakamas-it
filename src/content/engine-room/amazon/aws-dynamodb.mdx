@@ -1,0 +1,274 @@
+---
+title: "Amazon DynamoDB"
+category: "amazon"
+topic: "aws-dynamodb"
+summary: "AWS's serverless NoSQL key-value and document database — data model, partitioning, consistency options, indexing, and the operational patterns that make DynamoDB scale to any throughput."
+tags: ["aws", "dynamodb", "nosql", "database", "serverless", "key-value"]
+order: 12
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Amazon DynamoDB is a fully managed, serverless, key-value and document database. There are no servers to provision, no database engine to patch, no cluster to size, and no connections to manage. DynamoDB scales horizontally to handle any volume of requests, maintains single-digit millisecond read and write latency at that scale, and replicates data across three Availability Zones within a region automatically.
+
+The fundamental trade-off DynamoDB makes is deliberate: it sacrifices the flexibility of ad-hoc relational queries in exchange for predictable, horizontally scalable performance at any throughput level. Unlike a relational database where you model the data and add indexes later to support queries, DynamoDB requires you to model data around the access patterns the application will actually execute. Getting that design right is the central discipline of working with DynamoDB.
+
+---
+
+## Data Model
+
+### Tables, Items, and Attributes
+
+DynamoDB organises data into three levels:
+
+- **Table**: The top-level container. A table holds items. There are no cross-table joins — if you need to combine data from multiple entities, you either design a single table to hold multiple entity types (single-table design) or perform multiple requests from the application.
+- **Item**: A single data record, analogous to a row in a relational table. An item is a collection of attributes. Unlike relational rows, items in the same table do not need to have the same attributes — the schema is per-item, not per-table. Maximum item size is 400 KB.
+- **Attribute**: A name-value pair within an item.
+
+Supported attribute types:
+
+| Category | Types |
+|----------|-------|
+| Scalar | String (S), Number (N), Binary (B), Boolean (BOOL), Null (NULL) |
+| Set | String Set (SS), Number Set (NS), Binary Set (BS) — each element in a set must be unique |
+| Document | List (L) — ordered collection of any type; Map (M) — unordered collection of name-value pairs |
+
+Documents (List and Map) can be nested up to 32 levels deep, enabling rich hierarchical data structures within a single item.
+
+Every item must include the primary key attributes. All other attributes are optional.
+
+---
+
+## Primary Keys
+
+The primary key is the only schema-level constraint DynamoDB enforces at write time. Two forms:
+
+### Partition Key Only (Simple Primary Key)
+
+The partition key attribute uniquely identifies each item. DynamoDB passes the partition key value through an internal hash function to determine which storage partition holds the item. No two items in the table can share the same partition key value.
+
+### Partition Key + Sort Key (Composite Primary Key)
+
+Two items can share the same partition key value as long as their sort key values differ. All items sharing a partition key value are stored together in the same partition, sorted by sort key value. This co-location enables efficient range queries within a partition:
+
+- `begins_with(sortKey, "ORDER#")`
+- `between(sortKey, "2024-01-01", "2024-03-31")`
+- `sortKey > "2024-06-01"`
+
+Composite keys are essential for the single-table design pattern, where multiple entity types coexist in one table by using a naming convention in the partition and sort key values (e.g., PK = `USER#u123`, SK = `PROFILE` for a user profile; PK = `USER#u123`, SK = `ORDER#o456` for an order belonging to that user).
+
+---
+
+## Capacity Modes
+
+### On-Demand
+
+No capacity planning required. DynamoDB accepts any request rate and scales instantly. You pay per read request unit (RRU) and write request unit (WRU). On-demand is approximately 2–3x more expensive per unit than equivalent provisioned capacity at sustained, predictable load. It is ideal for new tables where traffic patterns are unknown, workloads with large spikes separated by idle periods, and applications where the cost of over-provisioning outweighs the per-request premium.
+
+### Provisioned
+
+You specify **Read Capacity Units (RCU)** and **Write Capacity Units (WCU)** for the table. DynamoDB throttles requests that exceed the provisioned capacity (returning a `ProvisionedThroughputExceededException`).
+
+Capacity unit definitions:
+
+| Operation | Capacity consumed |
+|-----------|------------------|
+| 1 strongly consistent read of up to 4 KB | 1 RCU |
+| 1 eventually consistent read of up to 4 KB | 0.5 RCU |
+| 1 transactional read of up to 4 KB | 2 RCU |
+| 1 write of up to 1 KB | 1 WCU |
+| 1 transactional write of up to 1 KB | 2 WCU |
+
+Items larger than the per-operation threshold consume proportionally more capacity (a 9 KB write consumes 9 WCU).
+
+**Auto Scaling** pairs with provisioned mode: you define minimum capacity, maximum capacity, and target utilisation percentage. DynamoDB adjusts provisioned capacity up or down automatically as measured utilisation deviates from the target. Auto Scaling reduces over-provisioning without requiring manual intervention.
+
+---
+
+## Consistency Models
+
+DynamoDB replicates every write across three AZ-resident storage nodes. How recently that replication has completed determines what a read returns.
+
+**Eventually consistent reads** (default): The read may be served from any of the three replicas. Under normal operation, all three replicas converge within a second or less. In rare cases, a read immediately after a write may return the previous value. Cost: 0.5 RCU per 4 KB.
+
+**Strongly consistent reads**: DynamoDB routes the read to the partition leader — the replica that confirmed the write. This always returns the most recent committed write. Cost: 1 RCU per 4 KB. Not available on Global Secondary Indexes or Global Tables.
+
+**Transactional reads and writes** (`TransactGetItems` / `TransactWriteItems`): ACID semantics across up to 100 items and up to 4 MB total data in a single atomic operation. All writes in a transaction either succeed together or all fail together. Cost: 2x the standard RCU/WCU (to cover the two-phase commit coordination).
+
+---
+
+## Secondary Indexes
+
+When the access patterns your application needs cannot be served by the base table's primary key alone, secondary indexes project the table data with alternative key structures.
+
+### Local Secondary Index (LSI)
+
+An LSI keeps the same partition key as the base table but uses a different sort key attribute. The index is "local" because it is scoped to items within a single partition key value — it cannot be queried across multiple partition key values in a single request.
+
+Properties:
+- Must be defined at table creation. Cannot be added later.
+- Shares RCU and WCU with the base table (no separate capacity).
+- Supports strongly consistent reads.
+- Maximum 5 LSIs per table.
+- All LSI projections for a given partition key count toward the 10 GB per-partition-key limit.
+
+Use LSIs when you need alternative sort orders or range conditions within a partition, and strong consistency is required.
+
+### Global Secondary Index (GSI)
+
+A GSI uses a completely different partition key and optional sort key. It spans all items across all partition key values in the base table — it is "global" in that sense.
+
+Properties:
+- Can be created or deleted at any time after table creation.
+- Has its own provisioned or on-demand capacity, independent of the base table.
+- Supports only eventually consistent reads.
+- Attributes included in the GSI are a projection: `ALL` (all attributes), `KEYS_ONLY` (base and index keys only), or `INCLUDE` (keys plus specified attributes).
+- Maximum 20 GSIs per table.
+- Replication from base table to GSI is asynchronous — there is a brief lag after a write before the GSI reflects the change.
+
+Use GSIs whenever you need to query by an attribute that is not part of the base table's primary key.
+
+| Feature | LSI | GSI |
+|---------|-----|-----|
+| Partition key | Same as base table | Any attribute |
+| Sort key | Different from base table | Any attribute (optional) |
+| Created after table creation | No | Yes |
+| Consistent reads | Strongly or eventually | Eventually only |
+| Separate capacity | No (shares base table) | Yes |
+| Max per table | 5 | 20 |
+
+---
+
+## DynamoDB Streams
+
+DynamoDB Streams captures every item-level modification event (INSERT, MODIFY, REMOVE) as an ordered sequence of stream records, partitioned by the item's partition key. Records are retained in the stream for 24 hours.
+
+Each stream record contains the table name, event type, and the item data. The amount of item data included is configurable:
+
+| StreamViewType | Contents |
+|----------------|----------|
+| `KEYS_ONLY` | Only the key attributes of the modified item |
+| `NEW_IMAGE` | The item as it appears after the modification |
+| `OLD_IMAGE` | The item as it appeared before the modification |
+| `NEW_AND_OLD_IMAGES` | Both the before and after states |
+
+Streams are consumed by:
+- **AWS Lambda via event source mapping**: Lambda polls the stream, batches records, and invokes your function. Lambda handles checkpointing (tracking which records have been processed).
+- **Kinesis Client Library**: For applications that need more control over stream consumption.
+
+Common patterns built on streams:
+- Trigger downstream processing on data change (send a notification when an order status changes to SHIPPED)
+- Replicate changes to another data store (populate an OpenSearch index from DynamoDB writes)
+- Build materialized views (maintain a pre-aggregated summary table updated in real time)
+- Audit logging (capture every write with before and after state for compliance records)
+
+---
+
+## DynamoDB Accelerator (DAX)
+
+DAX is an in-memory, write-through cache cluster purpose-built for DynamoDB. It is API-compatible with DynamoDB — applications change only the endpoint they connect to (DynamoDB endpoint → DAX cluster endpoint). The DAX client SDK wraps the DynamoDB SDK.
+
+DAX reduces read latency from single-digit milliseconds to **microseconds** for cached items. It caches at two levels: individual item reads (`GetItem`, `BatchGetItem`) and query/scan results (`Query`, `Scan`).
+
+**Write-through behaviour**: Writes go to DynamoDB first. Once DynamoDB confirms the write, DAX updates its cache. DAX never loses data on cache node failure because the authoritative copy is always in DynamoDB.
+
+**When DAX is not appropriate**:
+- **Strongly consistent reads**: DAX serves eventually consistent data from its cache. If your application requires strong consistency, it must bypass DAX and read directly from DynamoDB.
+- **Write-heavy workloads with low read-to-write ratio**: Cache entries are evicted frequently; the cache hit rate is low, so the latency benefit does not justify the cluster cost.
+- **Infrequent access**: If read traffic is low, the DAX cluster overhead (minimum one node) does not pay for itself.
+
+DAX is deployed as a cluster inside your VPC: one primary node and optional read replicas. Multi-AZ configurations place the primary and replicas in separate Availability Zones.
+
+<FlowDiagram
+  parties={["Application", "DAX Cluster", "Amazon DynamoDB"]}
+  steps={[
+    { from: "Application", to: "DAX Cluster", label: "GetItem request", sub: "Application connects to DAX endpoint, not DynamoDB endpoint" },
+    { from: "DAX Cluster", to: "Application", label: "Cache HIT — item returned from memory", sub: "Microsecond latency; DynamoDB not contacted" },
+    { from: "Application", to: "DAX Cluster", label: "GetItem request for uncached item", sub: "Key not in DAX item cache" },
+    { from: "DAX Cluster", to: "Amazon DynamoDB", label: "Cache MISS — GetItem forwarded to DynamoDB", sub: "DAX fetches the item on the application's behalf" },
+    { from: "Amazon DynamoDB", to: "DAX Cluster", label: "Item returned from DynamoDB", sub: "Single-digit millisecond response" },
+    { from: "DAX Cluster", to: "DAX Cluster", label: "Item stored in DAX item cache", sub: "TTL applied; subsequent reads served from cache" },
+    { from: "DAX Cluster", to: "Application", label: "Item returned to application", sub: "Application receives the same response as if it called DynamoDB directly" },
+    { from: "Application", to: "DAX Cluster", label: "PutItem / UpdateItem", sub: "Writes always go through DAX to DynamoDB" },
+    { from: "DAX Cluster", to: "Amazon DynamoDB", label: "Write forwarded to DynamoDB", sub: "DynamoDB confirms; DAX updates cache (write-through)" },
+    { from: "DAX Cluster", to: "Application", label: "Write acknowledged", sub: "Cache is consistent with DynamoDB" },
+  ]}
+/>
+
+---
+
+## Global Tables
+
+Global Tables extend DynamoDB across multiple AWS regions with **multi-active replication**. All region-local replica tables are fully writable — there is no primary/secondary relationship. An application can write to the replica in its closest region and have that write replicated to all other regions.
+
+Properties:
+- Replication is asynchronous, typically sub-second under normal network conditions.
+- **Conflict resolution**: last-writer-wins, determined by the write timestamp. If two regions write to the same item concurrently, the write with the later timestamp survives.
+- DynamoDB Streams must be enabled (Global Tables uses streams as its replication transport).
+- All regions must use on-demand capacity or provisioned capacity with Auto Scaling enabled.
+
+Global Tables is suited for applications that need low read and write latency from multiple geographic regions, active-active disaster recovery (any region can serve the full workload), and data residency compliance requirements where data must be stored in specific regions.
+
+---
+
+## TTL — Time to Live
+
+TTL allows DynamoDB to delete items automatically when a designated timestamp attribute expires, without consuming write capacity for the deletion.
+
+Configuration: designate a Number-type attribute as the TTL attribute. Set its value on each item to a Unix epoch timestamp (seconds since 1970-01-01T00:00:00Z). When the current time passes that value, the item is eligible for deletion.
+
+Deletion is performed by a background sweeper process. Items may remain in the table for up to 48 hours after their TTL timestamp passes — they can still be read during this window. TTL deletions do not consume WCU, do not appear in CloudWatch write metrics, and do generate stream records (as REMOVE events with the `userIdentity.type` = `Service`).
+
+Common use cases: session data with a maximum session lifetime, temporary authentication tokens, rate-limiting counters that reset on a schedule, ephemeral data that should not accumulate indefinitely.
+
+---
+
+## Design Patterns
+
+### Single-Table Design
+
+Storing multiple entity types in one table using a composite key naming convention. For example, in an e-commerce application:
+
+| PK | SK | Attributes |
+|----|----|-----------|
+| `USER#u001` | `PROFILE` | name, email, createdAt |
+| `USER#u001` | `ORDER#o100` | status, total, items |
+| `USER#u001` | `ORDER#o101` | status, total, items |
+| `PRODUCT#p500` | `DETAILS` | name, category, price |
+
+A single `Query` with `PK = USER#u001` returns the user profile and all their orders in one request, without a JOIN. A GSI on a different attribute enables additional access patterns (e.g., query all orders by status).
+
+Single-table design reduces round-trips to the database and keeps related data co-located for efficient access.
+
+### Access Pattern-First Design
+
+DynamoDB requires knowing your queries upfront. The design process is:
+1. List all access patterns the application needs (e.g., "get user by ID," "list all orders for a user," "get all orders with status PENDING from the last 7 days").
+2. Design partition keys and sort keys to serve those patterns efficiently.
+3. Add GSIs for access patterns that cannot be served by the base table key.
+
+This is the inverse of relational design, where you normalise data and add indexes reactively as queries emerge.
+
+### Partition Key Hotspots
+
+If all writes or reads are directed to a single partition key value, that partition becomes a bottleneck. Each DynamoDB partition has a throughput limit (3,000 RCU / 1,000 WCU). Exceeding that limit on a single partition causes throttling even if overall table capacity is not exhausted.
+
+Solutions:
+- **High-cardinality natural keys**: Use user ID, device ID, or session ID rather than status values or date fields.
+- **Write sharding**: Append a random suffix (e.g., `DATE#2024-01-15#3`) to distribute writes across multiple partitions, then query all shards and aggregate in the application.
+- **On-demand capacity mode**: DynamoDB's internal adaptive capacity automatically distributes hot partition traffic more aggressively in on-demand mode.
+
+---
+
+## References
+
+- [Amazon DynamoDB Developer Guide](https://docs.aws.amazon.com/dynamodb/)
+- [DynamoDB Core Concepts](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.html)
+- [Best Practices for Designing DynamoDB Tables](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/best-practices.html)
+- [DynamoDB Global Tables](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/GlobalTables.html)
+- [DynamoDB Streams](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Streams.html)
+- [DynamoDB Accelerator (DAX)](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DAX.html)
+- [DynamoDB Transactions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transactions.html)

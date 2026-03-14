@@ -1,0 +1,255 @@
+---
+title: "Amazon EC2 — Elastic Compute Cloud"
+category: "amazon"
+topic: "aws-ec2"
+summary: "Virtual servers on demand — instance types, AMIs, purchasing options, and how EC2 fits into a broader architecture."
+tags: ["aws", "ec2", "compute", "instances", "ami", "spot", "reserved"]
+order: 5
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Amazon EC2 is the foundational compute service in AWS. An EC2 instance is a virtual machine running in an AWS Availability Zone, inside a VPC subnet, on a physical host managed by AWS. You choose the operating system, the hardware profile, the network configuration, and the storage. You get full control of the OS and everything running on top of it.
+
+EC2 occupies the IaaS position in the AWS service hierarchy: maximum control, maximum responsibility. Every other compute service in AWS — ECS, EKS, Lambda, Fargate, Elastic Beanstalk — either runs on EC2 underneath or replaces it with a managed abstraction. Understanding EC2 means understanding the foundation that the rest of AWS compute is built on.
+
+---
+
+## Instance Families
+
+AWS organizes instance types into families, each optimized for a different hardware profile. The naming convention is: `family``generation``additional-features`.`size`.
+
+For example: `m7g.xlarge` — `m` (general purpose), generation `7`, `g` (Graviton processor), size `xlarge`.
+
+### Instance Family Reference
+
+| Family | Profile | Primary Use Cases |
+|--------|---------|------------------|
+| **t** (burstable) | Low baseline CPU, credit-based bursting | Development environments, low-traffic web servers, microservices with spiky traffic, CI build agents |
+| **m** (general purpose) | Balanced CPU, memory, and network | Production web tiers, application servers, small databases, code repositories |
+| **c** (compute optimized) | High CPU:memory ratio | Web servers, batch processing, HPC, video encoding, scientific modeling, CPU-intensive data processing |
+| **r** (memory optimized) | High memory:CPU ratio | In-memory databases (Redis self-managed), real-time big data analytics, in-memory caches, SAP workloads |
+| **x** (extreme memory) | Highest memory per vCPU | SAP HANA, large in-memory databases, HPC with large working sets |
+| **p** (GPU compute) | NVIDIA GPUs | ML training, scientific simulations, seismic analysis |
+| **g** (GPU graphics/ML) | NVIDIA GPUs balanced with CPU | ML inference, graphics rendering, game streaming, video transcoding |
+| **i** (storage optimized) | High-throughput local NVMe SSD | NoSQL databases (Cassandra, MongoDB), data warehousing, high-IOPS log processing |
+| **d** (dense HDD storage) | High-capacity local HDD | Massive parallel processing, Hadoop/Spark, data lakes (raw landing zone) |
+| **Graviton (arm suffix `g`)** | AWS-designed ARM CPUs | General purpose (M7g), compute (C7g), memory (R7g) — 20–40% better price/performance vs x86 for most workloads |
+
+### Sizes
+
+Within each family and generation, sizes scale proportionally:
+
+`nano` → `micro` → `small` → `medium` → `large` → `xlarge` → `2xlarge` → `4xlarge` → `8xlarge` → `12xlarge` → `16xlarge` → `24xlarge` → `48xlarge` → `metal`
+
+Each step roughly doubles vCPU, memory, and network bandwidth. Metal instances provide bare-metal access to the physical host — no hypervisor, useful for workloads that require direct hardware access or bring their own hypervisor.
+
+### T-Family Burst Mechanics
+
+T-family instances (T3, T4g) earn CPU credits when running below baseline and spend credits when bursting above. The baseline CPU percentage is proportional to the instance size. When credits are exhausted, the instance is throttled back to baseline. T3/T4g instances operate in **Unlimited mode** by default — they can burst beyond credit balance and incur a small charge per excess CPU-second. Unlimited mode prevents performance degradation at the cost of variable compute charges.
+
+---
+
+## Amazon Machine Images (AMIs)
+
+An **AMI** is a template for launching an EC2 instance. It defines:
+- The root volume snapshot (OS, pre-installed software, configuration)
+- Block device mapping (root volume type and size, additional EBS volumes)
+- Launch permissions (public, explicit account IDs, or private)
+- Virtualization type (HVM — hardware virtual machine — is the current standard)
+
+### AMI Sources
+
+| Source | Description | Use Case |
+|--------|-------------|---------|
+| **AWS provided** | Amazon Linux 2023, Ubuntu, Windows Server, RHEL, SUSE. Maintained by AWS or distribution partners. | Standard starting points for clean instances |
+| **AWS Marketplace** | Pre-configured AMIs from vendors — Fortinet firewalls, Palo Alto, CIS-hardened images, commercial databases. May incur hourly software license charges on top of EC2. | Licensing BYOL software or using vendor appliances |
+| **Community AMIs** | Publicly shared by other AWS users. | Not recommended for production — no vetting of security or configuration |
+| **Custom (Golden) AMIs** | AMIs you create from a configured instance. Bake in agents, configuration baselines, compliance settings. | Rapid, consistent instance provisioning. Eliminates per-launch configuration time. |
+
+### AMI Key Behaviors
+
+- **AMIs are region-specific.** An AMI created in `us-east-1` is not available in `eu-west-1` unless you copy it. Copying creates an independent snapshot in the target region.
+- **AMIs can be shared across accounts.** Share a custom AMI with specific AWS account IDs for cross-account deployments.
+- **AMIs reference EBS snapshots.** The root volume snapshot must remain in place while the AMI exists. Deregistering the AMI alone does not delete the snapshot.
+- **Launch Templates reference AMI IDs.** When you update an AMI (new golden image), create a new Launch Template version pointing to the new AMI ID. Use Instance Refresh to roll out the new image to running ASGs.
+
+---
+
+## Purchasing Options
+
+EC2 cost is driven primarily by purchasing model. Choosing the wrong model for a workload — paying On-Demand for a database that runs 24/7, or using Reserved Instances for a batch job that runs 6 hours per week — results in significant overspending.
+
+### Purchasing Model Comparison
+
+| Model | Typical Discount vs On-Demand | Commitment | Interruption Risk | Best For |
+|-------|------------------------------|-----------|------------------|---------|
+| **On-Demand** | None | None | None | Unpredictable workloads, spikes, dev/test, short-term experiments |
+| **Reserved Instances (1yr, no upfront)** | ~40% | 1 year | None | Known steady-state workloads, payment flexibility preferred |
+| **Reserved Instances (3yr, all upfront)** | ~60–72% | 3 years | None | Long-lived production workloads, maximum savings priority |
+| **Savings Plans (Compute, 1yr)** | ~54% | 1 year $/hr commitment | None | Flexible coverage across EC2, Lambda, Fargate — recommended over RIs for most |
+| **Savings Plans (EC2, 1yr)** | ~66% | 1 year $/hr in family/region | None | When committed to a specific instance family in a specific region |
+| **Spot Instances** | Up to 90% | None | High (2-min termination notice) | Stateless batch, EMR, rendering, CI/CD agents, fault-tolerant workloads |
+| **Dedicated Hosts** | More expensive; BYOL savings | On-Demand or RI | None | BYOL software (Windows Server, SQL Server per-socket), compliance requiring dedicated physical server |
+| **Dedicated Instances** | Small premium over On-Demand | None | None | Workloads requiring physical isolation from other customers without BYOL requirements |
+
+### Reserved Instances — Standard vs Convertible
+
+- **Standard RIs**: Locked to instance family, size, region, and OS. Cannot change. Maximum discount. Can sell unused capacity on the RI Marketplace.
+- **Convertible RIs**: Can exchange for different family, size, or OS during the term. Lower discount (~54% vs ~72% for 3yr all-upfront). Cannot sell on Marketplace.
+
+### Savings Plans — Preferred Over RIs
+
+Compute Savings Plans apply across EC2 instance families, sizes, regions, OS types, Lambda, and Fargate. You commit to spending $X per hour for 1 or 3 years. Usage is automatically matched to your commitment regardless of where and how you run compute. This flexibility makes Savings Plans the preferred choice over Standard RIs for most organizations.
+
+### Spot Instances — Architecture Implications
+
+Spot capacity can be reclaimed by AWS with a 2-minute warning when demand rises. Building on Spot requires designing for interruption:
+
+- Stateless application tier behind an ALB — instances can be replaced without data loss
+- SQS-backed job queues — in-progress jobs that are interrupted return to the queue for another instance to pick up
+- Spot Fleet with diversified instance types across multiple pools — interruptions in one pool don't kill the entire fleet
+- EC2 Hibernate on interruption — saves instance memory to EBS, resumes faster when capacity returns (supported on select instance types)
+
+Spot is not appropriate for databases, stateful services, or anything where an unexpected termination causes data loss or prolonged recovery.
+
+---
+
+## Placement Groups
+
+Placement groups control how EC2 instances are physically placed on hardware within a region.
+
+| Type | Physical Arrangement | Use Case | Constraint |
+|------|---------------------|---------|-----------|
+| **Cluster** | Same rack, same AZ, low-latency high-bandwidth interconnect | HPC, tightly-coupled distributed computing (MPI), ML training across instances | Single AZ only; rack failure affects all instances |
+| **Spread** | Different underlying hardware per instance | Small number of critical instances that must not fail together (primary + standby pairs) | Max 7 instances per AZ per placement group |
+| **Partition** | Instances in partitions; each partition isolated to its own rack | Large distributed systems (Hadoop, Cassandra, Kafka) that tolerate partition failure but need rack isolation | Up to 7 partitions per AZ; hundreds of instances |
+
+Cluster placement groups use the same physical rack, which means rack failure takes out all instances — they trade fault tolerance for maximum network performance. Use cluster placement groups only when inter-instance bandwidth is the performance bottleneck, and accept the single-rack fault domain.
+
+---
+
+## Storage Options
+
+### Amazon EBS (Elastic Block Store)
+
+EBS provides persistent network-attached block storage. EBS volumes persist independently of the EC2 instance — you can detach a volume from one instance and attach it to another (within the same AZ). EBS volumes survive instance termination if "Delete on Termination" is set to false.
+
+**EBS Volume Types:**
+
+| Type | IOPS | Throughput | Use Case |
+|------|------|-----------|---------|
+| **gp3** (General Purpose SSD) | Up to 16,000 IOPS (configurable) | Up to 1,000 MB/s | Default choice for most workloads. 3,000 IOPS baseline at no extra cost. |
+| **io2 Block Express** | Up to 256,000 IOPS | Up to 4,000 MB/s | Highest-performance SQL/NoSQL requiring sub-ms latency. SAN replacement. |
+| **st1** (Throughput HDD) | 500 MB/s | Large sequential reads/writes | Log processing, Kafka data volumes, large file processing |
+| **sc1** (Cold HDD) | 250 MB/s | Lowest cost per GB | Infrequently accessed large volumes; archive data that still needs block access |
+
+EBS Multi-Attach (io1/io2 only): Attach one volume to up to 16 instances simultaneously in the same AZ. Requires applications to manage concurrent write coordination (cluster-aware filesystem or application-level locking).
+
+### Instance Store
+
+**Instance store** is ephemeral block storage physically attached to the host machine. It is not network-attached — it communicates directly with the CPU over the PCIe bus, providing the highest possible IOPS and throughput available on EC2.
+
+Critical behavior: **data on instance store is lost when the instance stops or terminates.** It persists across instance reboots (assuming the host does not fail). Instance store is also not available on all instance types — it is included with I, D, H, and some M families.
+
+Use instance store for:
+- Buffers and caches that are repopulated on startup
+- Scratch space for temporary computation (sorting, intermediate ML training state)
+- Replica data that can be rebuilt from a primary source
+
+Never use instance store for data that cannot be reconstructed. If you need maximum IOPS with persistence, use io2 Block Express instead.
+
+---
+
+## EC2 Instance Metadata Service (IMDS)
+
+Every EC2 instance can query the **Instance Metadata Service** at the link-local address `http://169.254.169.254/`. The metadata service provides information about the running instance without any AWS API call:
+
+- Instance ID, type, and region
+- Public and private IP addresses
+- Security groups
+- IAM role name and temporary credentials (from the IAM role attached as instance profile)
+- User data script
+- Block device mappings
+
+### IMDSv1 vs IMDSv2
+
+**IMDSv1** (legacy): Simple HTTP GET requests. Vulnerable to Server-Side Request Forgery (SSRF) attacks — if an application on the instance can be tricked into making HTTP requests to arbitrary URLs, an attacker can retrieve IAM credentials from the metadata endpoint.
+
+**IMDSv2** (session-oriented): Requires a two-step process:
+1. POST to `http://169.254.169.254/latest/api/token` with a TTL header to obtain a session token
+2. GET metadata endpoints with the `X-aws-ec2-metadata-token` header
+
+IMDSv2 breaks SSRF-based metadata attacks because SSRF typically cannot control request headers. **IMDSv2 is required by default on new instances as of 2024.** Enforce IMDSv2-only at account level using an SCP that denies EC2 instance launches unless the `HttpTokens` attribute is set to `required`.
+
+Retrieve IMDSv2 credentials from an application using any AWS SDK — the SDK handles the IMDS interaction automatically and caches credentials, refreshing them before expiry.
+
+---
+
+## EC2 Networking
+
+### VPC and Subnet Placement
+
+Every EC2 instance lives in a VPC subnet in a specific AZ. The subnet determines:
+- Which AZ the instance is in
+- Whether the instance can receive a public IP (public subnets with Internet Gateway route)
+- The default network ACL applied at the subnet level
+
+### Elastic Network Interfaces (ENIs)
+
+Every instance has at least one primary ENI. You can attach additional ENIs from the same VPC to an instance. Use cases:
+- Dual-homed instances in multiple subnets (management network + application network)
+- Network appliances (firewalls, NAT instances) that must forward packets between subnets
+- Moving a network identity (private IP + EIP + security group) from a failed instance to a replacement by detaching and reattaching the ENI
+
+### Enhanced Networking
+
+High-throughput instances use enhanced networking (SR-IOV) for better network performance:
+- **ENA (Elastic Network Adapter)**: Up to 100 Gbps. Used by most current-generation instance families.
+- **EFA (Elastic Fabric Adapter)**: HPC networking. Provides OS-bypass networking for inter-instance MPI traffic in cluster placement groups, with latencies approaching on-premises InfiniBand.
+
+---
+
+## User Data and Instance Initialization
+
+**User data** is a script (shell script or cloud-init configuration) that runs once on the first boot of an instance. Use it to:
+- Install packages and configure software
+- Download and start application binaries
+- Register with a configuration management system (Chef, Puppet, Ansible)
+- Pull secrets from Secrets Manager and write them to application config files
+
+User data runs as root. Limit its scope to bootstrapping — avoid putting application logic in user data. For recurring configuration management, use Systems Manager State Manager or a configuration management system.
+
+For Golden AMIs, bake as much configuration as possible into the AMI at build time. User data at launch time should only handle configuration that varies per environment or per launch (environment-specific secrets, instance registration, etc.). This dramatically reduces launch time.
+
+<FlowDiagram
+  parties={["Developer", "AMI Builder (EC2 Image Builder)", "EC2 Auto Scaling Group", "Running Instance"]}
+  steps={[
+    { from: "Developer", to: "AMI Builder (EC2 Image Builder)", label: "Trigger image build pipeline", sub: "Base OS + agents + hardening + app runtime" },
+    { from: "AMI Builder (EC2 Image Builder)", to: "Developer", label: "New AMI ID published", sub: "ami-0abc123def456789 in us-east-1" },
+    { from: "Developer", to: "EC2 Auto Scaling Group", label: "Update Launch Template with new AMI ID", sub: "Launch Template version 5 → ami-0abc123def456789" },
+    { from: "EC2 Auto Scaling Group", to: "Running Instance", label: "Instance Refresh — rolling replacement", sub: "Replace 20% of instances at a time, 300s pause" },
+    { from: "Running Instance", to: "Running Instance", label: "User data runs at first boot", sub: "Fetch env-specific config from SSM Parameter Store" },
+    { from: "Running Instance", to: "EC2 Auto Scaling Group", label: "Health check passes — instance In Service", sub: "Old instance terminated, new instance serves traffic" },
+  ]}
+/>
+
+---
+
+## Security Groups
+
+**Security groups** are stateful virtual firewalls at the instance level. Rules specify:
+- Protocol (TCP, UDP, ICMP, or all)
+- Port range
+- Source/destination: CIDR, another security group ID, or prefix list
+
+Stateful means return traffic is automatically allowed — if your security group allows inbound TCP/443, the response traffic on the same connection is allowed outbound without an explicit outbound rule.
+
+Key behaviors:
+- Security groups are **allow-only** — there is no deny rule syntax. Anything not explicitly allowed is implicitly denied.
+- Security group rules referencing **another security group ID** as source are extremely useful: instead of whitelisting IP ranges (which change as instances are replaced), whitelist the security group attached to the ALB. Any instance with that security group can reach the target.
+- EC2 instances can have multiple security groups. The effective rules are the union of all attached security groups.
+- Security groups are regional — a security group in `us-east-1` cannot be referenced in `eu-west-1`.

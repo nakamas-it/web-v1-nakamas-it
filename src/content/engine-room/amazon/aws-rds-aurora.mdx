@@ -1,0 +1,259 @@
+---
+title: "Amazon RDS & Aurora"
+category: "amazon"
+topic: "aws-rds-aurora"
+summary: "Managed relational databases on AWS — how RDS abstracts operational overhead, what Aurora's distributed storage engine provides, and when to use each."
+tags: ["aws", "rds", "aurora", "database", "mysql", "postgresql", "multi-az"]
+order: 11
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Relational databases are the backbone of most production applications, yet running them on self-managed infrastructure carries a significant operational burden: patching the host OS, applying database engine upgrades, managing backup schedules, monitoring replication health, and responding to hardware failures. Amazon RDS and Aurora transfer the bulk of that burden to AWS while preserving the SQL interface, relational data model, and engine-specific features that applications depend on.
+
+RDS wraps common commercial and open-source database engines in a managed service layer. Aurora goes further — it replaces the on-disk storage engine entirely with a purpose-built distributed storage system, while keeping the MySQL and PostgreSQL wire protocols that applications already speak. The result is two distinct architectural approaches to the same goal: letting you focus on schema design, query performance, and application logic rather than infrastructure operations.
+
+---
+
+## RDS Supported Engines
+
+RDS supports six database engines:
+
+| Engine | Notes |
+|--------|-------|
+| MySQL | Most common open-source choice. Minor version upgrades can be applied automatically. Major version upgrades (e.g., 8.0 → 9.0) require a scheduled maintenance window and testing. |
+| PostgreSQL | Full ACID compliance, advanced data types, rich extension ecosystem. |
+| MariaDB | MySQL-compatible fork. Favoured in some open-source stacks. |
+| Oracle | Enterprise edition with Bring Your Own License (BYOL) or License Included pricing. |
+| Microsoft SQL Server | Express, Web, Standard, Enterprise editions available. |
+| IBM Db2 | Added in 2023. Standard and Advanced editions. |
+
+Engine version management is handled at the RDS level. AWS applies minor version patches automatically during maintenance windows when that option is enabled. Major version upgrades — which may include behavioural or syntax differences — require manual initiation to allow application compatibility testing beforehand.
+
+---
+
+## RDS Deployment Options
+
+### Single-AZ
+
+One DB instance in one Availability Zone, backed by a single EBS volume. There is no automated failover. If the instance or AZ fails, recovery requires manual intervention: restoring from backup or promoting a read replica. Single-AZ is appropriate for development and test environments where cost matters more than uptime.
+
+### Multi-AZ (Standby)
+
+A synchronous standby replica is maintained in a different Availability Zone. Every write committed to the primary is synchronously replicated to the standby before the acknowledgement is returned to the application. This ensures zero data loss (RPO = 0) in a failover event.
+
+The standby instance is **not readable**. It exists exclusively for high availability. In a primary failure, RDS automatically flips the DNS CNAME for the DB endpoint to the standby, which is promoted to primary. Failover typically completes in 60–120 seconds. Applications that reconnect to the same endpoint hostname are transparently routed to the new primary.
+
+Because the standby serves no read traffic, it provides no read scalability benefit — only HA.
+
+### Multi-AZ Cluster (MySQL and PostgreSQL)
+
+A newer deployment model: one writer and two readable standbys in three different Availability Zones. Writes are committed when at least one standby acknowledges receipt (quorum-style). Both standbys can serve read traffic, providing a degree of read scaling alongside HA. Failover completes in approximately 35 seconds — roughly half the time of the traditional two-node Multi-AZ model.
+
+---
+
+## Read Replicas
+
+Read Replicas are asynchronously replicated copies of the primary DB instance. Unlike Multi-AZ standbys, replicas are readable and serve read traffic from the application, offloading query load from the writer.
+
+Key characteristics:
+
+- **Asynchronous replication**: There is a replication lag between primary and replica — typically milliseconds, but it can grow during heavy write periods. Applications reading from a replica may see slightly stale data.
+- **Quantity**: Up to 15 read replicas per source for MySQL, PostgreSQL, and MariaDB.
+- **Promotion**: Any read replica can be promoted to a standalone DB instance. Replication breaks on promotion. This is commonly used for disaster recovery or database migration.
+- **Cross-region replicas**: Replicas can be created in different AWS regions. Cross-region replicas use MySQL binlog or PostgreSQL WAL streaming across the network. RPO in a regional disaster equals the replication lag at the time of failure.
+- **Cascading replicas**: Read replicas can themselves be sources for additional replicas, reducing replication load on the primary.
+
+A critical distinction: Multi-AZ standby = synchronous, non-readable, automatic failover. Read Replica = asynchronous, readable, must be promoted manually. A Multi-AZ DB with read replicas provides both HA and read scalability.
+
+---
+
+## RDS Proxy
+
+RDS Proxy is a managed, fully serverless connection pooler that sits in the data path between your application and an RDS or Aurora database.
+
+**The problem it solves**: Relational databases have a per-connection overhead — memory allocation, authentication state, and background processes per connection. Applications that spawn many short-lived connections (particularly AWS Lambda functions, which create a new connection on each invocation and may scale to thousands of concurrent executions) can overwhelm the database's connection limit or exhaust its memory.
+
+RDS Proxy maintains a pool of long-lived connections to the database engine and multiplexes application connections across that pool. From the database's perspective, it sees a steady, small number of connections from the proxy. From the application's perspective, it connects to the proxy endpoint using the same credentials and driver as connecting directly to the database.
+
+Additional benefits:
+
+- **Failover acceleration**: During a Multi-AZ failover, the proxy buffers application connections and reconnects to the new primary internally. Applications experience a brief pause rather than connection errors propagating up to the application layer.
+- **IAM authentication**: Applications can authenticate to the proxy using IAM database authentication tokens instead of embedding database passwords in application code or environment variables. The actual database password is stored in AWS Secrets Manager; the proxy handles retrieval.
+- **Supported engines**: MySQL and PostgreSQL (both RDS and Aurora).
+
+---
+
+## RDS Custom
+
+Standard RDS does not allow access to the underlying operating system or the database engine binaries. RDS Custom relaxes this for **Oracle** and **Microsoft SQL Server** workloads that require OS-level access.
+
+With RDS Custom, you can:
+- Access the EC2 host via AWS Systems Manager Session Manager
+- Install custom software (third-party monitoring agents, storage managers, required ISV software components)
+- Modify OS and database configuration parameters not exposed through RDS parameter groups
+
+AWS continues to manage automated backups and basic health monitoring, but you accept responsibility for changes made outside the standard parameter and option group interfaces. RDS Custom occupies the space between fully managed RDS and fully self-managed databases on EC2.
+
+---
+
+## Aurora Architecture
+
+Aurora is AWS's cloud-native relational database. It exposes MySQL 8.0-compatible and PostgreSQL 14+-compatible wire protocols, so most existing applications connect without modification. The difference is entirely below the SQL layer.
+
+### Distributed Storage Engine
+
+Aurora separates compute (the DB instance running the SQL engine) from storage (the distributed storage system). Storage properties:
+
+- Data is divided into 10 GB segments. Each segment is replicated **6 times across 3 Availability Zones** — two copies per AZ.
+- **Write quorum**: A write is acknowledged after 4 of 6 storage nodes confirm receipt. Aurora tolerates losing 2 copies without impacting write availability.
+- **Read quorum**: 3 of 6 copies must respond. Aurora tolerates losing 3 copies without impacting read availability.
+- Storage grows automatically in 10 GB increments, from 10 GB up to 128 TB. There is no storage provisioning step.
+- **Self-healing**: Aurora continuously scans storage segments for corruption and repairs them in the background using peer copies.
+
+The Aurora writer instance does not write data to local disk. It writes redo log records to the distributed storage layer. The storage nodes apply log records and materialise data pages independently. This eliminates the I/O amplification present in traditional MySQL/PostgreSQL, where a single write results in multiple disk writes (data file + WAL + doublewrite buffer).
+
+---
+
+## Aurora Cluster Architecture
+
+An Aurora cluster consists of:
+
+- **One writer instance**: Receives all writes. Can also serve reads directly.
+- **Up to 15 Aurora Replica instances**: Read-only instances connected to the same shared distributed storage. Because replicas share storage with the writer rather than receiving data via network replication, replica lag is typically under 10 milliseconds — far lower than standard RDS read replicas.
+
+**Endpoints**:
+
+| Endpoint | Target | Purpose |
+|----------|--------|---------|
+| Cluster endpoint (writer endpoint) | Current primary writer | All writes, and reads that require zero lag |
+| Reader endpoint | All available replicas (round-robin) | Read-scalable query load |
+| Instance endpoints | Specific instance | Direct access for diagnostics or specialised routing |
+| Custom endpoints | Defined subset of instances | Route analytics queries to larger-class replicas |
+
+On failover, the cluster endpoint DNS is automatically updated to point to the newly promoted writer. Applications connecting via the cluster endpoint reconnect to the new primary transparently (subject to TCP reconnect logic and connection timeouts).
+
+---
+
+## Aurora Serverless v2
+
+Aurora Serverless v2 scales Aurora compute capacity automatically and continuously in response to actual database load, without pausing, restarting, or failing over.
+
+Scaling is measured in **Aurora Capacity Units (ACUs)**, where 1 ACU represents approximately 2 GiB of memory and proportional CPU. Serverless v2 scales in increments of 0.5 ACU, from a configurable minimum to a configurable maximum (up to 128 ACU per instance).
+
+Key behaviours:
+
+- Scaling is near-instantaneous — capacity adjusts within seconds of load change, not minutes.
+- Unlike Aurora Serverless v1 (which scaled in large discrete steps and had cold start latency), v2 scales continuously and supports all Aurora features including Multi-AZ, Global Database, and read replicas.
+- Minimum ACU can be set to 0.5 (not zero). True scale-to-zero is a v1 characteristic; v1 had cold start delays of 20–30 seconds and is not recommended for production workloads.
+- Billing is per ACU-second consumed.
+- The same Aurora cluster can mix serverless v2 and provisioned instances — for example, a provisioned writer with serverless v2 replicas that scale during query spikes.
+
+Best suited for: development/test environments, SaaS applications with per-tenant databases (many databases, each with variable and infrequent load), and production workloads with unpredictable or highly variable traffic patterns.
+
+---
+
+## Aurora Global Database
+
+An Aurora Global Database spans multiple AWS regions. It consists of a single primary region (one read/write cluster with up to 15 replicas) and up to five secondary regions (read-only clusters).
+
+Replication from the primary to secondary regions uses Aurora's own storage-level replication infrastructure, not database-level log shipping. Replication lag is typically under 1 second.
+
+| Property | Detail |
+|----------|--------|
+| Replication mechanism | Storage-layer replication (not MySQL binlog or PostgreSQL WAL) |
+| Replication lag | Typically < 1 second |
+| RPO (data loss on regional failure) | < 1 second |
+| RTO (time to failover to secondary region) | Approximately 1 minute |
+| Secondary regions | Read-only; applications can read from local region with < 1s lag |
+| Failover | Promote a secondary region to primary; application must update its connection string |
+
+This is architecturally distinct from cross-region read replicas in standard RDS. Cross-region RDS replicas use binlog-based replication across the public internet (or Direct Connect). Aurora Global Database uses a dedicated replication path with lower latency, lower RPO, and managed failover.
+
+---
+
+## Aurora Backtrack
+
+Backtrack allows rewinding an Aurora MySQL cluster to a prior point in time **in place**, without restoring from a backup and without creating a new cluster. The cluster's storage is rolled back to its state at the specified timestamp. Operations that occurred after the target time are effectively reversed.
+
+Properties:
+- Available for Aurora MySQL only (not Aurora PostgreSQL).
+- Backtrack window is configurable up to 72 hours.
+- Rewind typically completes in seconds to minutes depending on how far back and the volume of changes.
+- The cluster is briefly unavailable during the backtrack operation.
+
+Use cases: accidental `DELETE FROM table` without a `WHERE` clause, failed schema migration that cannot be rolled back via application-level logic, developer testing that requires resetting to a known baseline.
+
+Backtrack is not a substitute for automated backups — it cannot recover from physical storage failures and cannot rewind beyond the configured window.
+
+---
+
+## Backup and Restore
+
+### Automated Backups
+
+RDS and Aurora take daily automated snapshots and continuously stream transaction logs to S3. This enables **point-in-time recovery (PITR)** to any specific second within the backup retention window (configurable from 1 to 35 days).
+
+Recovery always creates a new DB instance. You cannot restore over an existing running instance.
+
+### Manual Snapshots
+
+Manual snapshots are taken on demand and persist until explicitly deleted — they are not subject to the retention period that automated backups respect. Manual snapshots can be copied to other regions and shared with other AWS accounts.
+
+### Restore Behaviour
+
+| Scenario | Result |
+|----------|--------|
+| Restore automated backup to specific time | New DB instance at the target timestamp |
+| Restore manual snapshot | New DB instance at the snapshot's creation point |
+| Cross-region restore | New DB instance in the target region |
+| Restore from encrypted snapshot | New instance inherits the KMS key used to encrypt the snapshot |
+
+<FlowDiagram
+  parties={["Application", "Aurora Writer", "Storage Node (AZ-A x2)", "Storage Node (AZ-B x2)", "Storage Node (AZ-C x2)", "Aurora Replica", "Reader Endpoint"]}
+  steps={[
+    { from: "Application", to: "Aurora Writer", label: "Write request (INSERT / UPDATE)", sub: "Application connects to cluster (writer) endpoint" },
+    { from: "Aurora Writer", to: "Storage Node (AZ-A x2)", label: "Redo log records sent to all 6 nodes", sub: "Distributed across 3 AZs, 2 copies per AZ" },
+    { from: "Aurora Writer", to: "Storage Node (AZ-B x2)", label: "Redo log records sent to all 6 nodes", sub: "Parallel write — no serialisation between AZs" },
+    { from: "Aurora Writer", to: "Storage Node (AZ-C x2)", label: "Redo log records sent to all 6 nodes", sub: "6 copies total; write quorum = 4/6" },
+    { from: "Storage Node (AZ-B x2)", to: "Aurora Writer", label: "Write quorum reached (4/6 acknowledged)", sub: "Remaining nodes confirm asynchronously" },
+    { from: "Aurora Writer", to: "Application", label: "Write acknowledged to application", sub: "Durable — 4 storage copies confirmed" },
+    { from: "Application", to: "Reader Endpoint", label: "Read query", sub: "Reader endpoint load-balances across replicas" },
+    { from: "Reader Endpoint", to: "Aurora Replica", label: "Query routed to a replica", sub: "Replica reads from same shared storage — lag < 10ms" },
+    { from: "Aurora Replica", to: "Application", label: "Query result returned", sub: "No data copying needed — storage is shared" },
+  ]}
+/>
+
+---
+
+## Aurora vs RDS — When to Use Each
+
+| Dimension | RDS (MySQL/PostgreSQL) | Aurora (MySQL/PostgreSQL) |
+|---|---|---|
+| Storage architecture | Local EBS per instance | Distributed, 6 copies across 3 AZs |
+| Max storage | 64 TB (gp3/io2) | 128 TB (auto-scales in 10 GB increments) |
+| Multi-AZ replication | Synchronous to 1 standby (non-readable) | 15 replicas sharing storage, < 10ms lag |
+| Replica lag | Seconds (async log shipping) | < 10ms (shared storage) |
+| Failover RTO | 60–120 seconds | < 30 seconds (with replicas) |
+| Failover RPO | Near-zero (sync standby) | Zero (shared storage, no data to transfer) |
+| Serverless | No | Aurora Serverless v2 |
+| Global multi-region | Cross-region read replicas only | Aurora Global Database (< 1s lag, managed failover) |
+| Backtrack | No | Aurora MySQL only (up to 72 hours) |
+| Cost | Lower per instance | Higher per instance (~20% more) |
+| Best for | Cost-sensitive, standard workloads, familiar engine | High availability, global reach, low-latency replicas |
+
+---
+
+## References
+
+- [Amazon RDS Documentation](https://docs.aws.amazon.com/rds/)
+- [Amazon Aurora Documentation](https://docs.aws.amazon.com/aurora/)
+- [RDS Multi-AZ Deployments](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.html)
+- [Aurora Storage Architecture](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Overview.StorageReliability.html)
+- [Aurora Global Database](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database.html)
+- [Aurora Serverless v2](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html)
+- [Aurora Backtrack](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraMySQL.Managing.Backtrack.html)
+- [RDS Proxy](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html)

@@ -27,7 +27,7 @@ A protocol library covering how networking actually works — from the physics o
 ### The Engine Room (`/engine-room/`)
 Vendor-focused platform coverage — what each vendor's technology stack is, why it exists, and how it works conceptually. Organised by vendor rather than function.
 
-**Current coverage — 177 articles across 6 vendors:**
+**Current coverage — 197 articles across 7 vendors:**
 
 #### Microsoft (91 articles)
 
@@ -97,6 +97,16 @@ Vendor-focused platform coverage — what each vendor's technology stack is, why
 | IOS Foundations | IOS CLI, Switch Configuration, STP Configuration, Router Configuration, ROAS & L3 Switching, OSPF Configuration |
 | Advanced Features | IPv6 Configuration, ACL Configuration, Switch Security, FHRP Configuration, Wireless & WLC, QoS Configuration |
 | Platform & Security | Smart Licensing, FTD & FMC Overview, Firepower Policies, FTD VPN, SD-Access, Network Automation |
+
+#### Amazon Web Services (20 articles)
+
+| Topic area | Articles |
+|------------|----------|
+| Foundations | Global Infrastructure, IAM, Shared Responsibility Model, Well-Architected Framework |
+| Compute | EC2, Auto Scaling & ELB, Lambda & Serverless, Containers (ECS/EKS) |
+| Storage & Databases | S3, Hybrid Storage (EBS/EFS/FSx/Snow), RDS & Aurora, DynamoDB, Specialized Databases |
+| Networking | VPC, Messaging & Events (SQS/SNS/Kinesis/EventBridge), Hybrid Networking (VPN/DX/TGW), CloudFront & Route 53 |
+| Security & Operations | Security Services (Shield/WAF/GuardDuty/KMS), Governance & Observability, Cost Management |
 
 ---
 
@@ -207,7 +217,7 @@ import FlowDiagram from '../../../components/FlowDiagram.astro';
 ...
 ```
 
-Valid `category` values: `identity`, `virtualization`, `storage`, `endpoint`, `email`, `monitoring`, `cisco`
+Valid `category` values: `identity`, `virtualization`, `storage`, `endpoint`, `email`, `monitoring`, `cisco`, `amazon`
 
 Set `draft: true` in either collection to exclude from the production build while writing.
 

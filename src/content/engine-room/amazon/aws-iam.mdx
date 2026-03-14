@@ -1,0 +1,263 @@
+---
+title: "AWS IAM — Identity and Access Management"
+category: "amazon"
+topic: "aws-iam"
+summary: "Users, groups, roles, and policies — how AWS controls who can do what to which resources."
+tags: ["aws", "iam", "security", "roles", "policies", "identity"]
+order: 2
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+AWS Identity and Access Management (IAM) is the global service that controls authentication and authorization for every API call made to AWS. When an EC2 instance uploads a file to S3, when a developer runs `aws ec2 describe-instances`, when a Lambda function reads a secret from Secrets Manager — every one of those actions passes through IAM before it reaches the target service.
+
+IAM is not an optional security layer placed in front of AWS. It is woven into the AWS control plane itself. Understanding IAM means understanding how AWS actually works: every resource interaction is an API call with an identity, and IAM is the engine that decides whether that call is permitted.
+
+IAM is global — it is not region-specific. Users, groups, roles, and policies created in IAM are available across all regions.
+
+---
+
+## The Root Account
+
+When you create an AWS account, the email address and password you used create the **root user**. The root user has unrestricted access to every service and resource in the account. It bypasses IAM entirely — no policy can deny the root user.
+
+Root user capabilities that cannot be delegated to any other identity include:
+- Changing the account's root email address or password
+- Closing the account
+- Changing the AWS Support plan
+- Enabling IAM access to the Billing console
+- Restoring IAM permissions after accidental full lockout
+- Configuring MFA on the root user itself
+
+**The operational rule is absolute: do not use the root account for daily tasks.** After creating the account:
+
+1. Enable MFA on the root user (hardware MFA key if possible)
+2. Create an IAM user or IAM Identity Center user with administrative access
+3. Use that identity for all subsequent work
+4. Store root credentials in a sealed vault and audit access to them
+
+The only time you use root is for the handful of operations that literally require it.
+
+---
+
+## IAM Users
+
+An IAM **user** is a persistent identity that represents a person or an application. Users have long-term credentials — unlike roles, which provide temporary credentials, users hold credentials that do not expire unless you rotate them.
+
+### Credential Types
+
+| Credential | Used For | Notes |
+|------------|---------|-------|
+| **Console password** | AWS Management Console (browser) | Optionally enforced by a password policy |
+| **Access key ID + Secret access key** | AWS CLI, SDKs, direct API calls | Never embed in code; rotate regularly; prefer roles |
+| **MFA device** | Additional authentication factor | Virtual (TOTP app), hardware token, or FIDO2/WebAuthn |
+
+### When to Use IAM Users
+
+The use case for IAM users has narrowed significantly with the introduction of IAM Identity Center. The current guidance:
+
+- **Human users**: prefer IAM Identity Center over direct IAM users. Identity Center provides SSO, centralized management, and federation — creating individual IAM users per person in each account does not scale.
+- **Service accounts (legacy)**: applications running outside AWS that need API access and cannot use a role. Even here, prefer short-lived credentials from IAM Identity Center's credential vending, or OIDC federation.
+- **Break-glass admin**: a dedicated IAM user with full permissions, MFA required, used only for emergency access when Identity Center is unavailable.
+
+One IAM user per person is the minimum. Sharing credentials between people is prohibited because it destroys audit traceability — CloudTrail logs show which IAM user made every API call.
+
+---
+
+## Groups
+
+An IAM **group** is a collection of IAM users. Policies attached to a group are inherited by all users in that group. Groups cannot contain other groups — they are flat.
+
+Groups exist purely to simplify permission management. Instead of attaching the same policy to 40 individual users, you attach it to one group. When a new user joins the team, you add them to the group and they immediately have the correct permissions.
+
+Common group structures:
+- `Developers` — read/write access to dev account resources, CodePipeline, CodeBuild
+- `DBATeam` — RDS describe/modify access, Secrets Manager read
+- `SecurityOps` — read-only across all services, GuardDuty and Security Hub full access
+- `BillingReaders` — access to Cost Explorer and billing console only
+
+A user can belong to multiple groups and inherits the union of all policies attached to each group.
+
+---
+
+## Roles
+
+An IAM **role** is an identity that does not belong to a person — it is assumed temporarily by an entity that needs it. Roles provide short-lived credentials issued by **AWS Security Token Service (STS)**.
+
+When an entity assumes a role, STS returns:
+- A temporary **Access Key ID**
+- A temporary **Secret Access Key**
+- A **Session Token**
+- An expiration timestamp (15 minutes to 12 hours, depending on role configuration)
+
+After expiration, the credentials are worthless. There are no long-term secrets to rotate, leak, or compromise — the credentials self-destruct.
+
+### Role Use Cases
+
+| Scenario | How Roles Apply |
+|----------|----------------|
+| **EC2 instance accessing S3** | Attach an IAM role as an instance profile. The EC2 metadata service vends credentials automatically; the SDK picks them up without any credential configuration. |
+| **Lambda function** | Every Lambda has an execution role. Defines what the function can do — read from DynamoDB, publish to SNS, write to CloudWatch Logs. |
+| **Cross-account access** | Account A has a role that Account B can assume. Account B's principals call `sts:AssumeRole` with the role ARN from Account A. Useful for shared services or centralized tooling accounts. |
+| **Federated identity (SAML)** | Corporate IdP authenticates the user, then calls `sts:AssumeRoleWithSAML`. The user gets AWS credentials scoped to a role without an IAM user existing. |
+| **OIDC federation** | GitHub Actions, CircleCI, or any OIDC-compatible provider can exchange a JWT for AWS credentials via `sts:AssumeRoleWithWebIdentity`. No stored AWS credentials in CI/CD systems. |
+
+### Trust Policy
+
+Every role has a **trust policy** — a JSON document that defines who is allowed to call `sts:AssumeRole` on that role. This is separate from the permissions policies. The trust policy answers "who can use this role?" and the attached permissions policies answer "what can this role do?".
+
+---
+
+## Policies
+
+IAM policies are JSON documents that define permissions. Every policy contains one or more **statements**, each with:
+
+- **Effect**: `Allow` or `Deny`
+- **Action**: The API actions covered (e.g., `s3:GetObject`, `ec2:DescribeInstances`, `*` for all)
+- **Resource**: The ARNs of the resources the statement applies to (`arn:aws:s3:::my-bucket/*` or `*` for all)
+- **Condition** (optional): Constraints such as source IP, requiring MFA, specific tags, time of day
+
+Example policy allowing read-only access to a specific S3 bucket:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::my-company-data",
+        "arn:aws:s3:::my-company-data/*"
+      ]
+    }
+  ]
+}
+```
+
+### Policy Types
+
+| Type | Managed By | Reusable | Best For |
+|------|-----------|---------|---------|
+| **AWS Managed** | AWS | Yes | Common use cases (ReadOnly, PowerUser, AdministratorAccess). AWS updates them when services change. |
+| **Customer Managed** | You | Yes | Custom permission sets tailored to your application or team. Attach to multiple users, groups, or roles. Version-controlled. |
+| **Inline** | Embedded in identity | No | Avoid. Tightly coupled to a single user/group/role. Hard to audit and reuse. Use only when strict 1:1 binding is genuinely required. |
+| **Resource-based** | Attached to resource | N/A | S3 bucket policies, KMS key policies, SQS queue policies. Define who can access the resource from outside the account. |
+| **Service Control Policies (SCPs)** | AWS Organizations | N/A | Account-level guardrails applied to an entire account or OU. Restrict what can be allowed even for administrators. |
+| **Permission Boundaries** | You | Yes | Max permission cap for a user or role. Used when delegating permission management — a junior admin can only grant permissions up to what their boundary allows. |
+
+---
+
+## Policy Evaluation Logic
+
+When an API call is made, IAM evaluates multiple policy types in a specific order. Understanding this order prevents common "access denied" debugging confusion.
+
+<FlowDiagram
+  parties={["API Call", "IAM Evaluator", "Decision"]}
+  steps={[
+    { from: "API Call", to: "IAM Evaluator", label: "Request arrives", sub: "Principal, Action, Resource, Context" },
+    { from: "IAM Evaluator", to: "Decision", label: "Step 1: Explicit Deny in any policy?", sub: "Any Deny wins immediately — DENIED" },
+    { from: "IAM Evaluator", to: "Decision", label: "Step 2: SCP allows?", sub: "If in an AWS Org: SCP must permit the action — else DENIED" },
+    { from: "IAM Evaluator", to: "Decision", label: "Step 3: Resource-based policy allows?", sub: "Cross-account: resource policy must Allow principal" },
+    { from: "IAM Evaluator", to: "Decision", label: "Step 4: Permission boundary allows?", sub: "If boundary set: action must be within boundary — else DENIED" },
+    { from: "IAM Evaluator", to: "Decision", label: "Step 5: Session policy allows?", sub: "If assumed role with session policy: must Allow" },
+    { from: "IAM Evaluator", to: "Decision", label: "Step 6: Identity policy allows?", sub: "User/group/role policy must have Allow — else DENIED" },
+    { from: "IAM Evaluator", to: "Decision", label: "All checks passed", sub: "ALLOWED — request proceeds to service" },
+  ]}
+/>
+
+The hierarchy in plain terms:
+1. **Explicit Deny always wins.** A single Deny statement anywhere in any applicable policy blocks the action, regardless of Allows elsewhere.
+2. **SCPs act as a ceiling.** Even an administrator cannot perform an action that the SCP prohibits for their account.
+3. **Implicit Deny is the default.** If no policy explicitly Allows an action, it is denied. There is no "allow by default" in IAM — everything starts as denied.
+
+### Common Gotcha: Cross-Account Access
+
+Within the same account, an identity policy Allow is sufficient. Across accounts, both the identity policy in the calling account AND a resource-based policy (or role trust policy) in the target account must Allow the access. One side alone is not enough.
+
+---
+
+## Permission Boundaries
+
+A **permission boundary** is an advanced IAM feature that sets the maximum permissions an identity can have, regardless of what policies are attached to it.
+
+Suppose you want to let a team manage their own IAM roles (for their application's Lambda functions) without being able to grant themselves or others administrator access. You:
+
+1. Create a permission boundary policy defining the maximum allowed actions (e.g., only EC2, S3, Lambda, DynamoDB for specific resource prefixes)
+2. Require that any role they create must have this permission boundary attached
+3. Use an SCP or IAM condition to enforce this requirement
+
+Now the team can create roles, but any role they create is capped at the boundary's permissions — even if they accidentally (or intentionally) attach the `AdministratorAccess` managed policy to it.
+
+---
+
+## IAM Identity Center (SSO)
+
+**IAM Identity Center** (formerly AWS Single Sign-On) is the recommended way to manage human access to multiple AWS accounts and applications. Instead of creating IAM users in every account, you create users once in Identity Center and assign them access across the organization.
+
+### How It Works
+
+1. **Identity source**: Identity Center maintains a user directory, or you connect an external IdP — Azure AD, Okta, Ping, Google Workspace — via SCIM (for automatic user provisioning) and SAML 2.0 (for authentication).
+2. **Permission sets**: Define what access a user gets in an account. A permission set bundles IAM policies (AWS managed or customer managed) and maps to a role in the target account.
+3. **Account assignments**: Assign a user or group to an account + permission set combination. Identity Center creates an IAM role in that account automatically.
+4. **SSO login**: Users go to the Identity Center portal, authenticate via their IdP, see all their assigned accounts, and click to generate temporary credentials — either for console access or downloaded as CLI credentials.
+
+| Feature | IAM Users | IAM Identity Center |
+|---------|-----------|---------------------|
+| Credential lifetime | Long-term (keys don't expire) | Short-term (hours, auto-renewed) |
+| Multi-account management | Manual per account | Centralized |
+| MFA | Per-user configuration | Centralized policy |
+| External IdP integration | Manual federation per account | Native SCIM + SAML |
+| Audit trail | Per-account CloudTrail | Centralized CloudTrail + Identity Center events |
+| Scalability | Poor (N users × M accounts) | Excellent |
+
+---
+
+## IAM Best Practices
+
+| Practice | Rationale |
+|----------|-----------|
+| **Enable MFA on the root account and all privileged users** | Credential theft is the most common initial access vector. MFA neutralizes stolen passwords. |
+| **Use roles for services, not access keys** | Instance profiles, execution roles, and OIDC federation eliminate long-term credentials from services. No credential to rotate or leak. |
+| **Grant least privilege** | Start with no permissions. Add only what is needed. Use IAM Access Analyzer to identify unused permissions and tighten policies over time. |
+| **Rotate access keys** | Any access key that exists should be rotated every 90 days at maximum. Use IAM credentials reports to audit key age. |
+| **Never use the root account** | Root has no policy guardrails. One compromised root session means total account compromise. |
+| **Audit with CloudTrail and IAM Access Analyzer** | CloudTrail logs every API call. Access Analyzer identifies roles and policies with external access. Run both continuously. |
+| **Use SCPs for organization-wide guardrails** | SCPs prevent even account administrators from performing actions you want to prohibit globally — creating IAM users, disabling CloudTrail, leaving the organization. |
+| **Apply permission boundaries when delegating IAM management** | Prevent privilege escalation when junior roles need to create IAM identities. |
+| **Prefer customer managed policies over inline** | Customer managed policies are auditable, reusable, and version-controlled. Inline policies are invisible in policy listings and easy to forget. |
+
+---
+
+## Conditions in Policies
+
+Conditions make policies context-aware. They allow or deny based on request attributes beyond just identity, action, and resource.
+
+Common condition keys:
+
+| Condition Key | Example Use |
+|---------------|------------|
+| `aws:SourceIp` | Restrict API calls to your corporate IP ranges |
+| `aws:MultiFactorAuthPresent` | Require MFA before sensitive actions (deleting S3 buckets, modifying IAM) |
+| `aws:RequestedRegion` | Prevent resource creation outside approved regions |
+| `aws:CurrentTime` | Allow access only during business hours |
+| `s3:prefix` | Restrict S3 access to a specific path prefix |
+| `ec2:ResourceTag/Environment` | Allow actions only on resources tagged with `Environment: dev` |
+| `iam:PassedToService` | Control which services a role can be passed to |
+
+Tag-based conditions are particularly powerful: if you enforce resource tagging through SCPs and use tag conditions in policies, you can automatically scope access to resources owned by a team without maintaining per-resource ARN lists.
+
+---
+
+## IAM Access Analyzer
+
+**IAM Access Analyzer** continuously analyzes IAM resource policies, S3 bucket policies, KMS key policies, SQS queue policies, and Lambda function policies to identify resources that are accessible from outside your account or organization.
+
+It generates **findings** for any resource that grants external access — intended or not. For each finding you either:
+- Archive it (acknowledge that external access is intentional)
+- Remediate it (remove the overly permissive policy statement)
+
+Access Analyzer also includes a policy validation feature that checks your policy JSON against IAM best practices before you apply it, and a policy generation feature that builds a least-privilege policy from CloudTrail events showing what an identity actually did over a time window.

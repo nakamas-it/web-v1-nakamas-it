@@ -1,0 +1,331 @@
+---
+title: "Amazon CloudFront & Route 53"
+category: "amazon"
+topic: "aws-cdn-dns"
+summary: "Content delivery and DNS on AWS — CloudFront's global edge network, cache behavior configuration, Route 53 routing policies, and how they combine to deliver low-latency, resilient applications worldwide."
+tags: ["aws", "cloudfront", "route53", "cdn", "dns", "edge", "global-accelerator"]
+order: 17
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Two services sit between the internet and your AWS infrastructure for almost every production workload: **Amazon Route 53** resolves domain names to addresses, and **Amazon CloudFront** caches and delivers content from edge locations physically close to end users. They are complementary by design — Route 53 sends users to the right CloudFront distribution or regional endpoint, and CloudFront takes over from there, serving content without touching the origin whenever the cache allows.
+
+Understanding both services means understanding where requests go before they ever reach an EC2 instance, an ALB, or an S3 bucket. That edge layer is where latency is won or lost, where DDoS attacks are absorbed, where TLS is terminated, and where traffic is intelligently shifted between regions.
+
+---
+
+## CloudFront Architecture
+
+CloudFront operates through a globally distributed network of over 600 **Points of Presence (PoPs)**. These PoPs fall into two tiers:
+
+**Edge locations** are the outermost tier — the nodes physically closest to end users. There are hundreds of them across every major city and region. TLS termination, caching, and response serving all happen here. A cache hit at an edge location means the request is satisfied entirely within the PoP — the origin is never contacted.
+
+**Regional edge caches** sit between the edge locations and the origin. They are fewer in number but have significantly larger storage capacity. When content is evicted from an edge location cache (because it has not been requested recently enough to stay warm), the regional edge cache may still have a copy. This adds a second cache layer that can absorb misses before they propagate all the way to the origin, reducing origin load and latency for moderately popular content.
+
+**Origins** are the sources CloudFront fetches from on a cache miss. Supported origin types:
+
+| Origin Type | Example |
+|-------------|---------|
+| Amazon S3 bucket | Static assets, software downloads, media |
+| Application Load Balancer | Dynamic web application or API |
+| EC2 instance | Custom HTTP origin |
+| API Gateway | REST or HTTP API endpoint |
+| Any HTTP server | On-premises server or third-party service |
+
+A single CloudFront distribution can have multiple origins and route different request paths to different origins using **cache behaviors**.
+
+---
+
+## Distributions and Cache Behaviors
+
+A **distribution** is the top-level CloudFront configuration entity. It is identified by a domain name like `d1abc2defg3.cloudfront.net`, which you typically alias to your own domain via Route 53.
+
+### Cache Behaviors
+
+A cache behavior is a rule that matches a URL path pattern and defines how CloudFront handles matching requests. Every distribution has a **default cache behavior** (pattern `*`) and can have any number of additional path-specific behaviors, evaluated in order of specificity — longer, more specific patterns take precedence.
+
+Common behavior configurations:
+
+| Path Pattern | Origin | Caching Intent |
+|-------------|--------|---------------|
+| `/static/*` | S3 bucket | Aggressive long TTL — immutable hashed assets |
+| `/api/*` | ALB | No caching — always forward to origin |
+| `/images/*` | S3 bucket | Long TTL, query string forwarding off |
+| `*` (default) | ALB | Short TTL for dynamic content |
+
+### Cache Keys
+
+The **cache key** determines whether an incoming request matches a stored cached object. The default cache key is the URL path alone. Cache policies extend the cache key to include:
+
+- Specific **query strings** (e.g., include `?version` but not `?utm_source`)
+- Specific **HTTP headers** (e.g., `Accept-Language` for content negotiation)
+- Specific **cookies** (e.g., a theme selection cookie)
+
+Every dimension added to the cache key reduces cache hit rates by fragmenting the cache space. The rule is to include only what the backend actually uses to generate different responses. A query string the origin ignores should not be in the cache key.
+
+### Origin Request Policy
+
+Separate from the cache key is the **origin request policy**, which controls what CloudFront forwards to the origin on a cache miss. This decoupling matters: you can forward an authentication header to the origin (so it can validate the request) without including that header in the cache key (which would fragment the cache by auth token). The origin receives what it needs; the cache key stays narrow.
+
+### TTL and Cache-Control
+
+Three TTL settings define caching duration:
+
+| Setting | Effect |
+|---------|--------|
+| Minimum TTL | CloudFront will not cache shorter than this, even if `Cache-Control: max-age` is lower |
+| Default TTL | Used when the origin sends no `Cache-Control` or `Expires` header |
+| Maximum TTL | CloudFront will not honor `max-age` values longer than this cap |
+
+Best practice: set `Cache-Control: max-age=31536000, immutable` on content-hashed static assets (JavaScript bundles, CSS files, image files with hash in filename). Set `Cache-Control: no-store` or short max-age on dynamic or user-specific responses.
+
+---
+
+## Origin Access Control
+
+When S3 is the origin, users should never be able to bypass CloudFront and reach the S3 bucket URL directly. Direct S3 access circumvents caching, WAF inspection, signed URL enforcement, and CloudFront logging.
+
+**Origin Access Control (OAC)** is the current mechanism for restricting S3 bucket access to CloudFront only. It replaces the legacy Origin Access Identity (OAI), which lacked support for SSE-KMS encryption, all HTTP methods, and newer S3 regions.
+
+Setup:
+
+1. Create an OAC in CloudFront and associate it with the S3 origin on your distribution.
+2. Add an S3 bucket policy that grants `s3:GetObject` (and any other required actions) to the `cloudfront.amazonaws.com` service principal, conditioned on the specific distribution ARN.
+3. Block all public access on the S3 bucket.
+
+The bucket now rejects every request that does not carry a valid signature from your specific CloudFront distribution. No direct S3 URL will return content.
+
+OAC supports SSE-KMS encrypted buckets, POST and DELETE methods (for upload use cases), and works with all S3 regions including newer ones not supported by OAI.
+
+---
+
+## Signed URLs and Signed Cookies
+
+For private, access-controlled content — paid video, time-limited downloads, subscriber-only files — CloudFront provides two mechanisms:
+
+| Mechanism | Scope | Best For |
+|-----------|-------|---------|
+| Signed URL | Single specific object | Time-limited link to one file (e.g., a downloadable invoice, a private video) |
+| Signed Cookie | Multiple objects matching a path pattern | Session-based access to all content under `/premium/*` |
+
+Both are cryptographically signed using a **CloudFront key pair** managed via CloudFront Key Groups. The signature includes:
+
+- Expiration timestamp (requests after expiry receive 403)
+- Optional IP address restriction (requests from other IPs receive 403)
+- The URL or path pattern being authorized
+
+Signed URLs are generated server-side in your application and handed to the client. CloudFront validates the signature on every request. If the signature is invalid, tampered, or expired, CloudFront returns 403 without contacting the origin.
+
+Common use case: video streaming with HLS or DASH. The manifest file is served via a signed URL. Segment files under `/stream/*` are protected by a signed cookie set when the user authenticates.
+
+---
+
+## CloudFront Functions vs Lambda@Edge
+
+CloudFront offers two execution environments for running code at the edge, with meaningfully different capabilities:
+
+| Feature | CloudFront Functions | Lambda@Edge |
+|---------|---------------------|------------|
+| Runtime | JavaScript only (ES5.1) | Node.js, Python |
+| Execution points | Viewer request, Viewer response | Viewer request, Viewer response, Origin request, Origin response |
+| Maximum execution time | Under 1 ms | 5 seconds (viewer events), 30 seconds (origin events) |
+| Maximum memory | 2 MB | Up to 10 GB |
+| Request throughput | Millions per second | Thousands per second |
+| Deployment | At every edge location globally | At regional edge caches |
+| Cost | ~$0.10 per million invocations | Lambda pricing (higher) |
+| Typical use cases | URL rewrites and redirects, simple HTTP header manipulation, A/B testing token assignment, basic request validation | Complex authentication and authorization, response body generation, dynamic origin selection, image resizing |
+
+**CloudFront Functions** are the right choice for lightweight, high-frequency transformations that must execute on every single request with zero perceptible latency overhead. **Lambda@Edge** is the right choice when you need the full capability of Lambda — external API calls, heavy computation, access to full request and response bodies, or logic that must fire on origin requests/responses rather than viewer events.
+
+---
+
+## WAF Integration
+
+Attach an AWS WAF **WebACL** to a CloudFront distribution to inspect all HTTP/HTTPS requests at the edge before they reach your origin or your regional infrastructure. When WAF is attached to CloudFront, it is deployed globally — evaluated at every edge location, not just in one AWS region.
+
+WAF rules can:
+
+- Block or allow requests by source IP or CIDR range (IP sets)
+- Block traffic from specific countries (geo match)
+- Rate-limit requests per IP address per time window — for example, block any IP sending more than 100 requests in 5 minutes (effective against credential stuffing and application-layer floods)
+- Match and block common exploit patterns: SQL injection, cross-site scripting, path traversal (AWS Managed Rules Core Rule Set)
+- Block requests matching known-bad IP reputation lists (Tor exit nodes, botnets, scanners)
+- Run Bot Control managed rules to distinguish legitimate crawlers from malicious scrapers
+
+Requests that match a Block rule return a 403 (or a custom error page) at the edge. They never reach the ALB, EC2, or application. Count mode lets you run rules in observation mode first to see impact before switching to block — essential before enabling any new rule group in production.
+
+---
+
+## Global Accelerator vs CloudFront
+
+These two services are frequently confused because both involve edge infrastructure. They solve different problems:
+
+| Aspect | CloudFront | Global Accelerator |
+|--------|-----------|-------------------|
+| Purpose | Content delivery — cache and serve from edge | Path optimization — route traffic through AWS backbone |
+| Caching | Yes — serves cached responses from edge | No caching of any kind |
+| Protocols | HTTP and HTTPS only | TCP and UDP (any protocol) |
+| Static IPs | No | Yes — two static anycast IP addresses globally |
+| Best for | Websites, APIs, video streaming, cacheable static assets | Non-HTTP protocols, UDP gaming traffic, apps requiring stable IPs, non-cacheable global workloads |
+| How it works | Edge serves cached content; misses go to origin | Anycast routes client to nearest AWS edge; traffic traverses the AWS private backbone to regional endpoint |
+
+CloudFront reduces load on your origin and cuts latency by serving cached content. Global Accelerator improves path quality — traffic travels over the AWS backbone instead of the public internet, which reduces jitter and improves consistency for non-cacheable content. They are not mutually exclusive. A CloudFront distribution in front of Global Accelerator endpoints is a valid architecture for applications that need both caching and stable IPs.
+
+---
+
+## Route 53 Overview
+
+Route 53 is four services in one:
+
+1. **Authoritative DNS**: answers queries for domains you own
+2. **Domain registrar**: purchase and manage domain registrations directly through AWS
+3. **Health checker**: continuously monitors endpoint health via HTTP, HTTPS, and TCP probes
+4. **Traffic router**: applies routing policies to direct queries based on latency, geography, weight, or health
+
+Route 53 is built on anycast infrastructure with name servers distributed globally. AWS guarantees 100% availability for the DNS resolution function — it is the only AWS service with a 100% SLA.
+
+### Hosted Zones
+
+A **hosted zone** is the container for DNS records for a domain. Every domain you manage in Route 53 has a hosted zone.
+
+| Type | Visibility |
+|------|-----------|
+| Public hosted zone | Responds to queries from the internet — records are publicly resolvable |
+| Private hosted zone | Responds to queries only from associated VPCs — records invisible externally |
+
+Private hosted zones are used for internal service names (`api.internal.corp.com`), split-horizon DNS (same name resolves differently inside vs outside the VPC), and service discovery in microservice architectures.
+
+### Record Types
+
+| Record | Purpose | Notes |
+|--------|---------|-------|
+| A | Hostname → IPv4 address | Most common record type |
+| AAAA | Hostname → IPv6 address | Dual-stack support |
+| CNAME | Hostname → hostname | Cannot be used at zone apex (e.g., bare `example.com`). Charges per query. |
+| Alias | Hostname → AWS resource | Route 53 extension. Works at zone apex. No charge for queries. Auto-tracks resource IP changes. |
+| MX | Domain → mail servers | Priority-ordered list of mail servers |
+| TXT | Domain → arbitrary text | SPF, DKIM, domain ownership verification |
+| NS | Zone → name server hostnames | Identifies authoritative name servers |
+| SOA | Zone → zone metadata | Automatically created; one per hosted zone |
+| CAA | Domain → allowed certificate authorities | Restricts which CAs may issue certificates for the domain |
+| NAPTR | Domain → URI pattern | Used by VoIP and telephony systems |
+
+### Alias Records
+
+**Alias** records are a Route 53 extension with no direct equivalent in standard DNS. They map a name directly to an AWS resource. Key differences from CNAME:
+
+| Property | CNAME | Alias |
+|----------|-------|-------|
+| Zone apex support | No — `example.com CNAME` is invalid per RFC | Yes — `example.com` can be an Alias |
+| Query charges | Yes | No — free |
+| IP tracking | Static — must update manually if resource IP changes | Automatic — CloudFront, ELB, API Gateway IPs update transparently |
+| Usable targets | Any hostname | CloudFront, ELB, S3 static site, API Gateway, Global Accelerator, another Route 53 record in the same zone |
+
+Use Alias whenever pointing to an AWS resource. Use CNAME only when pointing to a non-AWS hostname.
+
+---
+
+## Route 53 Routing Policies
+
+Routing policies determine how Route 53 answers queries when multiple records exist for the same name.
+
+| Policy | Behavior | Health Check Support | Primary Use Case |
+|--------|----------|---------------------|-----------------|
+| Simple | Returns one value (or multiple values returned randomly if several are configured) | No | Single resource, no health requirements |
+| Failover | Routes to primary when healthy, secondary when primary fails | Required on primary | Active-passive disaster recovery |
+| Weighted | Distributes traffic proportionally by numeric weight (weight 0 = no traffic) | Yes | Gradual traffic migration, A/B testing between application versions |
+| Latency | Routes to the AWS region with the lowest measured network latency from the user | Yes | Multi-region active-active for latency-sensitive applications |
+| Geolocation | Routes based on the user's geographic location: continent, country, or US state | Yes | Data residency requirements, serving region-localized content |
+| Geoproximity | Routes based on geographic proximity with an adjustable bias — bias value expands or shrinks the effective routing radius | Yes | Fine-grained traffic shaping when geolocation boundaries are too rigid; requires Traffic Flow |
+| IP-Based | Routes based on the user's source IP CIDR | Yes | Known user populations on specific ISP or corporate IP ranges |
+| Multivalue Answer | Returns up to 8 healthy records; client selects randomly | Yes | Simple client-side load distribution; unhealthy records filtered out automatically |
+
+### Weighted Routing in Practice
+
+Weighted routing is the standard mechanism for **gradual traffic migration** — shifting traffic from one version of a service to another without a hard cutover:
+
+- Old version: weight 90
+- New version: weight 10
+
+Route 53 sends approximately 10% of queries to the new version. After validation, adjust weights incrementally. Weight 0 removes a record from rotation entirely without deleting it — useful for draining an endpoint before maintenance.
+
+### Failover Routing
+
+Failover requires a health check on the primary record. Route 53 continuously evaluates the health check. When the primary fails, Route 53 automatically stops returning the primary record and returns the secondary instead. DNS TTL determines how quickly clients pick up the change — keep TTLs low (60 seconds) on failover records to minimize failover time.
+
+---
+
+## Route 53 Health Checks
+
+Health checks run independently of DNS records. Route 53 sends probes from multiple AWS locations globally (currently over 15 locations). A check is healthy when a configurable majority of probing locations can reach the endpoint.
+
+| Check Type | How It Works |
+|------------|-------------|
+| Endpoint | HTTP/HTTPS/TCP probes to a hostname or IP. Optionally match a string in the response body. |
+| Calculated | Aggregates child health check results using AND/OR logic. Useful for representing overall application health as a single check. |
+| CloudWatch alarm | Bases health on a CloudWatch alarm state. Required for monitoring private resources not accessible from the internet (internal EC2, RDS, VPC resources). |
+
+Configuration options:
+- **Probe interval**: 30 seconds (standard) or 10 seconds (fast — additional cost)
+- **Failure threshold**: number of consecutive failures before marking unhealthy (default 3)
+- **String matching**: verify that a specific string appears in the HTTP response body
+
+Health checks are required for Failover routing and strongly recommended for Weighted, Latency, Geolocation, and Multivalue Answer policies to prevent traffic from routing to unhealthy endpoints.
+
+---
+
+## Private Hosted Zones and Hybrid DNS
+
+**Private hosted zones** resolve internal names within associated VPCs. The VPC must have two settings enabled:
+
+- `enableDnsSupport = true` — enables the Route 53 Resolver in the VPC
+- `enableDnsHostnames = true` — assigns DNS names to EC2 instances
+
+A private hosted zone can be associated with VPCs in other AWS accounts using RAM (Resource Access Manager), enabling centralized internal DNS across a multi-account organization.
+
+### Route 53 Resolver for Hybrid Environments
+
+On-premises networks connected via Direct Connect or VPN need to resolve AWS private hosted zone names, and AWS resources may need to resolve on-premises internal DNS names. Route 53 Resolver handles this through **endpoints**:
+
+| Endpoint Type | Direction | Function |
+|--------------|-----------|----------|
+| Inbound endpoint | On-premises → AWS | On-premises DNS servers forward queries to the inbound endpoint IP, which resolves them in Route 53 |
+| Outbound endpoint | AWS → On-premises | Resolver rules specify which domains are forwarded from VPC resolvers through the outbound endpoint to on-premises DNS servers |
+
+**Resolver rules** define the forwarding: "queries for `corp.internal` should be forwarded to `10.0.1.10`." Rules can be shared across accounts with RAM.
+
+---
+
+## End-to-End Request Flow
+
+<FlowDiagram
+  parties={["User", "Route 53", "CloudFront Edge", "ALB", "EC2"]}
+  steps={[
+    { from: "User", to: "Route 53", label: "DNS query: api.example.com", sub: "User's resolver queries Route 53 authoritative NS" },
+    { from: "Route 53", to: "User", label: "Latency policy: return us-east-1 ALB alias", sub: "us-east-1 has lower measured latency for this user" },
+    { from: "User", to: "CloudFront Edge", label: "HTTPS GET /api/data", sub: "Request routes to nearest CloudFront PoP" },
+    { from: "CloudFront Edge", to: "User", label: "Cache HIT — 200 OK", sub: "Response served from edge cache, origin not contacted" },
+    { from: "User", to: "CloudFront Edge", label: "HTTPS GET /api/live (cache miss)", sub: "No cached response for this path" },
+    { from: "CloudFront Edge", to: "ALB", label: "Origin request forwarded", sub: "CloudFront contacts ALB in us-east-1" },
+    { from: "ALB", to: "EC2", label: "Request forwarded to healthy target", sub: "ALB selects EC2 instance via target group" },
+    { from: "EC2", to: "ALB", label: "200 OK — response body", sub: "Application response" },
+    { from: "ALB", to: "CloudFront Edge", label: "Response returned to CloudFront", sub: "Cache-Control header determines if response is cached" },
+    { from: "CloudFront Edge", to: "User", label: "200 OK — response delivered", sub: "Response cached at edge for future requests if cacheable" },
+  ]}
+/>
+
+---
+
+## References
+
+- [Amazon CloudFront Developer Guide](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Introduction.html)
+- [CloudFront Origin Access Control](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html)
+- [CloudFront Functions vs Lambda@Edge](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/edge-functions.html)
+- [Amazon Route 53 Developer Guide](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html)
+- [Route 53 routing policies](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy.html)
+- [Route 53 Resolver for hybrid networks](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver.html)
+- [AWS Global Accelerator documentation](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html)

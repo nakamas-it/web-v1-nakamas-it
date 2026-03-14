@@ -1,0 +1,478 @@
+---
+title: "AWS Lambda & Serverless Architecture"
+category: "amazon"
+topic: "aws-lambda-serverless"
+summary: "Event-driven compute without servers — how Lambda executes code, manages concurrency, integrates with the AWS ecosystem, and how serverless patterns compare to container-based approaches."
+tags: ["aws", "lambda", "serverless", "api-gateway", "eventbridge", "step-functions"]
+order: 7
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Serverless computing does not mean there are no servers. The servers exist; AWS provisions, patches, scales, and retires them invisibly. What you interact with is the function: a unit of code, a runtime, a trigger, and a permission scope. You write the code; AWS manages everything underneath.
+
+AWS Lambda is the foundational serverless compute service. A Lambda function runs in response to an event — an HTTP request, an S3 object upload, a message arriving in SQS, a scheduled timer, a DynamoDB Streams record — executes for as long as the work requires (up to 15 minutes per invocation), then stops. You pay for the actual duration of execution in 1-millisecond increments. When nothing is invoking the function, you pay nothing.
+
+The three defining characteristics of the serverless model:
+- **No server management**: No EC2 instances to patch, no OS to manage, no capacity to provision.
+- **Scale to zero**: When there is no traffic, there is no compute cost. The cost floor is zero.
+- **Scale to thousands automatically**: Lambda concurrently executes as many copies of your function as needed to handle incoming requests, without any configuration.
+
+The tradeoff is a loss of OS-level control and a fundamentally event-driven execution model that requires rethinking how applications are structured — particularly around state, connection management, and initialization latency.
+
+---
+
+## Lambda Execution Model
+
+### Execution Environment Lifecycle
+
+Lambda does not simply call your function code directly. It manages **execution environments** — isolated, sandboxed containers that host one invocation of your function at a time. Each environment goes through three phases:
+
+**Init phase (cold start)**
+
+1. **Download and prepare function code**: The deployment package (ZIP) is downloaded from S3, or the container image is pulled from ECR and mounted.
+2. **Initialize the runtime**: The language runtime starts — Node.js, Python interpreter, JVM, .NET CLR. For interpreted languages this is fast (100–200 ms); for JVM this is slow (1–5 seconds).
+3. **Run initialization code**: All code defined outside the handler function executes once. This includes: SDK client construction, database connection establishment, loading large files or ML models into memory, reading environment variables and SSM parameters.
+4. **Invoke the handler**: The actual handler function receives the event and executes.
+
+The Init phase happens once per execution environment creation. It is the "cold start" cost.
+
+**Invoke phase (warm start)**
+
+After the handler returns, Lambda holds the execution environment alive for a period — typically several minutes of idle time. When another invocation arrives, Lambda reuses the existing environment:
+
+1. The handler is called directly with the new event.
+2. Anything initialized in the Init phase (SDK clients, database connections, in-memory data) is still present.
+3. The `/tmp` ephemeral filesystem retains content from the previous invocation.
+
+Warm start latency is typically 1–10 ms overhead above pure handler execution time — functionally negligible for most workloads.
+
+**Shutdown phase**
+
+Lambda sends a shutdown signal to the runtime when reclaiming the environment. Extensions registered for the Shutdown event get a brief window (up to 2 seconds) to flush buffered telemetry or close connections before the environment is destroyed.
+
+### Cold Start Latency by Runtime
+
+Cold start duration varies significantly by language runtime and configuration:
+
+| Runtime | Typical Cold Start |
+|---------|------------------|
+| Python 3.x | 100–300 ms |
+| Node.js 20 | 100–400 ms |
+| Go | 50–200 ms |
+| .NET 8 | 300–800 ms |
+| Java 21 (without SnapStart) | 1,000–5,000 ms |
+| Java 21 (with Lambda SnapStart) | ~200 ms |
+| Container image (any runtime) | 500 ms – several seconds depending on image size |
+
+**Lambda SnapStart** (Java): Lambda takes a snapshot of the initialized execution environment after the Init phase and stores it. On subsequent cold starts, the snapshot is restored rather than re-running the Init phase — eliminating JVM startup and initialization code execution. Effective for functions with large initialization costs.
+
+### Function Configuration
+
+| Parameter | Range | Notes |
+|-----------|-------|-------|
+| **Memory** | 128 MB – 10,240 MB (10 GB) | CPU allocation scales proportionally. At ~1,769 MB you get one full vCPU. Above that, additional fractional vCPUs are added. |
+| **Timeout** | 1 second – 900 seconds (15 minutes) | Default is 3 seconds. Set based on worst-case execution time, not average. |
+| **Ephemeral `/tmp` storage** | 512 MB – 10,240 MB | Temporary file storage within a single execution environment. Persists across warm invocations in the same environment. Lost when the environment is recycled. |
+| **Runtime** | Python 3.10/3.11/3.12, Node.js 18/20, Java 11/17/21, Go 1.x, Ruby 3.2, .NET 8, Custom Runtime | Custom runtime: any language via a `bootstrap` executable |
+| **Layers** | Up to 5 per function | Shared code and libraries mounted at `/opt/` |
+| **Deployment package** | 50 MB ZIP (direct upload), 250 MB unzipped, or container image up to 10 GB | Large packages increase cold start download time |
+| **Environment variables** | Up to 4 KB total | For secrets: use AWS Secrets Manager or SSM Parameter Store via the Parameters and Secrets Lambda extension |
+
+---
+
+## Concurrency
+
+Concurrency is the number of function invocations executing simultaneously at a given moment. Lambda's concurrency model is the key to understanding its scaling behavior and its failure modes.
+
+### Unreserved Concurrency
+
+By default, all functions in an AWS account share a **regional concurrency pool** (default soft limit: 1,000 concurrent executions per region, adjustable by support request). Any function can use any portion of this pool up to the limit. If the entire pool is consumed by a burst of traffic to one function, other functions in the same account and region will be throttled.
+
+### Reserved Concurrency
+
+**Reserved concurrency** allocates a fixed number of concurrent executions exclusively to a specific function, removing that quota from the shared pool. It provides two guarantees simultaneously:
+
+- **Floor (guarantee)**: This function always has this concurrency available, even if the rest of the account is at its concurrency limit.
+- **Ceiling (cap)**: This function can never exceed this concurrency. Additional invocations beyond the limit are throttled (synchronous invokers receive HTTP 429) or queued and retried (asynchronous sources).
+
+Use reserved concurrency to:
+- Protect a downstream resource (RDS, a legacy API, a SaaS endpoint) from being overwhelmed. If the database handles 100 connections max, reserve concurrency at 90 to prevent Lambda from exhausting the connection pool.
+- Isolate a critical function from account-level concurrency contention.
+- Set reserved concurrency to **0** to effectively disable a function immediately without deleting it — useful for stopping a malfunctioning function instantly.
+
+### Provisioned Concurrency
+
+**Provisioned concurrency** pre-initializes a specified number of execution environments so they are always warm and ready to handle requests with zero cold start latency. When an invocation hits a provisioned environment, the Init phase has already completed — only the handler executes.
+
+Provisioned concurrency is billed continuously per GB-second regardless of invocation volume (unlike regular Lambda, which bills only per invocation). Size provisioned concurrency to cover your baseline and peak predictable load — let unreserved concurrency absorb unpredictable bursts above that.
+
+Provisioned concurrency is the correct solution for:
+- Synchronous APIs where cold start latency is unacceptable (payment endpoints, fraud detection, real-time user-facing APIs)
+- Functions with multi-second initialization code (loading ML models, complex SDK setup)
+- Interactive applications requiring consistent sub-100 ms response time
+
+Application Auto Scaling integrates with Lambda Provisioned Concurrency — you can schedule provisioned concurrency increases before anticipated peaks (before market open, before business hours) and scale back down afterward.
+
+---
+
+## Triggers and Event Sources
+
+Lambda integrates with almost every AWS service as an event source. The integration model divides into three categories based on how invocations are triggered.
+
+### Synchronous Invocation
+
+The caller invokes Lambda and waits for the response. Lambda returns the function's return value (or error) directly. The caller is responsible for retry logic on throttles or errors.
+
+Common synchronous sources:
+- **API Gateway** (REST, HTTP, WebSocket) — HTTP request → Lambda invocation → response body
+- **ALB** — same as API Gateway; ALB serializes HTTP request to JSON event
+- **Lambda Function URL** — direct HTTPS endpoint for a Lambda function without API Gateway
+- **Cognito triggers** — pre-sign-up, post-authentication, pre-token-generation hooks
+- **CloudFront (Lambda@Edge)** — viewer/origin request/response hooks
+
+### Asynchronous Invocation
+
+The caller sends the event to Lambda and receives an immediate acknowledgment (HTTP 202). Lambda queues the event internally and invokes the function when concurrency is available. The caller does not wait for function execution.
+
+Common asynchronous sources:
+- **S3 event notifications** — object created, object deleted
+- **SNS** — message published to a topic
+- **EventBridge** — event rule matched
+- **SES** — receipt rules triggering email processing
+
+**Retry behavior**: On function error (not throttle), Lambda retries asynchronous invocations up to **two additional times** with delays of 1 minute and 2 minutes between attempts. After exhausting retries, the event is sent to the configured **event destination** (SQS queue, SNS topic, EventBridge, or another Lambda function) for the failure case. A success destination receives a notification when the function succeeds.
+
+### Poll-Based (Event Source Mappings)
+
+Lambda's internal **Event Source Mapping (ESM)** service polls a stream or queue, batches records, and invokes the function. You do not pay for Lambda polling — the ESM is managed by AWS.
+
+| Source | Scaling Model | Ordering |
+|--------|--------------|---------|
+| **SQS (Standard)** | ESM scales up to 1,000 concurrent invocations automatically | No ordering guarantee |
+| **SQS (FIFO)** | One concurrent invocation per message group | Ordered per message group |
+| **Kinesis Data Streams** | One concurrent invocation per shard | Ordered per shard |
+| **DynamoDB Streams** | One concurrent invocation per shard | Ordered per shard |
+| **Amazon MSK / Apache Kafka** | One concurrent invocation per partition | Ordered per partition |
+
+**SQS ESM details**: Batch size is configurable (1–10,000 messages for Standard, 1–10 for FIFO). A batch window (up to 300 seconds) allows the ESM to accumulate a full batch before invoking, reducing function invocations at the cost of increased latency. If the handler throws an error, the entire batch returns to the queue (visibility timeout expires) and is retried. Use **ReportBatchItemFailures** — return a list of failed message IDs from the handler so only the failed messages re-enter the queue, not the entire batch.
+
+---
+
+## Lambda Layers
+
+**Lambda Layers** are versioned ZIP archives containing shared code, runtime dependencies, or binary extensions. A function can have up to 5 layers attached. Layer contents are extracted to `/opt/` inside the execution environment and are available to function code via standard import paths.
+
+### Use Cases for Layers
+
+**Shared libraries**: Internal utility libraries or domain-specific SDKs used across many functions in the same organization. Update the layer once; update function configurations to point to the new layer version.
+
+**Large binary dependencies**: numpy, pandas, scipy, scikit-learn for Python ML functions. Packaging these into a layer reduces the deployment package of each individual function. Each layer has its own 250 MB unzipped limit counted separately from the function's package.
+
+**Runtime extensions**: The Lambda Extensions API allows monitoring and security agents to run as a separate process within the execution environment, alongside the function. Datadog, New Relic, Dynatrace, and CrowdStrike all provide Lambda extensions packaged as layers — they initialize at environment startup and receive function invocation events without any changes to function code.
+
+**Parameters and Secrets extension**: The AWS-provided Parameters and Secrets Lambda extension fetches SSM Parameter Store values and Secrets Manager secrets and caches them locally. Functions read secrets from a local HTTP endpoint (`localhost:2773/secretsmanager/get?secretId=...`) rather than calling Secrets Manager on every invocation, dramatically reducing API call volume and latency.
+
+Layers are immutable and versioned. Functions pin to a specific layer version number. When you publish a new layer version, existing functions are unaffected until you update their configuration to reference the new version.
+
+---
+
+## Lambda@Edge and CloudFront Functions
+
+### Lambda@Edge
+
+**Lambda@Edge** runs Lambda functions at CloudFront Points of Presence (PoPs) globally. Instead of executing in a single AWS region, the function executes at the edge location nearest to the request — potentially reducing latency to single-digit milliseconds for users far from the origin region.
+
+Lambda@Edge functions are defined in `us-east-1` and replicated globally by CloudFront. They attach to four trigger points in the CloudFront request/response lifecycle:
+
+| Trigger | When It Fires | Maximum Timeout | Network Access |
+|---------|--------------|----------------|---------------|
+| **Viewer Request** | Every request, before CloudFront cache lookup | 5 seconds | Yes |
+| **Origin Request** | Cache miss only, before forwarding to origin | 30 seconds | Yes |
+| **Origin Response** | After origin response, before CloudFront caches | 30 seconds | Yes |
+| **Viewer Response** | After CloudFront response, before returning to viewer | 5 seconds | Yes |
+
+Constraints compared to standard Lambda:
+- No environment variables (configuration must be embedded in code or fetched from an external source)
+- No VPC attachment
+- No Provisioned Concurrency
+- No Lambda Layers (dependencies must be packaged into the function ZIP directly)
+- No container image deployment
+- Runtimes limited to Node.js and Python
+
+Use cases:
+- **JWT validation at the edge**: Reject unauthorized requests at the PoP — no origin cost, lower latency for unauthorized responses.
+- **URL normalization and rewriting**: Normalize query string order before cache lookup to improve hit rate.
+- **A/B testing**: Assign a test cohort cookie at Viewer Request, rewrite the URL to route to `/experiment-a/` or `/experiment-b/`.
+- **Security header injection**: Add HSTS, Content-Security-Policy, X-Frame-Options at Origin Response so they are cached and applied to every response.
+- **Geolocation-based routing**: Read the `CloudFront-Viewer-Country` header (injected by CloudFront), redirect or rewrite to the appropriate regional origin.
+
+### CloudFront Functions
+
+**CloudFront Functions** is a lighter, cheaper alternative for simple request/response manipulation at the Viewer Request and Viewer Response trigger points only. Written in a JavaScript subset, CloudFront Functions run at sub-millisecond execution speed — but the CPU time limit is 1 millisecond and no network I/O is permitted.
+
+| Dimension | CloudFront Functions | Lambda@Edge (Viewer) |
+|-----------|---------------------|---------------------|
+| **Execution speed** | Sub-millisecond | Up to 5 seconds |
+| **Network I/O** | No | Yes |
+| **Triggers** | Viewer Request, Viewer Response | All four |
+| **Cost** | ~1/6th of Lambda@Edge | Higher |
+| **Runtimes** | JavaScript subset | Node.js, Python |
+
+Use CloudFront Functions for header manipulation, simple URL rewrites, cookie manipulation, and cache key normalization. Use Lambda@Edge for anything requiring external calls, complex logic, or access to origin request/response triggers.
+
+---
+
+## VPC Integration
+
+By default, Lambda functions run in a Lambda-managed network environment with internet access. To access resources in your VPC — private RDS instances, ElastiCache clusters, internal APIs, self-managed Kafka — you attach the function to your VPC.
+
+### Hyperplane ENIs
+
+Lambda VPC integration uses **Hyperplane ENIs** — a shared elastic network interface infrastructure that allows many Lambda functions to share a small number of ENIs rather than creating one ENI per function instance. This resolved the earlier problem where VPC Lambda functions would exhaust VPC ENI limits under scale.
+
+A Lambda function attached to a VPC subnet gets an IP address from that subnet's CIDR range. The function can reach any resource in the VPC that its security group and network ACLs permit. For internet access from a VPC Lambda function, route traffic through a NAT Gateway in a public subnet (a Lambda function in a private subnet cannot use an Internet Gateway directly).
+
+### VPC Cold Start Impact
+
+Attaching to a VPC adds approximately 1 second to cold start latency on the first invocation after the execution environment is created (for ENI provisioning). With Hyperplane, this cost has been significantly reduced compared to earlier implementations and occurs primarily when Lambda needs to scale to new execution environments — not on every cold start.
+
+For latency-sensitive APIs with VPC attachment, use Provisioned Concurrency to eliminate this additional cold start cost.
+
+### Subnet and AZ Considerations
+
+Attach Lambda to subnets in multiple AZs. Lambda distributes execution environments across attached subnets. If you attach to only one subnet (one AZ) and that AZ has a disruption, Lambda cannot launch new execution environments for that function. Using subnets in at least two AZs provides fault tolerance.
+
+---
+
+## Amazon API Gateway
+
+**API Gateway** is the managed service for publishing, securing, and managing APIs. It sits in front of Lambda (or any HTTP backend, VPC Link, or AWS service direct integration) and handles request routing, authorization, throttling, and deployment management.
+
+### API Types
+
+| Type | Protocol | Key Features | Relative Cost | Best For |
+|------|---------|-------------|--------------|---------|
+| **REST API** | HTTP/1.1 | Request/response mapping templates, WAF integration, API keys + usage plans, private endpoints, resource policies, mock integrations, regional caching | High | Complex APIs requiring fine-grained control and full feature set |
+| **HTTP API** | HTTP/1.1 + HTTP/2 | JWT authorizers, OIDC/OAuth2 native, automatic CORS, VPC Link, simpler Lambda integration | ~71% lower than REST | Most Lambda backends, simpler microservices APIs |
+| **WebSocket API** | WebSocket | Persistent bidirectional connections, route selection on message content | Per-connection per-minute | Real-time: chat, live dashboards, collaborative editing, gaming |
+
+For new Lambda-backed APIs, default to **HTTP API** unless you need specific REST API features — WAF integration, API key usage plans, request/response transformation, mock integrations, or private VPC endpoints.
+
+### Stages and Deployments
+
+API Gateway uses **deployments** and **stages** to manage versioning:
+- A **deployment** is a snapshot of the API configuration at a point in time.
+- A **stage** (e.g., `dev`, `staging`, `prod`) points to a deployment. Stage variables inject environment-specific values (Lambda function name, backend URL) without changing the API definition.
+- Stage-level throttling applies per-stage rate limits on top of account-level limits.
+
+### Throttling
+
+API Gateway enforces throttling at multiple levels:
+
+- **Account level**: 10,000 requests/second steady state, burst up to 5,000 (token bucket algorithm). Adjustable via support request.
+- **Stage level**: Default throttle for all routes in the stage.
+- **Route level**: Per-method override — protect expensive endpoints with tighter limits.
+- **Usage plans** (REST API only): Per-API key rate and quota limits for external API consumers.
+
+Requests exceeding throttle limits receive HTTP 429 Too Many Requests with a Retry-After header.
+
+### Authorizers
+
+| Authorizer | Mechanism | Best For |
+|------------|-----------|---------|
+| **IAM authorization** | Client signs request with AWS SigV4. API Gateway validates the signature against the caller's IAM identity. | Service-to-service API calls within AWS |
+| **Cognito User Pool** | Client presents a Cognito-issued JWT in the `Authorization` header. API Gateway validates it against the Cognito pool. | Consumer-facing APIs with Cognito-managed user identities |
+| **Lambda authorizer (token)** | Lambda receives the bearer token, validates it (JWT, OAuth2, custom), and returns an IAM policy. Result is cached by API Gateway. | Custom authentication logic, third-party identity providers |
+| **Lambda authorizer (request)** | Lambda receives the full request context (headers, query strings, path, method). Returns an IAM policy. | Authorization that depends on request attributes beyond a token |
+| **JWT authorizer** (HTTP API only) | HTTP API validates JWTs natively — no Lambda needed. Configure issuer URL and audiences. | OIDC/OAuth2 providers (Auth0, Okta, Cognito, Google) with HTTP API |
+
+---
+
+## Amazon EventBridge
+
+**EventBridge** is the serverless event bus that connects AWS services, SaaS applications, and custom application components. It routes events using declarative pattern-matching rules, decoupling event producers from event consumers.
+
+### Core Concepts
+
+**Event bus**: The routing channel. Every AWS account has a **default event bus** that receives events from AWS services (EC2 state changes, S3 events, CloudTrail API calls, and hundreds of others). You create **custom event buses** for application-level events and **partner event buses** for SaaS integrations (PagerDuty, Zendesk, Datadog).
+
+**Events**: JSON documents with a standard envelope:
+```json
+{
+  "source": "com.myapp.orders",
+  "detail-type": "OrderPlaced",
+  "detail": { "orderId": "ord-123", "amount": 450.00 },
+  "time": "2026-03-14T09:00:00Z",
+  "region": "us-east-1",
+  "account": "123456789012"
+}
+```
+
+**Rules**: Pattern-matching expressions that filter events. Patterns can match on any field using exact match, prefix match, numeric comparison, existence checks, or array contains. A rule can have up to 5 targets.
+
+**Targets**: Where matching events are sent — Lambda, SQS, SNS, Step Functions, ECS tasks, Kinesis Data Streams, API Gateway, another EventBridge bus, HTTP endpoints, and more.
+
+### Scheduling
+
+EventBridge supports two schedule expression types:
+- **Rate expressions**: `rate(5 minutes)`, `rate(1 hour)` — fires on a fixed interval from rule creation.
+- **Cron expressions**: `cron(0 8 ? * MON-FRI *)` — fires at 08:00 UTC Monday through Friday. Uses six-field cron syntax (minute, hour, day-of-month, month, day-of-week, year).
+
+**EventBridge Scheduler** (a related service) provides additional capabilities: per-target retry policies, flexible time windows (allow the schedule to trigger within a window rather than exactly at a specific time), timezone-aware scheduling, and a dedicated API separate from EventBridge Rules.
+
+### Event Archives and Replay
+
+EventBridge can archive all events (or filtered events) flowing through an event bus for a configurable retention period. Archived events can be **replayed** to the bus at any time — re-invoking all rules and targets for those historical events. This is valuable for:
+- Debugging: replay a specific time window to diagnose how the system responded to a set of events.
+- Disaster recovery: replay events that were not processed due to a target outage.
+- Re-processing: replay events through a new rule/target that did not exist when the original events fired.
+
+---
+
+## AWS Step Functions
+
+**Step Functions** orchestrates multi-step workflows as explicit state machines defined in Amazon States Language (ASL) — a JSON specification describing states, transitions, input/output processing, retry logic, and error handling.
+
+### Why Explicit State Machines
+
+Chaining Lambda functions directly using callback patterns or SNS fan-out creates implicit state in the form of inter-function contracts that are difficult to visualize, test, and debug. When a step in a chain fails, tracing the failure requires correlating logs across multiple functions and services. Step Functions externalizes the orchestration:
+
+- Each step is independently deployable and testable.
+- The execution history is visible in the Step Functions console — you see the exact input and output of every state transition.
+- Retry logic with exponential backoff is declared in the state machine definition, not in Lambda code.
+- Failures at any step can be caught and routed to error-handling states.
+
+### State Types
+
+| State | Purpose |
+|-------|---------|
+| **Task** | Invoke a Lambda function, call an AWS SDK action directly (DynamoDB, SQS, ECS, hundreds of services), or send an HTTP request to any endpoint |
+| **Choice** | Branch execution based on a condition evaluated on the current state input (if/else, switch) |
+| **Parallel** | Execute multiple independent branches simultaneously; wait for all to complete before proceeding |
+| **Map** | Iterate over an array in the state input, running a sub-workflow for each item (fan-out/fan-in without manual coordination) |
+| **Wait** | Pause for a fixed duration or until a specific timestamp (e.g., send reminder 24 hours after order) |
+| **Pass** | Pass input to output with optional transformation; useful for testing or inserting static data into the flow |
+| **Succeed** | Terminal success state |
+| **Fail** | Terminal failure state with error and cause fields |
+
+### Standard vs Express Workflows
+
+| Dimension | Standard Workflow | Express Workflow |
+|-----------|-----------------|----------------|
+| **Maximum duration** | 1 year | 5 minutes |
+| **Execution semantics** | Exactly-once state transitions | At-least-once (may re-process on internal failure) |
+| **Execution history** | Stored for 90 days, queryable via API | CloudWatch Logs only |
+| **Pricing** | Per state transition | Per execution count + duration |
+| **Best for** | Long-running business processes, human approval workflows, auditable financial workflows | High-volume short-duration orchestration (IoT data processing, real-time event handling) |
+
+### Built-in Error Handling
+
+Every Task state can declare retry and catch policies in the state machine definition — no retry logic lives in function code:
+
+```json
+"Retry": [
+  {
+    "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+    "IntervalSeconds": 2,
+    "MaxAttempts": 3,
+    "BackoffRate": 2.0,
+    "JitterStrategy": "FULL"
+  }
+],
+"Catch": [
+  {
+    "ErrorEquals": ["States.ALL"],
+    "Next": "HandleFailure",
+    "ResultPath": "$.error"
+  }
+]
+```
+
+`JitterStrategy: FULL` adds randomized jitter to retry intervals, preventing a thundering herd of retries from hitting a recovering downstream service simultaneously.
+
+---
+
+## Invocation Flow: API Gateway → Lambda
+
+<FlowDiagram
+  parties={["Client", "API Gateway", "Lambda Service", "Execution Environment"]}
+  steps={[
+    { from: "Client", to: "API Gateway", label: "HTTPS POST /orders", sub: "JWT in Authorization header" },
+    { from: "API Gateway", to: "API Gateway", label: "JWT authorizer validates token", sub: "Cached result (TTL 300s) or Lambda authorizer invoked" },
+    { from: "API Gateway", to: "Lambda Service", label: "Synchronous invoke: CreateOrder function", sub: "HTTP event JSON passed as invocation payload" },
+    { from: "Lambda Service", to: "Execution Environment", label: "No warm environment available — cold start", sub: "Download package → init runtime → run init code (outside handler)" },
+    { from: "Execution Environment", to: "Execution Environment", label: "Handler executes", sub: "Validate input, write to DynamoDB, publish to EventBridge" },
+    { from: "Execution Environment", to: "Lambda Service", label: "Return response object", sub: "{ statusCode: 201, body: { orderId: 'ord-123' } }" },
+    { from: "Lambda Service", to: "API Gateway", label: "Function response", sub: "Execution environment held warm for reuse" },
+    { from: "API Gateway", to: "Client", label: "HTTP 201 Created", sub: "Response body forwarded to client" },
+    { from: "Client", to: "API Gateway", label: "Next request (milliseconds later)", sub: "Same or different client" },
+    { from: "API Gateway", to: "Lambda Service", label: "Synchronous invoke: CreateOrder function", sub: "" },
+    { from: "Lambda Service", to: "Execution Environment", label: "Warm environment reused — no cold start", sub: "Handler invoked directly; init code already complete" },
+  ]}
+/>
+
+---
+
+## Serverless vs Containers
+
+Lambda and ECS Fargate are both managed compute options that eliminate EC2 instance management. Choosing between them depends on the workload characteristics.
+
+### Key Comparison
+
+| Dimension | Lambda | ECS Fargate |
+|-----------|--------|-------------|
+| **Execution model** | Event-driven, stateless, per-invocation | Long-running task or service, persistent process |
+| **Maximum duration** | 15 minutes per invocation | No limit |
+| **State** | Stateless (ephemeral environment) | Can maintain in-process state across requests |
+| **Startup time** | Cold start adds latency | Container startup: 10–30 seconds typically |
+| **Idle cost** | Zero (scales to zero) | Ongoing per-task cost even at zero traffic |
+| **Scaling** | Automatic, per-invocation concurrency | Task count adjustable via ECS Service Auto Scaling |
+| **Networking** | VPC optional; internet by default | Always in VPC |
+| **Binary/socket access** | No (no raw socket, no privileged access) | Full Linux process capabilities |
+| **Cost model** | Per invocation × duration × memory | Per task × vCPU/memory × hours |
+| **Maximum memory** | 10 GB | Up to 120 GB (Fargate) |
+
+### When to Choose Lambda
+
+- Workload is event-driven: API requests, file uploads, queue messages, scheduled jobs.
+- Execution duration is bounded and short (seconds to a few minutes).
+- Traffic is intermittent or highly variable — cost advantage of scaling to zero is significant.
+- You want zero operational overhead: no container images to build, no ECS task definitions to manage.
+
+### When to Choose ECS Fargate
+
+- Long-running processes: streaming consumers, background workers, WebSocket servers that maintain open connections.
+- Workloads that exceed 15 minutes (large batch processing, video transcoding, ML training jobs).
+- Applications requiring persistent in-process state across requests (not achievable with Lambda's ephemeral model).
+- Full Linux process control is required (raw sockets, privileged operations, IPC).
+- Steady, predictable traffic where the idle cost of Fargate tasks is acceptable versus the per-invocation pricing of Lambda at sustained volume.
+
+A common architecture combines both: an ALB receives HTTP requests and routes to ECS Fargate for long-running API endpoints, while Lambda handles event-driven side effects (S3 triggers, EventBridge rules, SQS consumers) without requiring any additional infrastructure.
+
+---
+
+## Serverless Architecture Patterns
+
+### API Backend
+
+API Gateway → Lambda → DynamoDB. Each Lambda function handles one route or a small group of related routes. No servers, no OS, no idle cost. Scales from zero to millions of requests per day automatically. Use Provisioned Concurrency on latency-sensitive functions to eliminate cold start variability for user-facing APIs.
+
+### Event-Driven Data Pipeline
+
+S3 (object upload) → S3 event notification → Lambda (transform/validate/enrich) → SQS (decouple stages) → Lambda (load) → DynamoDB or Redshift. Each Lambda handles one transformation stage. SQS decouples the stages — if the load function slows down, messages accumulate in the queue without back-pressure affecting the transform stage.
+
+### Scheduled Batch Processing
+
+EventBridge Scheduler (cron rule) → Lambda → query and process records from RDS, DynamoDB, or S3. Replaces EC2 instances running cron jobs. Cost is zero between runs. No instance to maintain, patch, or monitor. For jobs approaching the 15-minute Lambda limit, use Step Functions to orchestrate a sequence of Lambda invocations that together complete the job.
+
+### Fan-Out / Fan-In with Step Functions
+
+An API Gateway request triggers a Step Functions execution. A **Parallel** state fans out to multiple Task states (each invoking a different Lambda function simultaneously). A downstream state aggregates the parallel results. Step Functions handles the coordination, timeout, and error handling — no DynamoDB coordination table, no custom orchestration code.
+
+### Strangler Fig Migration
+
+Introduce API Gateway in front of a legacy monolith. Route a new API path to a Lambda function while all other paths proxy to the monolith via an HTTP integration. Progressively migrate routes from the monolith to Lambda as features are rewritten, shrinking the monolith's scope incrementally without a big-bang rewrite. The API Gateway becomes the stable routing layer throughout the migration.

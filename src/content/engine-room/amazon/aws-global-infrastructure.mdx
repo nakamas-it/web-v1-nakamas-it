@@ -1,0 +1,216 @@
+---
+title: "AWS Global Infrastructure — Regions, AZs, and Edge"
+category: "amazon"
+topic: "aws-global-infrastructure"
+summary: "How AWS organises its worldwide infrastructure into regions, availability zones, edge locations, and extension zones."
+tags: ["aws", "regions", "availability-zones", "edge-locations", "global-infrastructure"]
+order: 1
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+AWS runs the largest cloud infrastructure on the planet, and its geographic design is not arbitrary. Every placement decision — where to build a region, how many data centers form an availability zone, where to put an edge location — is driven by the same requirements that govern enterprise network design: fault isolation, latency, data sovereignty, and proximity to end users.
+
+Understanding AWS's physical and logical layout is prerequisite knowledge for any architecture decision. Which region to put a workload in, whether to deploy across multiple AZs, when to use CloudFront versus serving from a single region — all of these choices follow from understanding what the infrastructure layers actually are and what guarantees each one provides.
+
+---
+
+## Regions
+
+A **region** is a distinct geographic area that contains multiple, isolated locations called Availability Zones. Each region is a completely independent failure domain: its power grid, its fiber infrastructure, its control plane, and its physical facilities are separate from every other region. AWS currently operates more than 30 regions worldwide, with additional regions regularly announced.
+
+### What a Region Means
+
+From an operational standpoint:
+
+- **Data never leaves a region unless you explicitly move it.** If you create an S3 bucket in `eu-west-1` (Ireland), that data does not replicate to `us-east-1` unless you configure Cross-Region Replication. This is the physical enforcement of data sovereignty.
+- **Services have regional endpoints.** An EC2 instance in `ap-southeast-1` (Singapore) talks to the EC2 API endpoint for that region. Your IAM configuration is global, but almost everything else is regional.
+- **Billing is per-region.** Data transfer pricing, instance pricing, and service availability all vary by region.
+
+### Choosing a Region
+
+Four factors govern region selection:
+
+| Factor | Consideration |
+|--------|---------------|
+| **Latency** | Put compute closest to the largest user population. Use AWS's latency tools or CloudPing to measure RTT from target countries. |
+| **Compliance and data sovereignty** | GDPR requires EU citizen data to stay in the EU. HIPAA, FedRAMP, PCI-DSS requirements may mandate specific regions. |
+| **Service availability** | Not every AWS service is available in every region. `us-east-1` (Northern Virginia) typically receives new services first. Check the regional services table before committing to a region. |
+| **Price** | The same EC2 instance type costs different amounts in different regions. `us-east-1` is often the cheapest. `ap-southeast-2` (Sydney) tends to cost more. |
+
+### Region Identifiers
+
+Every region has a code: `us-east-1`, `eu-west-2`, `ap-northeast-1` (Tokyo). These codes appear in API calls, ARNs, S3 bucket URLs, and CloudWatch metrics. The format is generally `{geography}-{cardinal-direction}-{number}`.
+
+---
+
+## Availability Zones
+
+Inside each region, AWS operates two to six **Availability Zones (AZs)**. An AZ is one or more discrete data centers — purpose-built facilities with redundant power, cooling, and physical security — that operate independently from every other AZ in the same region.
+
+### The Design Principle
+
+AZs are engineered around the idea that a realistic failure scenario (power grid failure, flooding, a backhoe cutting a fiber trunk) can take out an entire data center, but is very unlikely to affect two data centers simultaneously if those data centers are in different parts of a city with different power grid feeds.
+
+Each AZ:
+- Has its own independent power source (utility feeds from separate substations + on-site generators + UPS)
+- Has its own cooling infrastructure
+- Is connected to other AZs in the same region via private, dedicated AWS-owned fiber
+- Is physically separated by meaningful distance (tens of kilometers), but close enough that inter-AZ latency is consistently under 10 ms
+
+### Multi-AZ Architectures
+
+The practical implication: if you run an application in a single AZ and that AZ has an outage, your application goes down. If you run it across two or three AZs, an AZ outage takes out a fraction of your capacity, and the remaining AZs can absorb the traffic.
+
+This is why virtually every managed AWS service has a Multi-AZ option:
+- **RDS Multi-AZ**: synchronous replication to a standby in another AZ, automatic failover in 60–120 seconds
+- **ELB**: distributes traffic across healthy targets in all configured AZs
+- **EKS/ECS**: scheduler places pods/tasks across AZs
+- **ElastiCache Cluster Mode**: shards distributed across AZs
+
+The rule of thumb: any stateless tier runs across at least two AZs behind a load balancer. Any stateful tier uses a managed Multi-AZ service or application-level replication.
+
+### AZ Naming and Shuffling
+
+AWS assigns AZ codes (`us-east-1a`, `us-east-1b`, `us-east-1c`) per account, not per physical data center. The physical AZ behind `us-east-1a` in your account is likely different from the physical AZ behind `us-east-1a` in a neighboring account. This shuffling prevents every customer from placing resources in the same physical data center. When coordinating with other accounts (shared VPCs, Transit Gateway), use **AZ IDs** (`use1-az1`, `use1-az2`) — these are consistent across accounts.
+
+---
+
+## Local Zones
+
+**Local Zones** extend AWS infrastructure to specific metropolitan areas beyond the main region footprint. A Local Zone is a small cluster of AWS compute and storage hardware placed close to a dense population center, connected back to the parent region via a high-bandwidth private link.
+
+### What Local Zones Provide
+
+Local Zones are designed for workloads that require single-digit millisecond latency to end users in a specific metro area. The parent region might be 40–80 ms away by RTT; a Local Zone in the same metro drops that to under 5 ms.
+
+Supported services include: EC2, EBS, VPC, Amazon ECS, Amazon EKS, Amazon RDS, Amazon ElastiCache, and Amazon FSx. Not all services available in a full region are available in a Local Zone.
+
+### Use Cases
+
+- **Media production and post-production**: Real-time video rendering and editing pipelines where artists are in a city not near a region.
+- **Live video streaming**: Low-latency ingest and processing close to venue or broadcaster.
+- **Gaming**: Sub-10 ms response time requirements for interactive game servers.
+- **Financial trading**: Algorithmic trading systems that need to be close to exchange colocation facilities.
+
+Local Zones are opt-in. You enable a Local Zone in the EC2 console, then select Local Zone subnets when launching resources.
+
+---
+
+## Wavelength Zones
+
+**Wavelength Zones** take the edge compute concept further, embedding AWS compute directly inside 5G telecom carrier networks. A Wavelength Zone is AWS infrastructure housed inside a telecom provider's data center, connected to their mobile network core.
+
+### Why This Matters
+
+Standard 5G mobile traffic travels from a device through a cell tower, into the carrier's network, then out to the internet, then to AWS. Each hop adds latency. Wavelength eliminates the internet transit leg: traffic from a 5G device stays within the carrier's network, hits the Wavelength Zone, and gets processed locally before any response goes back to the device.
+
+The result is single-digit millisecond latency from 5G device to application. This enables use cases that are physically impossible at standard internet latencies:
+- **Augmented reality overlays** that must respond faster than perception (~20 ms threshold)
+- **Autonomous vehicle telemetry processing** with real-time decision loops
+- **Industrial IoT control systems** over 5G private networks
+- **Live sports interactive applications** with per-device rendering
+
+Wavelength Zones support EC2, EBS, VPC, and Amazon ECS. Traffic can be routed back to the parent region for services not available in the Wavelength Zone.
+
+---
+
+## Edge Locations and Points of Presence
+
+AWS operates more than 400 **Points of Presence (PoPs)** globally, comprising Edge Locations and Regional Edge Caches. These are not full AWS regions — they are smaller facilities used exclusively for content delivery and DNS resolution.
+
+### CloudFront
+
+**Amazon CloudFront** is AWS's CDN. It uses the PoP network to cache content close to end users worldwide. When a user in São Paulo requests an object served by CloudFront:
+
+1. Their DNS query resolves to the CloudFront PoP IP address in São Paulo.
+2. If the object is cached at that PoP, it returns immediately — no round-trip to the origin region.
+3. If the object is not cached (cache miss), CloudFront fetches it from the origin (an S3 bucket, an ALB, or any HTTP origin), caches it at the PoP, and returns it to the user. Subsequent requests from São Paulo get the cached version.
+
+**Regional Edge Caches** sit between PoPs and origins. They are larger caches that aggregate traffic from many PoPs, reducing origin load. Infrequently requested objects that expire from a PoP may still live in the Regional Edge Cache, avoiding an origin fetch.
+
+<FlowDiagram
+  parties={["User", "Edge Location (PoP)", "Regional Edge Cache", "Origin (Region)"]}
+  steps={[
+    { from: "User", to: "Edge Location (PoP)", label: "HTTP request", sub: "DNS resolves to nearest PoP" },
+    { from: "Edge Location (PoP)", to: "User", label: "Cache HIT — response", sub: "Object served from PoP cache, <10ms" },
+    { from: "User", to: "Edge Location (PoP)", label: "HTTP request (cache miss)", sub: "Object not in PoP cache" },
+    { from: "Edge Location (PoP)", to: "Regional Edge Cache", label: "Forward request", sub: "Check regional cache first" },
+    { from: "Regional Edge Cache", to: "Origin (Region)", label: "Forward to origin (miss)", sub: "Object not in regional cache" },
+    { from: "Origin (Region)", to: "Regional Edge Cache", label: "Response + Cache-Control headers", sub: "Object stored in regional cache" },
+    { from: "Regional Edge Cache", to: "Edge Location (PoP)", label: "Response", sub: "Object stored at PoP" },
+    { from: "Edge Location (PoP)", to: "User", label: "Response delivered", sub: "Future requests served from PoP" },
+  ]}
+/>
+
+### Route 53
+
+**Amazon Route 53** also uses the PoP network. DNS queries from end users are answered by the geographically nearest PoP, reducing DNS resolution latency. Route 53's anycast IP addresses are advertised from every PoP, so DNS traffic is automatically routed to the closest location by BGP.
+
+---
+
+## AWS Outposts
+
+**AWS Outposts** brings AWS-managed hardware into your own data center or colocation facility. AWS ships a physical rack (or smaller Outpost servers/racks) that is fully managed by AWS — firmware updates, hardware replacement, monitoring — but physically located on your premises.
+
+### How Outposts Extends AWS
+
+An Outpost is connected back to its parent region via a dedicated VPN link over your internet connection or AWS Direct Connect. From a service perspective, it behaves as an extension of the parent region: you create subnets in the Outpost, launch EC2 instances into those subnets, and they appear in the same VPC as your regional resources.
+
+Services available on Outposts include: EC2, EBS, S3 (Outposts rack only), RDS, ECS, EKS, EMR, ElastiCache, and Application Load Balancer.
+
+### Use Cases
+
+- **Data residency requirements**: Data must physically stay on-premises but you want to use AWS services and APIs.
+- **Low-latency local processing**: Applications that cannot tolerate the WAN round-trip to a region (local manufacturing control systems, real-time medical imaging).
+- **Legacy hardware integration**: Workloads that must communicate with on-premises equipment at LAN speeds.
+- **Hybrid migration**: Running identical AWS APIs on-premises and in the cloud during a phased migration.
+
+Outposts is the most expensive edge option — you pay for the hardware lease and the underlying capacity. The control plane remains in the parent region, so an Outpost that loses its region connection can continue running existing workloads but cannot launch new instances or use regional APIs.
+
+---
+
+## Infrastructure Comparison
+
+| Construct | Scope | Typical Latency Benefit | Primary Use Case |
+|-----------|-------|------------------------|-----------------|
+| **Region** | Geographic area (country/continent) | Baseline | All production workloads; data sovereignty boundary |
+| **Availability Zone** | Isolated data center(s) within a region | Inter-AZ < 10 ms | High availability; fault isolation within a region |
+| **Local Zone** | Metro extension of a region | < 5 ms to metro users | Media production; gaming; financial latency-sensitive |
+| **Wavelength Zone** | Inside 5G carrier network | < 2 ms from 5G device | AR/VR; autonomous vehicles; mobile edge compute |
+| **Edge Location (PoP)** | City-level CDN/DNS node | < 10 ms to cached content | CDN (CloudFront); DNS (Route 53) |
+| **Outposts** | Your data center | LAN-speed local | On-premises data residency; local processing requirements |
+
+---
+
+## AWS Global Network Backbone
+
+All inter-region traffic travels over AWS's private fiber network, not the public internet. When an EC2 instance in `us-east-1` talks to an S3 bucket in `eu-west-1` (assuming inter-region data movement is intentional), that traffic travels over dedicated dark fiber that AWS owns and operates.
+
+This private backbone provides:
+- Lower and more consistent latency than public internet routing
+- No exposure to BGP route hijacking or public internet congestion events
+- Higher throughput between regions compared to equivalent internet paths
+
+**AWS Global Accelerator** uses this backbone for application traffic. You assign static anycast IPs to your application. Traffic from end users enters the AWS network at the nearest PoP and then travels over the private backbone to your application's region, rather than traversing the public internet end-to-end. The result is lower latency and higher reliability for real-time applications compared to standard internet routing.
+
+---
+
+## Selecting the Right Layer
+
+The hierarchy is not a menu of alternatives — it is a set of nested layers, each solving a different problem:
+
+1. **Region**: Choose based on compliance, latency to primary users, and required service availability. This is the first and most consequential decision.
+
+2. **AZs within the region**: Use at least two for any production workload. Three AZs provide better load distribution and survive the loss of one AZ without capacity constraint. The cost of Multi-AZ is modest compared to the availability gain.
+
+3. **Edge Locations (CloudFront)**: Use for any publicly served static content, media, APIs with cacheable responses, or SPA frontends. CloudFront is often cheaper than serving from a region at scale because data transfer from CloudFront costs less than data transfer from S3 or EC2.
+
+4. **Local Zones / Wavelength**: Only when sub-10 ms latency to a specific metro or 5G user population is a hard requirement. These have limited service availability and higher cost; evaluate carefully before committing.
+
+5. **Outposts**: Only when data residency regulations or latency requirements make it impossible to use a full region.
+
+The vast majority of workloads are solved by choosing a region and deploying across two or three AZs behind a load balancer. Everything else is an extension for specific edge cases.

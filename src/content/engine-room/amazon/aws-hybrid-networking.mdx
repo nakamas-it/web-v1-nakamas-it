@@ -1,0 +1,228 @@
+---
+title: "AWS Hybrid Connectivity — VPN, Direct Connect, and Transit Gateway"
+category: "amazon"
+topic: "aws-hybrid-networking"
+summary: "How to connect on-premises networks to AWS using Site-to-Site VPN, Direct Connect, and Transit Gateway as the hub."
+tags: ["aws", "vpn", "direct-connect", "transit-gateway", "hybrid", "networking"]
+order: 16
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Most enterprises do not move to AWS in a single leap. Data centers remain. Legacy applications stay on-premises. Regulatory requirements mandate that certain workloads never leave controlled facilities. The result is a hybrid architecture where resources in AWS and resources on-premises must communicate as if they share a single network.
+
+AWS provides three primary mechanisms for hybrid connectivity: **Site-to-Site VPN** for encrypted tunnels over the public internet, **AWS Direct Connect** for dedicated private circuits, and **AWS Transit Gateway** as a regional hub that aggregates connectivity for dozens or hundreds of VPCs and on-premises connections. Understanding each option — its performance characteristics, cost structure, and failure modes — is essential for designing networks that are both functional and resilient.
+
+---
+
+## AWS Site-to-Site VPN
+
+Site-to-Site VPN establishes an **encrypted IPsec tunnel** between your on-premises network and an AWS VPC. Traffic travels over the public internet but is protected by IKEv1 or IKEv2 with AES-256 encryption.
+
+### Components
+
+| Component | Description |
+|-----------|-------------|
+| **Virtual Private Gateway (VGW)** | AWS-side VPN endpoint. Attached to a VPC. One VGW per VPC maximum. |
+| **Customer Gateway (CGW)** | AWS resource representing your physical on-premises VPN device. Contains the device's public IP address and optional BGP ASN. |
+| **VPN Connection** | The logical link between VGW and CGW. Always consists of **two tunnels** — each terminating on a different AWS endpoint in different AZs — for redundancy. |
+
+### Routing
+
+Site-to-Site VPN supports two routing modes:
+
+- **Static routing**: You manually specify which on-premises CIDRs are reachable via the VPN. Simpler to configure, but requires manual updates when your on-premises network changes.
+- **Dynamic routing (BGP)**: Your VPN device and AWS exchange routes automatically via BGP. Preferred for production — enables automatic failover between tunnels and handles network topology changes without manual intervention.
+
+### Performance and Limitations
+
+- Maximum throughput: approximately **1.25 Gbps per tunnel**. With two tunnels, you can potentially use both (ECMP must be configured)
+- Latency: variable — traffic traverses the public internet, which introduces jitter and path variance
+- Setup time: minutes to hours — no physical provisioning required
+- Encryption overhead: IPsec adds CPU overhead on your on-premises device
+
+### Accelerated Site-to-Site VPN
+
+Standard VPN routes traffic through the public internet from your location to the VGW in the VPC's region. **Accelerated VPN** uses **AWS Global Accelerator** instead: your traffic enters the AWS network at the nearest AWS edge location (one of 100+ Anycast endpoints) and travels on AWS's private backbone to the VGW. This reduces latency variability and improves consistency for geographically distant connections.
+
+Accelerated VPN requires Transit Gateway (not VGW) as the AWS endpoint and adds Global Accelerator charges.
+
+---
+
+## AWS Direct Connect
+
+AWS Direct Connect (DX) is a **dedicated private network connection** between your premises and AWS. Traffic does not traverse the public internet at any point — it travels from your facility through a private cross-connect at an AWS DX location and into the AWS network.
+
+### Connection Types
+
+| Type | Speeds Available | Provisioning Time | Notes |
+|------|-----------------|-------------------|-------|
+| **Dedicated** | 1 Gbps, 10 Gbps, 100 Gbps | Weeks to months | Physical cross-connect at AWS DX location. You or your colo provider orders the cross-connect. |
+| **Hosted** | 50 Mbps to 10 Gbps | Days to weeks | Ordered through an AWS DX Partner. Partner shares their dedicated port. More locations available. |
+
+### Virtual Interfaces (VIFs)
+
+A single physical DX connection carries multiple logical connections via **Virtual Interfaces (VIFs)**, each a separate VLAN:
+
+| VIF Type | Purpose | Connects To |
+|----------|---------|------------|
+| **Private VIF** | Access resources in a VPC via private IP addresses | VGW attached to a VPC, or DX Gateway |
+| **Public VIF** | Access all AWS public endpoints (S3, EC2 public IPs, SES, SQS) over the AWS backbone | AWS public network (not a VPC) |
+| **Transit VIF** | Connect to AWS Transit Gateway | DX Gateway (required) |
+
+### DX Gateway
+
+A **Direct Connect Gateway** is a global resource that lets a single DX circuit connect to multiple VPCs across multiple AWS regions. Without a DX Gateway, a Private VIF connects to a single VGW in a single region. With a DX Gateway:
+
+- One DX circuit → DX Gateway → multiple VGWs → multiple VPCs in multiple regions
+- Traffic from on-premises to any connected VPC uses the same physical circuit
+- DX Gateways are global — they span regions
+
+<FlowDiagram
+  parties={["On-Premises Router", "AWS Network"]}
+  steps={[
+    { from: "On-Premises Router", to: "AWS Network", label: "Physical cross-connect", sub: "On-prem → Colo/DX Location" },
+    { from: "On-Premises Router", to: "AWS Network", label: "AWS DX router ingress", sub: "Dedicated or hosted connection" },
+    { from: "On-Premises Router", to: "AWS Network", label: "Private VIF (VLAN)", sub: "BGP session → private IP routing" },
+    { from: "On-Premises Router", to: "AWS Network", label: "DX Gateway", sub: "Global resource — multi-region" },
+    { from: "On-Premises Router", to: "AWS Network", label: "VGW → VPC resources", sub: "Private connectivity to EC2, RDS, etc." },
+  ]}
+/>
+
+### Benefits Over VPN
+
+| Attribute | Site-to-Site VPN | Direct Connect |
+|-----------|-----------------|----------------|
+| Path | Public internet | Private network, no internet |
+| Latency | Variable (internet jitter) | Consistent, predictable |
+| Bandwidth | Up to 1.25 Gbps/tunnel | Up to 100 Gbps |
+| Cost | Low (hourly + data transfer) | High (port fee + data transfer, but lower $/GB) |
+| Setup time | Minutes to hours | Weeks to months |
+| Encryption | IPsec (always encrypted) | Not encrypted by default |
+| Compliance | Not suitable for strict "no internet" requirements | Meets strict data sovereignty requirements |
+
+### High Availability Design
+
+A single DX connection is a single point of failure. Production HA designs require:
+
+1. **Two DX connections to different DX locations**: Protects against a location failure or a single circuit failure
+2. **DX (primary) + Site-to-Site VPN (backup)**: Most common pattern. BGP local preference or AS path prepending ensures DX is preferred. VPN activates automatically when DX fails
+3. **Two DX connections + VPN backup**: Maximum resilience
+
+### Encryption on Direct Connect
+
+DX is **not encrypted by default**. Options to add encryption:
+
+- **MACsec (IEEE 802.1AE)**: Layer 2 encryption on Dedicated connections at 10 Gbps and 100 Gbps. Encrypts the physical link between your router and the AWS DX router. Requires MACsec-capable hardware.
+- **IPsec VPN over DX Public VIF**: Establish a Site-to-Site VPN connection using the DX public VIF as the transport instead of the internet. Provides IPsec encryption with the performance consistency of DX. Adds encryption overhead; effective throughput lower than raw DX.
+
+---
+
+## AWS Transit Gateway
+
+Transit Gateway (TGW) is a **regional network transit hub**. It acts as a central router that connects VPCs, VPN connections, Direct Connect connections, and other TGWs. It replaces the complex web of VPC peering connections that emerges in large multi-VPC environments.
+
+Without TGW, connecting 10 VPCs requires 45 peering connections (10×9/2). With TGW, all 10 VPCs connect to one TGW — 10 attachments total, fully transitive.
+
+### Attachments
+
+A TGW **attachment** is a connection to the TGW. Supported attachment types:
+
+| Attachment Type | Description |
+|-----------------|-------------|
+| **VPC** | Connects a VPC to the TGW. Uses ENIs in specified subnets (one per AZ). Consumes VPC IP addresses. |
+| **Site-to-Site VPN** | Connects an IPsec VPN directly to TGW (replaces VGW). Required for Accelerated VPN. |
+| **Direct Connect Gateway** | Connects a DX Gateway (with Transit VIF) to TGW. Enables on-premises DX to reach all TGW-attached VPCs. |
+| **TGW Peering** | Connects two TGWs in different regions. Static routes only. Builds inter-region hub-and-spoke. |
+| **Connect** | GRE tunnel for SD-WAN appliances. Higher throughput than VPN. |
+
+### TGW Route Tables
+
+TGW maintains its own route tables, independent of VPC route tables. Every attachment can be associated with a TGW route table and can propagate its routes into it.
+
+**Default route table**: When a new attachment is created, it is associated with the default TGW route table. All attachments propagate routes to each other — any VPC can reach any other VPC and any VPN. This is the "flat network" model appropriate for small environments.
+
+**Custom route tables**: Create separate TGW route tables for network segmentation:
+
+- **Isolated VPCs**: Create a route table with no propagation from other VPCs. VPCs in this table cannot reach each other but can reach a shared services VPC.
+- **Shared services VPC**: All VPCs have routes to a central shared services VPC (monitoring, security tools, DNS), but not to each other.
+- **Inspection VPC**: Route all east-west traffic through a security inspection VPC (running a firewall appliance) before reaching the destination.
+
+### Transitive Routing: The Key Advantage
+
+<FlowDiagram
+  parties={["VPCs / On-Prem", "Transit Gateway"]}
+  steps={[
+    { from: "VPCs / On-Prem", to: "Transit Gateway", label: "VPC A → TGW attachment", sub: "10.0.0.0/16 route propagated" },
+    { from: "VPCs / On-Prem", to: "Transit Gateway", label: "VPC B → TGW attachment", sub: "10.1.0.0/16 route propagated" },
+    { from: "VPCs / On-Prem", to: "Transit Gateway", label: "On-prem VPN → TGW", sub: "192.168.0.0/16 via BGP" },
+    { from: "Transit Gateway", to: "VPCs / On-Prem", label: "VPC A traffic to VPC B", sub: "TGW routes → TGW → VPC B attachment" },
+    { from: "Transit Gateway", to: "VPCs / On-Prem", label: "On-prem traffic to any VPC", sub: "VPN → TGW → correct VPC attachment" },
+  ]}
+/>
+
+### TGW Peering
+
+Connect TGWs across regions for a global network:
+- **Static routes only** — no BGP between TGWs
+- Traffic travels on the AWS backbone between regions (not the internet)
+- Use case: global applications where regional TGWs aggregate regional VPCs and TGW peering connects the regions
+
+### Equal-Cost Multi-Path (ECMP)
+
+TGW supports ECMP for VPN attachments. By creating multiple VPN connections to the same customer gateway and enabling ECMP, you can aggregate bandwidth across multiple tunnels. Each VPN connection provides up to 1.25 Gbps per tunnel — with 4 VPN connections (8 tunnels), you can achieve up to 5 Gbps aggregate.
+
+---
+
+## AWS PrivateLink
+
+AWS PrivateLink allows you to expose a service hosted in your VPC to other VPCs (in your account or in external accounts) without establishing VPC peering, VPN, or Direct Connect. The consumer VPC creates an **Interface VPC Endpoint**, which creates an ENI with a private IP in the consumer's subnet. Traffic flows from the consumer's ENI → AWS backbone → **Network Load Balancer** in the provider's VPC → the service.
+
+Properties:
+- One-way: the consumer can reach the provider's service, but the provider cannot initiate connections to the consumer
+- No CIDR overlap restriction (unlike VPC peering)
+- No route table changes in provider's VPC
+- Common use cases: SaaS vendors exposing services to customer VPCs, shared services in multi-account organizations (centralized secrets management, monitoring agents, artifact repositories)
+
+---
+
+## Route 53 Resolver for Hybrid DNS
+
+Connecting networks physically is only half the problem. DNS resolution across the hybrid boundary requires explicit configuration. By default, EC2 instances in a VPC use the Route 53 Resolver (at VPC Base IP + 2), and on-premises hosts use on-premises DNS. Neither can resolve the other's names.
+
+**Route 53 Resolver Endpoints** bridge this gap:
+
+| Endpoint Type | Direction | Purpose |
+|---------------|-----------|---------|
+| **Inbound Endpoint** | On-premises → AWS | On-premises DNS forwards queries for AWS internal domains (e.g., `*.corp.internal`, `*.us-east-1.compute.internal`) to the inbound endpoint ENI IPs. Route 53 resolves and responds. |
+| **Outbound Endpoint** | AWS → On-premises | Route 53 Resolver forwards queries for on-premises domains (e.g., `*.on-prem.local`) to on-premises DNS servers via DX or VPN. |
+| **Resolver Rules** | Configuration | Define which domain suffixes use which DNS server. `Forward` rules send matching queries to specified IP(s). Default: all other queries resolved by Route 53 locally. |
+
+This allows a workload in AWS to resolve `db-server.on-prem.local` (on-premises hostname) transparently, and on-premises hosts to resolve `rds.us-east-1.amazonaws.com` private hostnames — all over the existing DX or VPN connection.
+
+---
+
+## Choosing the Right Option
+
+| Requirement | Recommended Solution |
+|-------------|---------------------|
+| Quick connectivity, encrypted, low budget | Site-to-Site VPN |
+| Consistent latency, high bandwidth, compliance | Direct Connect |
+| Connecting many VPCs and on-premises | Transit Gateway |
+| Global multi-region network | TGW Peering + DX |
+| Maximum resilience | DX primary + VPN backup |
+| Service sharing without VPC peering | PrivateLink |
+| Cross-network DNS resolution | Route 53 Resolver Endpoints |
+
+---
+
+## References
+
+- [AWS Site-to-Site VPN User Guide](https://docs.aws.amazon.com/vpn/latest/s2svpn/VPC_VPN.html)
+- [AWS Direct Connect User Guide](https://docs.aws.amazon.com/directconnect/latest/UserGuide/Welcome.html)
+- [AWS Transit Gateway documentation](https://docs.aws.amazon.com/vpc/latest/tgw/what-is-transit-gateway.html)
+- [AWS PrivateLink documentation](https://docs.aws.amazon.com/vpc/latest/privatelink/what-is-privatelink.html)
+- [Route 53 Resolver for hybrid DNS](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver.html)

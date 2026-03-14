@@ -1,0 +1,257 @@
+---
+title: "AWS Specialized Database Services"
+category: "amazon"
+topic: "aws-other-databases"
+summary: "Purpose-built databases beyond RDS and DynamoDB — ElastiCache for caching, Redshift for analytics, Neptune for graphs, DocumentDB for documents, and the rest of the AWS database portfolio."
+tags: ["aws", "elasticache", "redshift", "neptune", "documentdb", "database", "caching"]
+order: 13
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+AWS's database strategy is built on a single principle: use the right database for the job. A general-purpose relational database can technically store any data, but forcing a time-series workload into a relational schema, or modeling a social graph as rows and columns, creates unnecessary complexity, poor query performance, and schemas that resist change.
+
+AWS offers purpose-built database engines for each major data model and access pattern: in-memory caching, large-scale analytics, graph traversal, document storage, wide-column writes, time-series ingestion, and durable in-memory primary stores. This article covers the AWS portfolio beyond RDS and DynamoDB.
+
+---
+
+## Amazon ElastiCache
+
+ElastiCache is a managed in-memory data store. It runs inside your VPC on EC2 nodes and supports two engine options: Redis and Memcached. The primary value proposition is reducing read latency from the single-digit milliseconds of a database query to the sub-millisecond response time of a memory lookup, while simultaneously reducing read load on the backend database.
+
+### ElastiCache for Redis
+
+Redis is a rich in-memory data structure server. It is far more than a simple key-value cache.
+
+**Supported data structures:**
+- Strings — simple key-value; binary-safe; up to 512 MB per value
+- Hashes — field-value maps within a key; efficient for storing object attributes
+- Lists — ordered sequences; supports push/pop from both ends (queue or stack operations)
+- Sets — unordered unique string collections; union, intersection, and difference operations
+- Sorted Sets — sets where each member has a numeric score; range queries by score (`ZRANGEBYSCORE`); ideal for leaderboards and priority queues
+- Streams — append-only log; consumer groups for fan-out processing; similar conceptually to Kafka topics at smaller scale
+- Geospatial indexes — store and query latitude/longitude coordinates; find members within a radius
+
+**Persistence:**
+- **RDB snapshots**: Point-in-time snapshot of the dataset written to disk at configurable intervals. Fast restart after failure. Some data loss possible between snapshots.
+- **AOF (Append-Only File)**: Log of every write operation. Can replay the log on restart to reconstruct the dataset. Slower than RDB, but lower data loss risk.
+- ElastiCache for Redis supports both — configurable per cluster.
+
+**Replication and HA:**
+- **Cluster Mode Disabled**: A single shard with one primary node and up to 5 read replicas. All data fits on one node. Multi-AZ with automatic failover promotes a replica if the primary fails. Scale up by changing node type.
+- **Cluster Mode Enabled**: Data is sharded across up to 500 shards (each a primary + replicas). Consistent hashing distributes keys across shards. Horizontal scaling: add shards to increase total memory capacity beyond what a single node can hold. Requires a cluster-aware client library.
+
+### ElastiCache for Memcached
+
+Memcached is a simpler, multi-threaded in-memory key-value store. It supports only string values. There is no persistence, no replication, and no built-in failover. Nodes are independent — loss of a node means loss of all cache entries on that node, which the application handles as cache misses.
+
+Scaling is purely horizontal: add nodes to the cluster. A consistent hashing algorithm in the client library distributes keys across nodes. Client libraries handle node discovery automatically.
+
+Memcached is appropriate when: you need a pure cache (no durability requirement), simplicity is valued over features, multi-threaded performance is important, and the application already handles cache-miss fallback to the database gracefully.
+
+### Caching Patterns
+
+**Lazy Loading (Cache-Aside):**
+On a read request, the application checks the cache first. On a cache hit, return the cached value directly — the database is not contacted. On a miss, query the database, return the result to the caller, and write the result into the cache for subsequent requests. The cache is populated on demand, so only accessed data occupies memory. The downside: the first request after a miss (or after TTL expiry) always incurs the full database latency.
+
+**Write-Through:**
+When the application writes to the database, it simultaneously writes to the cache. The cache is always in sync with the database. There is no stale data window. The downside: every write has additional latency (cache write + database write); data written but never subsequently read accumulates in the cache; newly provisioned cache nodes are empty until written through.
+
+**TTL (Time-Based Expiration):**
+Applied in conjunction with either pattern. Every cached item carries an expiration time. When the TTL passes, the item is evicted and the next read falls through to the database. TTL balances memory usage (items do not accumulate forever) against data freshness (shorter TTL = fresher data but more database load). Choose TTL based on how frequently the underlying data changes and how stale a read the application can tolerate.
+
+<FlowDiagram
+  parties={["Application", "ElastiCache (Redis)", "Amazon RDS"]}
+  steps={[
+    { from: "Application", to: "ElastiCache (Redis)", label: "GET session:abc123", sub: "Lazy-loading: cache checked first" },
+    { from: "ElastiCache (Redis)", to: "Application", label: "Cache HIT — session data returned", sub: "Sub-millisecond; RDS not involved" },
+    { from: "Application", to: "ElastiCache (Redis)", label: "GET session:xyz789", sub: "Key not present in cache" },
+    { from: "ElastiCache (Redis)", to: "Application", label: "Cache MISS — nil returned", sub: "Application falls through to RDS" },
+    { from: "Application", to: "Amazon RDS", label: "SELECT * FROM sessions WHERE id='xyz789'", sub: "Database query executes" },
+    { from: "Amazon RDS", to: "Application", label: "Session row returned", sub: "Single-digit millisecond response" },
+    { from: "Application", to: "ElastiCache (Redis)", label: "SET session:xyz789 <data> EX 1800", sub: "Populate cache; TTL 30 minutes" },
+    { from: "Application", to: "Application", label: "Return data to original caller", sub: "Cache warm for next 30 minutes" },
+  ]}
+/>
+
+---
+
+## Amazon Redshift
+
+Redshift is a managed data warehouse built for analytical queries (OLAP — Online Analytical Processing) over very large datasets. It is not designed for transactional workloads (OLTP). The design choice between Redshift and a relational database like RDS is not about scale — it is about query pattern: analytics and aggregations versus row-level transactional reads and writes.
+
+### Columnar Storage and MPP
+
+Traditional databases store data row-by-row. An analytical query like `SELECT SUM(revenue), AVG(discount) FROM sales WHERE region = 'EMEA'` over a billion-row table must read all columns of all rows that match the filter, even though only two columns are needed. This is expensive.
+
+**Columnar storage** stores each column's values contiguously on disk. The same query reads only the `revenue`, `discount`, and `region` columns — a fraction of the data. Columnar values also compress extremely well because they come from the same domain (country codes compress far better interleaved with other values than stored together).
+
+**Massively Parallel Processing (MPP)**: Redshift distributes data across compute nodes using a distribution key or style (EVEN, KEY, or ALL). When a query runs, each compute node scans its local data slice in parallel. The leader node compiles the query plan, distributes fragments to compute nodes, and aggregates results. This allows sub-second query execution across hundreds of billions of rows.
+
+### Cluster Architecture
+
+| Component | Role |
+|-----------|------|
+| Leader node | Receives SQL queries; generates execution plans; distributes work to compute nodes; aggregates results |
+| Compute nodes | Store data slices; execute query fragments in parallel; communicate results to leader |
+| Node slices | Subdivisions within a compute node; each slice processes a portion of the node's data |
+
+**Node types:**
+- **RA3 nodes**: Decoupled compute and storage. Managed storage scales independently, backed by S3 (with a hot tier on local NVMe SSD). Preferred for all new clusters.
+- **DC2 nodes**: Dense Compute SSD. Compute and local storage co-located. Fixed storage per node; legacy type.
+
+### Redshift Spectrum
+
+Spectrum extends Redshift queries to data stored in S3 without requiring that data to be loaded into the cluster. You define external tables in an external schema pointing to S3 paths and a format specification (Parquet, ORC, JSON, CSV, Avro). Queries can join Redshift cluster data with Spectrum S3 data in the same SQL statement.
+
+Spectrum processing uses a separate, auto-scaling layer of resources (independent of the Redshift cluster compute nodes). Pushdown predicates and aggregations execute at the Spectrum layer, so only the reduced result set returns to the leader node.
+
+### Redshift Serverless
+
+Automatically provisions and scales Redshift capacity measured in RPUs (Redshift Processing Units). No cluster to size or maintain. Billing is per RPU-second consumed. Suitable for intermittent or variable analytical workloads where provisioning a fixed cluster would result in significant idle time.
+
+### Integration Ecosystem
+
+| Source / Tool | Integration |
+|---------------|------------|
+| Amazon S3 | `COPY` command for bulk loads; `UNLOAD` to export query results to S3 |
+| Kinesis Data Firehose | Stream real-time data directly into Redshift |
+| AWS Glue | ETL jobs to transform and load data from S3 and other sources |
+| Amazon QuickSight | BI visualization layer connected directly to Redshift |
+| RDS / Aurora Zero-ETL | Automatic, near-real-time replication from transactional databases to Redshift without building ETL pipelines |
+| Amazon SageMaker | Redshift ML — call SageMaker model endpoints from SQL |
+
+---
+
+## Amazon Neptune
+
+Neptune is a managed graph database. Graph databases model data as **nodes** (entities) and **edges** (relationships), with properties on both. The structural difference from relational databases is not just representational — graph databases store and traverse relationships as first-class indexed structures, whereas relational databases represent relationships implicitly through foreign keys and JOIN operations.
+
+The practical consequence: traversing a relationship in a graph database is O(1) per hop regardless of table size, because the edge directly references the adjacent node. The equivalent JOIN in a relational database is O(n log n) at best — it must scan an index. At multiple hops of depth (e.g., "who are the friends-of-friends-of-friends of this user?"), the relational query becomes exponentially expensive, while graph traversal remains efficient.
+
+### Query Languages
+
+Neptune supports two graph models on the same engine:
+
+**Property Graph** with **Apache TinkerPop Gremlin** or **openCypher**:
+- Nodes and edges both carry key-value properties.
+- Gremlin is a traversal language: `g.V().has('name','Alice').out('FOLLOWS').values('name')` — find all users Alice follows and return their names.
+- openCypher is a declarative pattern-matching language (similar in style to MATCH/WHERE/RETURN).
+
+**RDF (Resource Description Framework)** with **SPARQL**:
+- Data is stored as triples: subject–predicate–object. Example: `<Alice> <worksAt> <AcmeCorp>`.
+- SPARQL is W3C-standard. Used in knowledge graphs, semantic web, and ontology applications.
+
+Both models run on the same Neptune cluster. A cluster uses one model.
+
+### Use Cases
+
+- **Social networks**: Friend recommendations, mutual connection discovery, shortest path between users, influence analysis
+- **Fraud detection**: Detecting rings of connected accounts, devices, IP addresses, and transactions that individually appear legitimate but together form a suspicious subgraph
+- **Knowledge graphs**: Entities, types, synonyms, and relationships across large ontologies (product knowledge graphs, scientific knowledge bases)
+- **Recommendation engines**: Collaborative filtering via graph traversal — "users who bought X also bought Y" via shared product edges
+- **Network and IT infrastructure**: Model topology and find the blast radius of a node failure
+
+Neptune uses the same distributed storage architecture as Aurora: 6 copies across 3 AZs, self-healing, automatic storage growth. Up to 15 read replicas. Automatic failover.
+
+---
+
+## Amazon DocumentDB
+
+DocumentDB is a MongoDB-compatible managed document database. It stores data as JSON-like documents (BSON format), supports flexible schemas where documents in the same collection can have different fields, and allows nested arrays and sub-documents to represent hierarchical data within a single record.
+
+**Wire protocol compatibility**: DocumentDB implements the MongoDB wire protocol for versions 3.6, 4.0, and 5.0. Existing MongoDB applications connect using their MongoDB driver without code changes (with some feature-level caveats). DocumentDB is not MongoDB — it is an AWS-proprietary implementation of the MongoDB API backed by a distributed storage engine derived from Aurora's architecture.
+
+Not all MongoDB features are fully supported. Advanced server-side operations, some aggregation pipeline stages, and MongoDB-specific cluster configurations may behave differently or not be available. Evaluate against your specific MongoDB feature usage before migrating.
+
+DocumentDB storage properties: 6 copies across 3 Availability Zones (Aurora-derived), automatic storage growth, Multi-AZ deployment with automatic failover.
+
+**When to use DocumentDB**:
+- JSON document storage for hierarchical or variable-schema data (product catalogs with different attribute sets per category, user profiles, content management)
+- Migrating an existing MongoDB application to managed infrastructure without maintaining MongoDB clusters on EC2
+- Applications that benefit from document query capabilities (nested field queries, array contains queries) but do not require every advanced MongoDB feature
+
+---
+
+## Amazon Keyspaces (for Apache Cassandra)
+
+Keyspaces is a serverless, fully managed Apache Cassandra-compatible database. Applications using CQL (Cassandra Query Language) and standard Cassandra drivers can connect to Keyspaces without modification.
+
+Cassandra's data model is the wide-column store: data is organized into tables with rows and columns, but columns are dynamic per row (each row can have different columns), and columns are organized into families. Cassandra is designed for very high write throughput and linear horizontal scalability.
+
+Keyspaces properties:
+- Serverless: no cluster provisioning. Scales automatically.
+- On-demand or provisioned capacity modes.
+- Data replicated across 3 Availability Zones.
+- Point-in-time recovery (PITR) up to 35 days.
+
+Use cases: migrating existing Cassandra applications to AWS without re-platforming, high-volume IoT telemetry ingestion using Cassandra tooling, time-series data modeled as Cassandra tables, applications requiring Cassandra's wide-column access patterns without managing Cassandra infrastructure.
+
+---
+
+## Amazon Timestream
+
+Timestream is a purpose-built time-series database. Time-series data has a defining characteristic: every record is associated with a specific timestamp, records arrive in (approximate) time order, and queries are almost always time-bounded ranges with aggregation over time windows. Standard relational and NoSQL databases can store time-series data but do not optimize their storage layout or query execution for it.
+
+**Tiered storage:**
+- **Memory store**: Recent data — configurable retention, typically hours to days. In-memory for ultra-fast access. Optimized for the high write throughput of continuous sensor ingestion.
+- **Magnetic store**: Older data automatically moved from memory store on a configurable schedule. Cost-effective SSD-backed storage. All queries span both tiers transparently.
+
+**Built-in time-series functions:**
+- `bin()` — bucket timestamps into fixed intervals (e.g., 5-minute aggregation windows)
+- `interpolate()` — fill gaps in sparse time-series data
+- `smooth()` — moving average smoothing
+- `CREATE_TIME_SERIES()` — aggregate rows into time-series objects
+
+**SQL-compatible**: Timestream uses a SQL dialect with time-series extensions. Integrates with Amazon Managed Grafana for dashboard visualization, Amazon QuickSight, and SageMaker for ML-based anomaly detection.
+
+Use cases: IoT sensor data (temperature, vibration, GPS location), application performance metrics, server and infrastructure monitoring, financial tick data, industrial equipment telemetry.
+
+---
+
+## Amazon MemoryDB for Redis
+
+MemoryDB is Redis-compatible and designed to function as a **primary database** rather than a cache. The critical architectural difference from ElastiCache for Redis: every write is committed to a distributed, Multi-AZ transaction log before the write acknowledgement is returned to the application. Data is never lost even if the primary node fails completely.
+
+**Durability vs. ElastiCache Redis:**
+- ElastiCache Redis: persistence via RDB/AOF on the primary node. A primary failure before a snapshot or AOF flush can result in data loss.
+- MemoryDB: writes committed to a distributed transaction log spanning multiple AZs before acknowledgement. No write is lost on node failure.
+
+This durability comes with a latency cost. Write latency is single-digit milliseconds (because the transaction log commit involves cross-AZ acknowledgement). Read latency remains in the microsecond range. For a pure cache where data loss is acceptable, ElastiCache Redis is cheaper and faster. For applications that use Redis data structures as the primary system of record, MemoryDB provides the durability guarantee.
+
+MemoryDB supports the full Redis 6.2 and 7.x API: all data structures (Strings, Hashes, Lists, Sets, Sorted Sets, Streams, Geospatial), Lua scripting, pub/sub, and cluster mode.
+
+Use cases: gaming leaderboards (Sorted Sets as primary data, must survive failures), session stores where session loss causes user experience problems, real-time analytics where Redis data structures are the authoritative store rather than a view of another database.
+
+---
+
+## Database Selection Guide
+
+| Need | Service | Data Model |
+|------|---------|------------|
+| Relational OLTP — MySQL or PostgreSQL | RDS | SQL / relational |
+| High-performance relational, global active-active | Aurora (+ Global Database) | SQL / relational |
+| Serverless NoSQL, key-value, any throughput | DynamoDB | Key-value / document |
+| Sub-millisecond read cache (ephemeral) | ElastiCache (Redis or Memcached) | In-memory key-value |
+| Redis as primary durable data store | MemoryDB for Redis | In-memory key-value + structures |
+| Large-scale analytics and business intelligence | Redshift | Columnar SQL / OLAP |
+| Graph traversal and relationship queries | Neptune | Graph (Gremlin / SPARQL) |
+| JSON documents, MongoDB-compatible | DocumentDB | Document (JSON/BSON) |
+| Time-series sensor and metric data | Timestream | Time-series |
+| High-write workloads, Cassandra tooling | Keyspaces | Wide-column (CQL) |
+
+---
+
+## References
+
+- [Amazon ElastiCache Documentation](https://docs.aws.amazon.com/elasticache/)
+- [Amazon Redshift Documentation](https://docs.aws.amazon.com/redshift/)
+- [Redshift Spectrum](https://docs.aws.amazon.com/redshift/latest/dg/c-using-spectrum.html)
+- [Amazon Neptune Documentation](https://docs.aws.amazon.com/neptune/)
+- [Amazon DocumentDB Documentation](https://docs.aws.amazon.com/documentdb/)
+- [Amazon Keyspaces Documentation](https://docs.aws.amazon.com/keyspaces/)
+- [Amazon Timestream Documentation](https://docs.aws.amazon.com/timestream/)
+- [Amazon MemoryDB Documentation](https://docs.aws.amazon.com/memorydb/)

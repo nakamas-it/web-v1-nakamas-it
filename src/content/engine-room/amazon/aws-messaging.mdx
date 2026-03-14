@@ -1,0 +1,284 @@
+---
+title: "AWS Messaging & Event-Driven Architecture"
+category: "amazon"
+topic: "aws-messaging"
+summary: "SQS, SNS, Kinesis, EventBridge, and Step Functions — how AWS decouples and coordinates distributed systems."
+tags: ["aws", "sqs", "sns", "kinesis", "eventbridge", "step-functions", "messaging", "event-driven"]
+order: 14
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Distributed systems fail in partial ways. A monolithic application has one failure domain; a distributed system has many. Messaging services decouple producers from consumers so that each component operates independently, can scale independently, and can fail without cascading failures into other components.
+
+AWS provides a family of complementary messaging services: SQS for reliable queue-based decoupling, SNS for fan-out pub/sub, Kinesis for high-throughput real-time streaming, EventBridge for event-driven automation across services and SaaS, and Step Functions for orchestrating multi-step workflows. Understanding which service fits which pattern is fundamental to cloud architecture.
+
+---
+
+## Amazon SQS — Simple Queue Service
+
+SQS is a fully managed message queue service. Producers write messages to a queue; consumers poll the queue and process messages. Producers and consumers are fully decoupled — a producer doesn't know which consumer processes its messages, and a consumer doesn't know which producer sent them.
+
+### Standard Queue
+
+The default queue type:
+- **At-least-once delivery**: SQS stores messages redundantly across multiple servers. In rare cases, a message may be delivered more than once. Consumers must be idempotent (processing the same message twice produces the same result).
+- **Best-effort ordering**: Messages are generally delivered in the order they were sent, but ordering is not guaranteed.
+- **Unlimited throughput**: No transactions-per-second limit.
+- **Message size**: Up to 256 KB. Larger payloads use the SQS Extended Client Library — payload stored in S3, SQS message contains the S3 reference.
+- **Retention**: 1 minute to 14 days (default 4 days). Messages not consumed within retention are automatically deleted.
+
+### FIFO Queue
+
+First-In-First-Out queues provide strict guarantees:
+- **Exactly-once processing**: Deduplication ID prevents duplicate message delivery within a 5-minute window. Content-based deduplication uses a SHA-256 hash of the message body.
+- **Strict ordering**: Messages are delivered in the exact order they are sent.
+- **Throughput**: Up to 300 transactions per second (or 3,000 TPS using batching of 10 messages per API call).
+- **Message Group ID**: Logically groups messages within a FIFO queue. Multiple consumers can process messages in parallel across different group IDs, while ordering is preserved within each group. Enables concurrency without sacrificing order.
+
+### Visibility Timeout
+
+When a consumer reads a message from the queue, the message becomes **invisible** to other consumers for the visibility timeout period (default 30 seconds, maximum 12 hours). If the consumer processes the message and deletes it before the timeout expires, the message is gone. If the consumer fails to delete the message (crashes, times out), the message becomes visible again and can be retrieved by another consumer for retry.
+
+Set visibility timeout to longer than your maximum expected processing time. If processing time varies, the consumer can call `ChangeMessageVisibility` to extend the timeout for a specific message in flight.
+
+### Dead Letter Queue
+
+A DLQ receives messages that fail to be processed after a configurable number of receive attempts (maxReceiveCount). The SQS **redrive policy** specifies the DLQ ARN and the maxReceiveCount. After a message exceeds the receive count, it is moved to the DLQ automatically.
+
+The DLQ is a separate SQS queue (Standard DLQ for Standard queues, FIFO DLQ for FIFO queues). It uses the same retention period setting. Messages in the DLQ can be inspected to identify systematic processing failures, then re-driven back to the source queue after the bug is fixed (Redrive to Source Queue feature).
+
+### Long Polling
+
+SQS supports two receive modes:
+
+- **Short polling** (default): The `ReceiveMessage` call queries only a subset of SQS servers and returns immediately, even if no messages are available (empty response). Empty responses still incur API cost.
+- **Long polling** (`WaitTimeSeconds`: 1–20 seconds): SQS queries all servers and waits up to the specified duration for a message to arrive before returning. Eliminates false-empty responses. Reduces API call volume and cost. Prefer long polling for almost all workloads.
+
+### Lambda Integration
+
+SQS can serve as an event source for Lambda. Lambda polls the SQS queue using an **event source mapping** (managed by the Lambda service, not your code). Lambda retrieves messages in batches (configurable batch size up to 10,000 messages; default 10). On successful processing, Lambda deletes the batch from the queue. On failure, messages return to the queue for retry (or go to DLQ after maxReceiveCount).
+
+Concurrency: Lambda scales to process messages in parallel. For Standard queues, Lambda can scale to 1,000 concurrent instances. For FIFO queues, Lambda scales per Message Group ID — one Lambda instance per group to preserve ordering.
+
+<FlowDiagram
+  parties={["Producer", "SQS Queue", "Consumer", "Dead Letter Queue"]}
+  steps={[
+    { from: "Producer", to: "SQS Queue", label: "SendMessage", sub: "Message stored redundantly; 4-day default retention" },
+    { from: "Consumer", to: "SQS Queue", label: "ReceiveMessage (long poll)", sub: "WaitTimeSeconds=20; batch up to 10" },
+    { from: "SQS Queue", to: "Consumer", label: "Message delivered; visibility timeout starts", sub: "30s default; message hidden from other consumers" },
+    { from: "Consumer", to: "Consumer", label: "Process message", sub: "Application logic runs" },
+    { from: "Consumer", to: "SQS Queue", label: "DeleteMessage on success", sub: "Message permanently removed" },
+    { from: "SQS Queue", to: "Consumer", label: "Visibility timeout expires (failure path)", sub: "Message becomes visible; retry attempt" },
+    { from: "SQS Queue", to: "Dead Letter Queue", label: "maxReceiveCount exceeded", sub: "Message moved to DLQ for inspection" },
+  ]}
+/>
+
+---
+
+## Amazon SNS — Simple Notification Service
+
+SNS is a pub/sub messaging service. Publishers send a single message to an SNS **topic**. All subscribers to that topic receive a copy of the message (subject to filter policies).
+
+### Subscriptions
+
+SNS delivers to:
+- **SQS**: Durable fan-out — messages land in a queue for async processing. The most common SNS subscription for application architectures.
+- **Lambda**: Synchronous invocation for event processing.
+- **HTTP/HTTPS endpoint**: Webhook delivery with retry.
+- **Email and Email-JSON**: Human notification (not for machine processing; delivery is best-effort).
+- **SMS**: Text messages to phone numbers (available in supported regions).
+- **Mobile Push**: Apple APNs, Google FCM/GCM, Amazon ADM, Windows WNS.
+- **Kinesis Data Firehose**: Archive all SNS messages to S3, Redshift, or OpenSearch.
+
+### Fan-Out Pattern
+
+The fan-out pattern uses SNS to trigger multiple independent downstream consumers from a single event. An order placed event published to SNS can simultaneously:
+- Write to an SQS queue consumed by the inventory service
+- Write to an SQS queue consumed by the billing service
+- Invoke a Lambda that sends the confirmation email
+
+Each downstream consumer is fully decoupled from the others. Adding a new consumer requires only a new SNS subscription — the publisher is unchanged.
+
+Without SNS, the publisher would have to know about and call each consumer directly, creating tight coupling.
+
+### Message Filtering
+
+By default, every subscriber receives every message published to the topic. Filter policies are JSON documents attached to a subscription that specify conditions on message attributes. SNS evaluates the filter policy before delivery — messages that don't match the subscriber's filter are not delivered.
+
+Example: an e-commerce platform publishes all order events to one topic. A subscription for the European billing service filters on `{"region": ["EU"]}` — only EU orders are delivered. This eliminates unnecessary processing and cost without requiring separate topics per segment.
+
+### SNS FIFO
+
+FIFO SNS topics guarantee strict ordering and exactly-once delivery, with Message Group ID (same concept as SQS FIFO). FIFO SNS can only deliver to FIFO SQS queues — no Lambda, HTTP, or email subscriptions. Used for end-to-end ordered messaging pipelines.
+
+---
+
+## Amazon Kinesis
+
+Kinesis is a family of services for real-time streaming data. Where SQS is designed for discrete task messages (a job to do), Kinesis is designed for continuous high-throughput data streams (sensor readings, log lines, click events).
+
+### Kinesis Data Streams
+
+A Data Stream receives records from producers and stores them in **shards**. Each shard provides:
+- **1 MB/second** ingestion capacity (writes)
+- **2 MB/second** read capacity
+
+Records are retained for 24 hours by default (configurable to 7 days, or 365 days with extended retention). Multiple consumer applications can read the same stream independently — each consumer maintains its own position (shard iterator) in the stream. This differs from SQS, where a message is consumed by one consumer and deleted.
+
+**Shard planning**: Throughput scales with shard count. Splitting a shard doubles capacity for that partition; merging reduces capacity. Kinesis Data Streams can scale shard count on demand.
+
+**Enhanced fan-out**: Standard GetRecords polling shares the 2 MB/s per shard across all consumers. Enhanced fan-out provides a dedicated 2 MB/s per consumer per shard, delivered via HTTP/2 push. Enables multiple high-throughput consumers on the same stream without contention.
+
+**KCL (Kinesis Client Library)**: A higher-level consumer framework that handles shard enumeration, checkpointing (tracking position in each shard using DynamoDB), shard lease distribution across consumer instances, and fault tolerance. The KCL is typically used for complex consumers; Lambda event source mappings abstract the KCL.
+
+### Kinesis Data Firehose
+
+Firehose is a managed delivery service — it accepts streaming data and loads it into a destination. Unlike Data Streams, Firehose has no consumer API — you configure a destination and Firehose handles the rest.
+
+**Destinations**: S3, Amazon Redshift (via S3 intermediate), Amazon OpenSearch Service, Splunk, Datadog, New Relic, HTTP endpoints.
+
+**Buffering**: Firehose buffers records before delivery. The buffer is flushed when either the buffer size limit (1–128 MB, configurable) or the buffer interval (60–900 seconds) is reached, whichever comes first. This makes Firehose **near-real-time** (not real-time) — there is an inherent delay before data lands in the destination.
+
+**Lambda transformation**: Before delivery, Firehose can invoke a Lambda function to transform records (format conversion, compression, filtering, enrichment). The transformed records are then delivered to the destination.
+
+### Kinesis Data Analytics
+
+Kinesis Data Analytics runs Apache Flink applications (or SQL) on streaming data in real time. Process data in-flight: windowed aggregations, anomaly detection, pattern matching, joining multiple streams. Output goes to another Kinesis stream, Firehose, Lambda, or S3.
+
+<FlowDiagram
+  parties={["IoT Devices", "Kinesis Data Streams", "AWS Lambda", "Kinesis Data Firehose", "Amazon S3", "Amazon Athena"]}
+  steps={[
+    { from: "IoT Devices", to: "Kinesis Data Streams", label: "PutRecords (sensor telemetry)", sub: "Partitioned by device ID; 1 MB/s per shard" },
+    { from: "Kinesis Data Streams", to: "AWS Lambda", label: "Event source mapping (real-time consumer)", sub: "Batch of records per shard; anomaly detection" },
+    { from: "AWS Lambda", to: "AWS Lambda", label: "Alert if threshold exceeded", sub: "e.g. temperature > 90°C → notify ops" },
+    { from: "Kinesis Data Streams", to: "Kinesis Data Firehose", label: "Firehose reads from stream", sub: "Separate consumer; buffers records" },
+    { from: "Kinesis Data Firehose", to: "Amazon S3", label: "Deliver buffered batch to S3", sub: "Partitioned by date; Parquet format via Lambda transform" },
+    { from: "Amazon Athena", to: "Amazon S3", label: "SQL query over historical data", sub: "Serverless query; pay per TB scanned" },
+  ]}
+/>
+
+---
+
+## Amazon EventBridge
+
+EventBridge is a serverless event bus that routes events from AWS services, SaaS partners, and custom applications to targets based on rules. It is the evolution of CloudWatch Events, with a broader event ecosystem and richer routing capabilities.
+
+### Event Sources
+
+- **AWS services**: EC2 instance state changes, S3 object events, RDS snapshots, CodePipeline state changes, Guard Duty findings, and hundreds more. Every significant AWS service emits events to the default event bus.
+- **SaaS partners**: Zendesk, Datadog, Stripe, PagerDuty, and many others publish events directly to EventBridge partner event buses. Subscribe to receive events from SaaS tools in your account without polling APIs.
+- **Custom applications**: Your application publishes events using the `PutEvents` API to a custom event bus.
+
+### Rules
+
+Rules match incoming events and route them to targets:
+
+**Pattern-based rules**: JSON patterns that match event structure. Example: match all EC2 instance terminations in `us-east-1`. The pattern is evaluated against the `detail-type`, `source`, `account`, `region`, and the `detail` field of the event JSON.
+
+**Schedule-based rules**: Cron expressions (`0 9 * * ? *` — 9 AM UTC daily) or rate expressions (`rate(5 minutes)`). Trigger targets on a schedule without an event source.
+
+### Targets
+
+One rule can route to up to five targets simultaneously. Supported targets include: Lambda, SQS, SNS, Kinesis Data Streams, Step Functions, ECS task (start a task on a schedule), AWS Batch, CodePipeline, API Gateway (invoke an HTTP endpoint), and more.
+
+### Event Replay
+
+Archive all events (or filtered events) from an event bus. Replay archived events to targets for debugging, re-processing after a consumer bug fix, or testing new event consumer logic against real historical events.
+
+### Schema Registry
+
+EventBridge discovers and registers schemas for events. The registry stores the structure of events from AWS services and custom sources. SDK code bindings can be generated from schemas in Java, Python, and TypeScript, enabling type-safe event handling in application code.
+
+### EventBridge Pipes
+
+Pipes provide point-to-point connections from a source (SQS, Kinesis, DynamoDB Stream, Kafka) to a target (Step Functions, Lambda, SQS, etc.) with optional filtering and enrichment in between. Pipes simplify common event routing patterns without requiring custom Lambda glue code.
+
+---
+
+## AWS Step Functions
+
+Step Functions is a visual workflow orchestration service. Instead of chaining Lambda functions together with SQS queues or application-level coordination logic, Step Functions defines the workflow as a state machine — a JSON document that describes states, transitions, retries, and error handling.
+
+### Workflow Types
+
+**Standard Workflow**:
+- Duration up to 1 year
+- Exactly-once execution semantics
+- Full audit history in CloudWatch (every state transition logged)
+- Cost per state transition ($0.025 per 1,000 transitions)
+- Use for: human approval workflows, order processing, ETL pipelines, multi-step data migrations
+
+**Express Workflow**:
+- Duration up to 5 minutes
+- At-least-once semantics (re-runs may occur in failure scenarios)
+- Throughput up to 100,000 executions per second
+- Cost per GB-second of execution duration (significantly cheaper at high volume)
+- Use for: IoT data processing, streaming event handling, high-volume microservice orchestration
+
+### State Types
+
+| State | Purpose |
+|---|---|
+| **Task** | Call an AWS service (Lambda, ECS, DynamoDB, SageMaker, SNS, SQS, Bedrock, and more) |
+| **Choice** | Branch execution based on condition evaluation (if/else/switch) |
+| **Wait** | Pause execution for a duration or until a timestamp |
+| **Parallel** | Execute multiple branches simultaneously; waits for all to complete |
+| **Map** | Iterate over an array of items, executing a sub-state machine per item (sequential or concurrent) |
+| **Pass** | Pass input to output with optional transformation |
+| **Succeed** | Terminal success state |
+| **Fail** | Terminal failure state with error and cause |
+
+### Error Handling
+
+Step Functions supports declarative error handling:
+
+- **Retry**: On task failure, retry with configurable backoff. Parameters: `IntervalSeconds` (initial wait), `MaxAttempts`, `BackoffRate` (multiplier per attempt). Example: retry Lambda failures up to 3 times with exponential backoff starting at 2 seconds.
+- **Catch**: If all retries fail, catch the error by type and transition to a recovery state (compensating transaction, notification, DLQ write).
+
+This eliminates the need to implement retry and error handling logic in application code for every integration point.
+
+<FlowDiagram
+  parties={["Order API", "Step Functions", "Payment Service", "Inventory Service", "Notification Service"]}
+  steps={[
+    { from: "Order API", to: "Step Functions", label: "StartExecution (order payload)", sub: "Workflow instance created" },
+    { from: "Step Functions", to: "Payment Service", label: "Task: Validate & charge payment", sub: "Lambda invocation; retry on transient failure" },
+    { from: "Payment Service", to: "Step Functions", label: "Payment result returned", sub: "Step Functions receives output as next input" },
+    { from: "Step Functions", to: "Inventory Service", label: "Parallel: Reserve inventory", sub: "Parallel state — runs concurrently" },
+    { from: "Step Functions", to: "Notification Service", label: "Parallel: Send confirmation email", sub: "Both branches execute simultaneously" },
+    { from: "Inventory Service", to: "Step Functions", label: "Reservation confirmed", sub: "Branch complete" },
+    { from: "Notification Service", to: "Step Functions", label: "Email queued", sub: "Branch complete" },
+    { from: "Step Functions", to: "Order API", label: "Execution complete — success state", sub: "Caller notified via callback token or polling" },
+  ]}
+/>
+
+---
+
+## Choosing the Right Service
+
+| Pattern | Service |
+|---|---|
+| Decouple producer/consumer; durable queue | SQS Standard |
+| Ordered, exactly-once message processing | SQS FIFO |
+| One event → multiple independent consumers | SNS + SQS (fan-out) |
+| Real-time high-throughput streaming | Kinesis Data Streams |
+| Managed delivery to S3/Redshift/OpenSearch | Kinesis Data Firehose |
+| Real-time stream processing (SQL/Flink) | Kinesis Data Analytics |
+| Route AWS service events to targets | EventBridge |
+| SaaS event ingestion | EventBridge Partner Buses |
+| Multi-step workflow with retries and branching | Step Functions |
+| Long-running process (human approval, saga) | Step Functions Standard |
+| High-volume short-duration orchestration | Step Functions Express |
+
+---
+
+## References
+
+- [Amazon SQS Documentation](https://docs.aws.amazon.com/sqs/)
+- [Amazon SNS Documentation](https://docs.aws.amazon.com/sns/)
+- [Amazon Kinesis Documentation](https://docs.aws.amazon.com/kinesis/)
+- [Amazon EventBridge Documentation](https://docs.aws.amazon.com/eventbridge/)
+- [AWS Step Functions Documentation](https://docs.aws.amazon.com/step-functions/)

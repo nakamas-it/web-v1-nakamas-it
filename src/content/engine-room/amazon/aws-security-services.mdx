@@ -1,0 +1,344 @@
+---
+title: "AWS Security Services"
+category: "amazon"
+topic: "aws-security-services"
+summary: "Threat detection, data protection, and infrastructure security on AWS — Shield, WAF, GuardDuty, Inspector, Macie, KMS, CloudHSM, Secrets Manager, and Security Hub."
+tags: ["aws", "security", "kms", "waf", "guardduty", "shield", "secrets-manager", "encryption"]
+order: 18
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+AWS security services fall into three broad categories: **threat detection and response**, **data protection and encryption**, and **infrastructure and application protection**. No single service covers all of these concerns — a complete security posture requires composing them deliberately.
+
+The AWS shared responsibility model defines the split: AWS secures the physical infrastructure (hardware, facilities, networking fabric, hypervisors). You secure everything running on that infrastructure — your operating systems, applications, data, network access controls, and identity configuration. The services described here are the tools AWS provides for your side of that boundary.
+
+---
+
+## Infrastructure and Application Protection
+
+### AWS Shield
+
+**Shield Standard** is automatic DDoS protection applied to every AWS account at no extra cost. There is nothing to enable — it is always active. Shield Standard defends against Layer 3 and Layer 4 volumetric attacks:
+
+- SYN floods and SYN/ACK reflection
+- UDP reflection and amplification attacks (DNS, NTP, SSDP, Memcached)
+- IP fragmentation attacks
+
+Standard protection is most effective when your application uses CloudFront, Route 53, and ALB — AWS applies additional scrubbing infrastructure at the edge for these services.
+
+**Shield Advanced** is a paid service ($3,000/month per organization, regardless of account count, with a 12-month commitment). It provides substantially stronger protection for applications with strict uptime requirements:
+
+| Feature | Details |
+|---------|---------|
+| Protected resource types | EC2 Elastic IPs, ALB, NLB, Classic ELB, CloudFront, Global Accelerator, Route 53 |
+| Layer 7 protection | Automatic application-layer attack detection and mitigation via WAF integration |
+| Near real-time visibility | CloudWatch metrics for attack volume and source characteristics during an event |
+| DDoS Response Team (DRT) | 24/7 access to AWS specialists during active attacks — custom mitigations, escalation support |
+| Cost protection | AWS credits bill charges (EC2, data transfer) caused by scaling events triggered by a DDoS attack |
+| WAF credits | Shield Advanced includes WAF usage credits for protected resources |
+
+Shield Advanced protection must be explicitly enabled on each resource. It is the right choice for applications that cannot tolerate downtime and face active or persistent DDoS threats.
+
+---
+
+### AWS WAF
+
+AWS WAF is a Layer 7 Web Application Firewall that inspects HTTP and HTTPS requests and allows or blocks them based on configurable rules. Unlike Shield, which operates at the network and transport layers, WAF understands the content of web requests — URI paths, query strings, HTTP headers, cookies, and request bodies.
+
+**Attachment points** — WAF WebACLs can be attached to:
+
+- CloudFront distributions (evaluated at every edge location globally)
+- Application Load Balancers (evaluated at the regional ALB)
+- Amazon API Gateway REST APIs
+- AWS AppSync GraphQL APIs
+- Amazon Cognito User Pool endpoints
+
+### WebACL Structure
+
+A **WebACL** is the top-level WAF object. It contains an ordered list of rules and a default action (Allow or Block) that applies to requests that match no rules.
+
+Each rule has a **statement** (what to match) and an **action** (what to do):
+
+| Action | Effect |
+|--------|--------|
+| Allow | Pass the request to the origin |
+| Block | Return 403 Forbidden, or a custom HTTP response |
+| Count | Increment a metric but take no blocking action — used for observing rule impact before enabling |
+| CAPTCHA | Require the user to solve a CAPTCHA challenge |
+| Challenge | Issue a silent JavaScript browser challenge to detect bots |
+
+Rules are evaluated in priority order. The first rule that matches determines the outcome.
+
+### Rule Types
+
+**AWS Managed Rule Groups** are pre-built rule sets maintained by AWS:
+
+| Managed Group | Protects Against |
+|---------------|-----------------|
+| Core Rule Set (CRS) | OWASP Top 10: SQL injection, XSS, path traversal, log4j, local/remote file inclusion |
+| Known Bad Inputs | Patterns associated with known vulnerabilities and exploit frameworks |
+| SQL Database | SQL injection in query strings, URI, cookies, and request bodies |
+| Linux OS | Linux-specific command injection patterns |
+| Amazon IP Reputation List | Known malicious IPs: Tor exit nodes, botnets, scanners |
+| Bot Control | Classifies traffic by bot type; distinguishes Googlebot from malicious scrapers |
+
+**Rate-based rules** count requests from a single IP within a 5-minute sliding window. When the threshold is exceeded, WAF blocks that IP for the remainder of the window. Effective against credential stuffing, brute-force login attempts, and scraping.
+
+**Custom rules** match on any combination of request attributes:
+- IP address sets or CIDR ranges
+- Country or region (geographic match)
+- URI path, query string parameters, HTTP headers, cookies
+- Regular expression patterns against any request component
+- Request body content (up to the configured inspection limit)
+
+**Count mode** is the correct way to evaluate new rules in production. Run the rule in Count mode first, observe the CloudWatch metrics and WAF logs to identify false positives, then switch to Block. Never enable a new managed rule group in Block mode without first observing its behavior.
+
+---
+
+## Threat Detection and Response
+
+### Amazon GuardDuty
+
+GuardDuty is an intelligent threat detection service that continuously analyzes AWS data sources using machine learning, behavioral baselines, and threat intelligence feeds. It requires no agents for most findings and no configuration of log forwarding — it consumes data sources directly through the AWS service plane.
+
+**Data sources analyzed**:
+
+| Source | What GuardDuty Sees |
+|--------|---------------------|
+| VPC Flow Logs | Network connections, port scans, unusual destination IPs and ports |
+| CloudTrail management events | API calls — unusual IAM activity, privilege escalation, API calls from unexpected IPs |
+| CloudTrail S3 data events | Unusual S3 access patterns, bulk downloads, access from anonymous principals |
+| DNS query logs | Queries to known command-and-control domains, DNS tunneling |
+| EKS audit logs | Kubernetes control plane activity, container escape attempts, privilege abuse |
+| Lambda network activity | Functions calling suspicious IPs or known-malicious domains |
+| RDS login activity | Brute-force attempts, logins from unexpected sources |
+| EBS volume data | Malware signatures and known threat indicators in volume contents |
+| EC2/ECS/EKS runtime monitoring | Process execution, file access, network connections at the OS level (agent required) |
+
+GuardDuty generates **findings** with a severity rating (Low, Medium, High) and a structured finding type. Examples:
+
+- `UnauthorizedAccess:EC2/SSHBruteForce` — an EC2 instance is being targeted by SSH brute-force from an external IP
+- `Recon:IAMUser/MaliciousIPCaller` — AWS API calls made from a known-malicious IP
+- `CryptoCurrency:EC2/BitcoinTool.B` — an EC2 instance is communicating with cryptocurrency mining infrastructure
+- `Exfiltration:S3/AnomalousBehavior` — unusual volume of S3 GetObject calls suggesting data exfiltration
+
+GuardDuty detects — it does not block. Findings are published to Security Hub and EventBridge for automated or manual response.
+
+In multi-account organizations, GuardDuty is enabled in a **delegated administrator account** that aggregates findings from all member accounts. Members cannot disable GuardDuty once enrolled by the administrator.
+
+---
+
+### Amazon Inspector
+
+Inspector is an automated vulnerability assessment service that continuously scans workloads for software vulnerabilities and unintended network exposure.
+
+**Scan targets**:
+
+| Target | Scanning Method | What Is Assessed |
+|--------|----------------|-----------------|
+| EC2 instances | SSM Agent (agentless option via hybrid scanning also available) | OS package CVEs, application library CVEs, network reachability (open ports exposed to internet) |
+| Lambda functions | Agentless | CVEs in open-source dependencies in function packages and layers |
+| ECR container images | Agentless — scans on push and re-scans when new CVEs are published | OS package CVEs, application library CVEs |
+
+Inspector findings include the CVE identifier, CVSS score, affected package and version, the fixed-in version (what to upgrade to), and a network reachability assessment showing whether the vulnerability is reachable from the internet.
+
+Inspector continuously rescans. When a new CVE is published that affects a package already inventoried in your environment, Inspector generates a new finding without you triggering a scan. Findings route to Security Hub and EventBridge for integration with patching workflows.
+
+---
+
+### Amazon Macie
+
+Macie uses machine learning to discover, classify, and protect **sensitive data** stored in Amazon S3. It answers the question: "do I have sensitive data in S3, where exactly is it, and is it adequately protected?"
+
+**What Macie detects**:
+
+- Personally Identifiable Information (PII): full names, addresses, dates of birth, social security numbers, passport numbers, driver's license numbers
+- Financial data: credit card numbers, bank account numbers, routing numbers
+- Healthcare data: medical record numbers, health plan beneficiary identifiers
+- Credentials: AWS access keys, private keys, API tokens inadvertently stored in S3 objects
+- Custom data identifiers: user-defined regex patterns for organization-specific sensitive data (e.g., `EMP-\d{6}` for employee IDs)
+
+Macie generates two types of findings:
+
+| Finding Type | Meaning |
+|-------------|---------|
+| Sensitive data discovery finding | Sensitive data was detected in a specific S3 object at a specific location |
+| Policy finding | A bucket-level configuration issue: bucket is publicly accessible, replication is disabled, encryption is not enforced |
+
+Macie provides a full S3 inventory with security posture metadata — which buckets are public, which are unencrypted, which have replication configured. This is the audit evidence needed for GDPR data mapping, HIPAA covered data inventory, and PCI DSS cardholder data environment scoping.
+
+---
+
+## Centralized Governance
+
+### AWS Security Hub
+
+Security Hub is the centralized aggregation and normalization layer for security findings across AWS. Instead of checking GuardDuty, Inspector, Macie, Config, IAM Access Analyzer, and third-party tools separately, Security Hub pulls findings from all sources into a single normalized format: the **AWS Security Finding Format (ASFF)**.
+
+Key capabilities:
+
+- **Security standards**: automated compliance checks against CIS AWS Foundations Benchmark, AWS Foundational Security Best Practices, and PCI DSS. Each control checks a specific resource configuration and reports pass/fail. An overall security score aggregates results.
+- **Cross-account aggregation**: designate a delegated administrator account in AWS Organizations. Security Hub aggregates findings from all member accounts in the organization into the administrator account.
+- **Custom actions**: route findings to EventBridge using custom actions, enabling automated remediation workflows triggered by specific finding types.
+- **Third-party integrations**: ingest findings from Splunk, Datadog, Palo Alto Prisma Cloud, and other security tools using the ASFF standard.
+
+Security Hub does not detect threats itself — it is a data aggregator and compliance scoring engine. Its value is providing a single place to see everything and a consistent framework for measuring posture.
+
+---
+
+## Data Protection and Encryption
+
+### AWS KMS
+
+AWS Key Management Service manages the cryptographic keys that protect data at rest across virtually every AWS service. S3 server-side encryption, EBS volume encryption, RDS encryption, Secrets Manager, Systems Manager Parameter Store — all are backed by KMS.
+
+**Key types**:
+
+| Key Type | Managed By | Rotation | Cost | Use Cases |
+|----------|-----------|---------|------|----------|
+| AWS managed keys | AWS | Automatic, annual | No direct charge | Default encryption when you enable encryption on S3, EBS, RDS without specifying a key. Key IDs like `aws/s3`, `aws/ebs`. |
+| Customer managed keys (CMK) | You | Optional automatic (annual) or manual | ~$1/month/key | Custom access control, cross-account encryption, key policy granularity, auditing individual key usage |
+| Imported key material | You | Manual re-import required | ~$1/month/key | Regulatory requirements to use key material generated outside AWS; you retain the ability to delete key material immediately |
+
+**Envelope encryption** is how KMS handles encryption of large data without ever exposing the CMK:
+
+1. Your application (or an AWS service) calls KMS `GenerateDataKey` — KMS returns a plaintext data key and an encrypted copy of that same key.
+2. The plaintext data key encrypts the data locally. The plaintext key is immediately discarded from memory.
+3. The encrypted data key is stored alongside the ciphertext — typically as metadata.
+4. To decrypt: send the encrypted data key to KMS `Decrypt`. KMS uses the CMK to decrypt it and returns the plaintext data key. Use the plaintext key to decrypt the data locally.
+
+The CMK never leaves KMS. It is used only to encrypt and decrypt other keys, never data directly. This architecture means decryption requires both the ciphertext and a valid KMS call — an attacker with access only to the encrypted data cannot decrypt it without KMS access.
+
+**Key policies** are the primary access control mechanism for CMKs. Unlike IAM policies (which control what a principal can do), key policies are resource-based policies on the key itself. A CMK without a key policy granting access to an IAM principal is inaccessible to that principal even if they have `kms:*` in their IAM policy. The default key policy grants the account root full access, which allows IAM policies to then further delegate access.
+
+Every KMS API call — `Encrypt`, `Decrypt`, `GenerateDataKey`, `ScheduleKeyDeletion` — is logged in CloudTrail with the caller identity, the key used, and the timestamp. This is the cryptographic audit trail for compliance purposes.
+
+**Multi-region keys** replicate a CMK to multiple AWS regions. The key material is synchronized — data encrypted in `us-east-1` can be decrypted in `eu-west-1` without re-encryption. Required for active-active multi-region applications and DR scenarios where the disaster recovery region must be able to decrypt data independently.
+
+---
+
+### AWS CloudHSM
+
+CloudHSM provides **dedicated, single-tenant Hardware Security Module** appliances — physical cryptographic devices in AWS data centers that you provision for your exclusive use. Unlike KMS (where AWS manages the underlying hardware and has access to it), CloudHSM gives you full control of the HSM. AWS cannot access your keys.
+
+| Aspect | KMS | CloudHSM |
+|--------|-----|---------|
+| Tenancy | Multi-tenant (keys isolated logically by IAM) | Single-tenant — dedicated physical hardware |
+| AWS access to keys | AWS manages HSM hardware but cannot access key material | AWS has no access to key material; you manage HSM users and partitions |
+| FIPS 140-2 level | Level 2 | Level 3 |
+| Management overhead | Fully managed service | You administer HSM cluster, users, and high availability |
+| Integration with KMS | Standard KMS | Custom Key Store — KMS API calls use your CloudHSM as the key store |
+| Primary use cases | General-purpose encryption for most workloads | Regulatory requirements mandating customer-controlled HSMs, SSL/TLS offloading to HSM, Oracle TDE, strict FIPS Level 3 compliance |
+
+CloudHSM clusters run inside your VPC. For high availability, deploy a minimum of two HSMs across two Availability Zones — the CloudHSM client library synchronizes key material automatically across all cluster members.
+
+The **Custom Key Store** integration allows KMS to use your CloudHSM cluster as the backing store for CMKs. Applications call the standard KMS API — the cryptographic operations execute inside your CloudHSM hardware. You get the KMS API and AWS service integrations combined with FIPS Level 3 hardware control.
+
+---
+
+### AWS Secrets Manager
+
+Secrets Manager stores and manages sensitive values — database passwords, API keys, OAuth tokens, TLS certificates — and can rotate them automatically without application code changes.
+
+**Rotation** is Secrets Manager's key differentiator. When automatic rotation is enabled:
+
+1. Secrets Manager calls a Lambda rotation function on the configured schedule.
+2. The Lambda function creates a new credential, updates the target resource (e.g., the RDS user password), and writes the new secret value to Secrets Manager.
+3. Applications always call the Secrets Manager API to retrieve the current value — the rotation is transparent. Credentials in code or configuration files are eliminated.
+
+AWS provides pre-built rotation Lambda functions for RDS (MySQL, PostgreSQL, Oracle, SQL Server, MariaDB), Redshift, and DocumentDB. Custom Lambda rotation functions handle any other credential type.
+
+**Application access pattern**: the application calls `GetSecretValue` at runtime. The AWS SDK caches the secret value and refreshes it periodically (or immediately when a rotation-related exception is received from the database). No restart required when a secret rotates.
+
+**Cross-account sharing**: resource-based policies on secrets grant access to IAM principals in other accounts. A central secrets account can hold all credentials; application accounts in the organization retrieve them at runtime.
+
+### SSM Parameter Store vs Secrets Manager
+
+| Aspect | Secrets Manager | SSM Parameter Store |
+|--------|----------------|---------------------|
+| Automatic rotation | Yes — native rotation via Lambda | No built-in rotation |
+| Cost | ~$0.40/secret/month + API calls | Standard tier: free (up to 10,000 parameters); Advanced: ~$0.05/parameter/month |
+| Maximum value size | 64 KB | Standard: 4 KB; Advanced: 8 KB |
+| Cross-account access | Yes — resource-based policies | No direct cross-account support |
+| Encryption | Always KMS-encrypted | SecureString type uses KMS; String and StringList are plaintext |
+| Path hierarchy | Flat naming (no enforced hierarchy) | Hierarchical paths: `/prod/app/db/password` — IAM can grant access to entire path prefixes |
+| Primary fit | Database credentials, API keys, anything that rotates | Configuration values, feature flags, non-secret parameters alongside secrets |
+
+---
+
+### AWS Certificate Manager
+
+ACM provisions, manages, and automatically renews TLS/SSL certificates for use with AWS services. Public certificates for ALB, CloudFront, API Gateway, and Elastic Beanstalk are **free** — ACM charges nothing for certificate issuance or renewal.
+
+The private key for ACM-managed certificates is never exportable. The key material exists only within AWS infrastructure. You cannot download it or use the certificate outside of AWS services.
+
+**Automatic renewal**: ACM begins the renewal process approximately 60 days before expiry. For DNS-validated certificates, renewal is fully automatic — no manual action required, no risk of expiry incidents if you use ACM consistently.
+
+**Validation methods**:
+
+| Method | How It Works |
+|--------|-------------|
+| DNS validation | Add a CNAME record to your domain's DNS. Route 53 can add it automatically. Recommended — renewal is automatic because the CNAME persists. |
+| Email validation | AWS sends validation emails to domain contact addresses. Requires human action. Not recommended for automated environments. |
+
+**ACM Private CA**: Issue private TLS certificates for internal resources — internal microservice mTLS, internal API endpoints, VPN clients, internal load balancers — using your own private Certificate Authority hierarchy within ACM. Private CA certificates are not trusted by browsers but are trusted by systems you configure to trust your CA.
+
+---
+
+## Automated Threat Response Flow
+
+<FlowDiagram
+  parties={["GuardDuty", "Security Hub", "EventBridge", "Step Functions", "Security Team"]}
+  steps={[
+    { from: "GuardDuty", to: "Security Hub", label: "HIGH severity finding generated", sub: "UnauthorizedAccess:IAMUser/TorIPCaller — unusual API call from Tor exit node" },
+    { from: "Security Hub", to: "EventBridge", label: "Finding forwarded in ASFF format", sub: "Security Hub publishes all findings to EventBridge automatically" },
+    { from: "EventBridge", to: "Step Functions", label: "Rule matches: HIGH severity finding", sub: "EventBridge rule filters on detail.severity >= 7 and starts workflow" },
+    { from: "Step Functions", to: "EventBridge", label: "Step 1: Isolate EC2 instance", sub: "Lambda modifies security group — replaces all inbound/outbound rules with deny-all" },
+    { from: "Step Functions", to: "EventBridge", label: "Step 2: Snapshot EBS volumes", sub: "Lambda calls CreateSnapshot on all attached EBS volumes for forensic preservation" },
+    { from: "Step Functions", to: "Security Team", label: "Step 3: Notify security team via SNS", sub: "Email and SMS with finding details, affected instance ID, and timeline" },
+    { from: "Step Functions", to: "Security Team", label: "Step 4: Create incident ticket via Lambda", sub: "Lambda calls Jira or ServiceNow API to open incident with finding payload" },
+  ]}
+/>
+
+---
+
+## Security Service Summary
+
+| Threat or Concern | Primary Service | Supporting Services |
+|-------------------|----------------|---------------------|
+| L3/L4 DDoS — volumetric attacks | Shield Standard (automatic) | CloudFront, Route 53 |
+| L3/L4/L7 DDoS — advanced, persistent | Shield Advanced | WAF, CloudFront, DRT |
+| Web application exploits — OWASP Top 10 | WAF (Core Rule Set) | CloudFront, ALB, API Gateway |
+| Bot traffic and scraping | WAF Bot Control | CloudFront |
+| Rate limiting — brute force, flooding | WAF rate-based rules | ALB, API Gateway |
+| Threat detection — cloud environment | GuardDuty | Security Hub, EventBridge |
+| Software vulnerabilities — CVE scanning | Inspector | Security Hub, SSM Patch Manager |
+| Sensitive data in S3 | Macie | Security Hub, EventBridge |
+| Centralized findings aggregation | Security Hub | All detection services |
+| Compliance posture scoring | Security Hub (security standards) | Config, IAM Access Analyzer |
+| Automated incident response | EventBridge + Step Functions / Lambda | GuardDuty, Security Hub |
+| Encryption key management | KMS | All services with encryption at rest |
+| FIPS 140-2 Level 3, dedicated HSM | CloudHSM | KMS (Custom Key Store) |
+| Secret storage and automatic rotation | Secrets Manager | KMS, Lambda, RDS |
+| Configuration parameters and non-secret values | SSM Parameter Store | KMS (SecureString) |
+| TLS certificate lifecycle | ACM | ALB, CloudFront, API Gateway |
+| Internal / private TLS certificates | ACM Private CA | Internal services, microservice mTLS |
+
+---
+
+## References
+
+- [AWS Shield documentation](https://docs.aws.amazon.com/waf/latest/developerguide/shield-chapter.html)
+- [AWS WAF documentation](https://docs.aws.amazon.com/waf/latest/developerguide/waf-chapter.html)
+- [Amazon GuardDuty documentation](https://docs.aws.amazon.com/guardduty/latest/ug/what-is-guardduty.html)
+- [Amazon Inspector documentation](https://docs.aws.amazon.com/inspector/latest/user/what-is-inspector.html)
+- [Amazon Macie documentation](https://docs.aws.amazon.com/macie/latest/user/what-is-macie.html)
+- [AWS Security Hub documentation](https://docs.aws.amazon.com/securityhub/latest/userguide/what-is-securityhub.html)
+- [AWS KMS Developer Guide](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html)
+- [AWS CloudHSM documentation](https://docs.aws.amazon.com/cloudhsm/latest/userguide/introduction.html)
+- [AWS Secrets Manager documentation](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html)
+- [AWS Certificate Manager documentation](https://docs.aws.amazon.com/acm/latest/userguide/acm-overview.html)

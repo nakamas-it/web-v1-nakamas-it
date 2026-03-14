@@ -56,6 +56,12 @@ const categoryMeta: Record<string, { label: string; description: string; accent:
     accent: 'text-teal-400',
     icon: '🔵',
   },
+  amazon: {
+    label: 'Amazon Web Services',
+    description: 'EC2, S3, VPC, IAM, RDS, Lambda, ECS, CloudFront, and the full AWS platform — compute, storage, databases, networking, security, and serverless from the world\'s largest cloud provider.',
+    accent: 'text-amber-500',
+    icon: '☁️',
+  },
 };
 
 const meta = categoryMeta[category!] ?? { label: category, description: '', accent: 'text-amber-400', icon: '⚙️' };

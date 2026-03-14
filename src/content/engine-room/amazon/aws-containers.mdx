@@ -1,0 +1,179 @@
+---
+title: "Containers on AWS — ECS, EKS, and Fargate"
+category: "amazon"
+topic: "aws-containers"
+summary: "How AWS runs containerised workloads — from managed Kubernetes to serverless Fargate and the ECS task model."
+tags: ["aws", "ecs", "eks", "fargate", "ecr", "containers", "kubernetes"]
+order: 8
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Containers package an application together with its dependencies — runtime, libraries, configuration — into a portable image that runs identically across environments. AWS offers several orchestration layers above the container runtime itself, so that teams don't operate their own scheduling control planes.
+
+The primary case for containers over virtual machines is density and consistency. A single host can run dozens of containers. Because the image contains the dependency tree, the "works on my machine" problem disappears: the same image runs in the developer's laptop, in the CI pipeline, and in production. AWS extends this model by providing managed registries, managed schedulers, and optionally removing the underlying EC2 fleet entirely.
+
+---
+
+## ECR — Elastic Container Registry
+
+ECR is AWS's managed private container image registry. It integrates directly with ECS, EKS, and App Runner without requiring credential management — IAM handles authentication via the `ecr:GetAuthorizationToken` call.
+
+**Image scanning** operates in two modes:
+- **Basic scanning**: triggered on push; uses the open-source Clair CVE database. Runs once per image push.
+- **Enhanced scanning**: continuous scanning powered by Amazon Inspector. Re-scans images when new CVEs are published — a vulnerability found after the initial push still triggers a finding. Requires Inspector to be enabled in the account.
+
+**Lifecycle policies** define rules to automatically expire images. Common patterns include: keep the last N images per repository, or delete any image tagged `dev-*` after 14 days. Policies run daily and reduce storage costs without manual cleanup.
+
+**Replication**: ECR supports cross-region and cross-account replication. Cross-region replication is useful for multi-region deployments where each region pulls images locally rather than crossing a region boundary on every pull. Cross-account replication enables a central "golden image" registry to push to spoke account registries.
+
+---
+
+## ECS — Elastic Container Service
+
+ECS is AWS's native container orchestrator. It schedules containers as **tasks** within a **cluster**, integrated with IAM, CloudWatch, and load balancers out of the box.
+
+### Task Definition
+
+A task definition is a JSON document that specifies everything needed to run a container:
+
+- **Container image** — ECR URI or Docker Hub reference
+- **CPU and memory** — hard limit and soft limit per container
+- **Port mappings** — host port to container port (or `awsvpc` mode, where the task owns its own ENI)
+- **Environment variables** — plaintext or sourced from SSM Parameter Store / Secrets Manager
+- **IAM task role** — the role the application code inside the container assumes
+- **Logging configuration** — typically `awslogs` driver, which ships stdout/stderr to a CloudWatch Logs log group
+- **Volume mounts** — EFS or bind mounts
+
+Task definitions are versioned. A new revision is created each time you update the definition. Services pin to a specific revision.
+
+### ECS Service
+
+A service manages the long-running lifecycle of tasks:
+
+- **Desired count** — how many task instances should be running
+- **Deployment type** — rolling update (replace old tasks gradually) or blue/green (traffic cut-over via AWS CodeDeploy, enabling instant rollback)
+- **ELB integration** — ALB or NLB target group registration; tasks register/deregister automatically
+- **Auto Scaling** — Target Tracking or Step Scaling based on CPU, memory, ALB request count, or custom CloudWatch metrics
+
+One-off tasks (batch jobs, migrations) are launched directly without a service — `RunTask` API call, no desired count management.
+
+### Launch Types
+
+**EC2 launch type**: You provision and manage EC2 instances in the cluster. The ECS agent runs on each instance and accepts task placement. You control the instance type, AMI, and fleet size. ECS can spread tasks across AZs and across instances using placement strategies (spread, binpack, random). Requires ASG management, patching, and capacity planning.
+
+**Fargate launch type**: You specify only vCPU and memory for the task. AWS selects and manages the underlying host. No EC2 fleet to maintain, no AMI updates, no patching. Each Fargate task requires `awsvpc` network mode — it receives its own Elastic Network Interface with a private IP from your VPC subnet.
+
+### ECS Cluster
+
+A cluster is a logical grouping of tasks and services. A single cluster can contain EC2-backed tasks and Fargate tasks simultaneously. Capacity Providers define the backing compute (FARGATE, FARGATE_SPOT, or an Auto Scaling Group). Capacity Provider Strategies assign weights to determine how tasks are distributed across providers.
+
+### Task IAM Role vs Instance Profile
+
+The EC2 instance profile grants permissions to the EC2 instance itself — used by the ECS agent and system-level AWS calls. The **task IAM role** grants permissions to the application code running inside the container. The ECS agent intercepts calls to the EC2 metadata endpoint (`169.254.170.2`) and returns temporary credentials scoped to the task role. A task never sees the instance's credentials, and two tasks on the same instance can have different roles.
+
+<FlowDiagram
+  parties={["ALB", "ECS Service", "Task (Container)", "ECR", "CloudWatch Logs"]}
+  steps={[
+    { from: "ALB", to: "ECS Service", label: "HTTP/HTTPS request", sub: "Target group forwards to registered task" },
+    { from: "ECS Service", to: "Task (Container)", label: "Route to container port", sub: "awsvpc: task ENI receives traffic" },
+    { from: "Task (Container)", to: "ECR", label: "docker pull on task start", sub: "IAM task execution role authenticates" },
+    { from: "ECR", to: "Task (Container)", label: "Image layers delivered", sub: "Cached locally on host (EC2) or per-task (Fargate)" },
+    { from: "Task (Container)", to: "CloudWatch Logs", label: "stdout / stderr streamed", sub: "awslogs log driver; no sidecar required" },
+  ]}
+/>
+
+---
+
+## Fargate
+
+Fargate is the serverless compute engine that underlies both ECS and EKS. The distinction is important: Fargate is not a separate orchestrator — it is the compute backend. ECS or EKS still performs scheduling; Fargate supplies the host.
+
+When you run an ECS task on Fargate, AWS:
+
+1. Provisions an isolated microVM (based on Firecracker, AWS's open-source VMM)
+2. Injects the task's ENI into your VPC subnet
+3. Starts your containers
+4. Bills per vCPU-second and GB-second of memory consumed while the task runs
+5. Destroys the microVM when the task stops
+
+**Fargate Spot** runs tasks on spare Fargate capacity at up to 70% discount. Tasks can be interrupted with a 2-minute warning — suitable for fault-tolerant batch workloads, not for stateful services.
+
+The tradeoff against EC2 launch type is economics at scale. A busy EC2 cluster with good bin-packing can be significantly cheaper than Fargate. Fargate eliminates operational burden at the cost of higher per-unit compute price. Fargate Spot narrows the gap for interruption-tolerant workloads.
+
+---
+
+## EKS — Elastic Kubernetes Service
+
+EKS provides a managed Kubernetes control plane: the API server, etcd, scheduler, and controller manager are fully managed by AWS, run across multiple AZs, and patched and upgraded by AWS. You never SSH into a control plane node.
+
+Worker nodes run in your VPC and your account. Three options:
+
+- **Self-managed node groups**: EC2 instances you launch manually into the cluster. Full control, full responsibility.
+- **Managed node groups**: AWS provisions and lifecycle-manages an ASG of EC2 nodes. Supports rolling node upgrades with `kubectl drain` handled automatically.
+- **Fargate profiles**: Specify namespace and label selectors. Pods matching the profile run on Fargate — no nodes to manage for those pods.
+
+### Add-ons
+
+EKS manages core cluster add-ons:
+- **AWS VPC CNI**: Each pod gets a routable VPC IP from the node's ENI secondary IP pool. Pods are first-class VPC citizens — no overlay network, native VPC routing.
+- **CoreDNS**: In-cluster DNS for service discovery.
+- **kube-proxy**: Manages iptables rules for Service networking.
+- **EBS CSI driver**: Allows Persistent Volumes backed by EBS. Required for stateful workloads on EKS.
+- **EFS CSI driver**: ReadWriteMany volumes backed by EFS for multi-pod shared storage.
+
+### Karpenter
+
+Karpenter is a node auto-provisioner that replaces the Kubernetes Cluster Autoscaler for EKS. When a pod cannot be scheduled due to insufficient node capacity, Karpenter provisions a new EC2 node in seconds — choosing the optimal instance type and purchase option (On-Demand or Spot) based on the pod's resource requests and constraints. It consolidates nodes when they are underutilized, terminating nodes and rescheduling pods. Karpenter is significantly faster and more cost-efficient than the Cluster Autoscaler's ASG-based model.
+
+### EKS Anywhere
+
+EKS Anywhere extends EKS to on-premises infrastructure. You run the same EKS control plane (as VMs or bare metal, managed via the `eksctl anywhere` CLI) with the same Kubernetes API. AWS manages the control plane software lifecycle. Useful for latency-sensitive or data-sovereignty workloads that must remain on-premises while sharing tooling with AWS-hosted clusters.
+
+---
+
+## App Runner
+
+App Runner is a fully managed service for deploying containerised applications (or source code directly) without any container orchestration knowledge. Point App Runner at an ECR image or a source repository, configure the port and environment variables, and App Runner:
+
+- Builds the container (if source-based)
+- Deploys it behind an HTTPS endpoint with a managed certificate
+- Auto-scales based on incoming requests
+- Scales to zero when idle (with configurable minimum instances to avoid cold starts)
+
+App Runner abstracts away ECS, EKS, ALB, and VPC configuration entirely. The tradeoff is less control — you cannot configure placement, networking details, or advanced scaling policies. For teams that want a Heroku-like experience on AWS, App Runner is the fastest path from container to HTTPS endpoint.
+
+---
+
+## ECS vs EKS — When to Choose Which
+
+| Dimension | ECS EC2 | ECS Fargate | EKS Managed Nodes | EKS Fargate |
+|---|---|---|---|---|
+| **Kubernetes?** | No | No | Yes | Yes |
+| **Control plane management** | AWS-managed | AWS-managed | AWS-managed | AWS-managed |
+| **Node/host management** | You manage EC2 fleet | None | AWS manages ASG | None |
+| **Cost model** | EC2 On-Demand/Spot + ECS (free) | Per vCPU/memory-second | EC2 + $0.10/hr per cluster | Per pod vCPU/memory-second + cluster |
+| **Cluster cost** | Free | Free | $0.10/hr | $0.10/hr |
+| **Scaling granularity** | Per task on existing capacity | Per task (AWS provisions) | Per node then per pod | Per pod |
+| **Best for** | AWS-native, cost-optimized, no K8s requirement | Serverless ops, variable load | Kubernetes workloads, portability, complex orchestration | K8s workloads with no node ops |
+| **Multi-cloud portability** | No | No | Yes (K8s API) | Yes (K8s API) |
+
+**Choose ECS** when your team is AWS-native, does not require Kubernetes-specific features or tooling, and wants simpler operational overhead. ECS is deeply integrated with IAM, CloudWatch, and ALB in ways that require less configuration than EKS.
+
+**Choose EKS** when you need Kubernetes compatibility for portability, have existing K8s tooling and expertise, use Helm charts from the ecosystem, or require advanced scheduling (pod affinity, taints/tolerations, custom schedulers).
+
+Fargate variants of both eliminate node management. For teams with highly variable or unpredictable load and tolerance for the Fargate per-unit cost premium, Fargate removes an entire operational category.
+
+---
+
+## References
+
+- [Amazon ECS Documentation](https://docs.aws.amazon.com/ecs/)
+- [Amazon EKS Documentation](https://docs.aws.amazon.com/eks/)
+- [AWS Fargate Documentation](https://docs.aws.amazon.com/AmazonECS/latest/userguide/what-is-fargate.html)
+- [Amazon ECR Documentation](https://docs.aws.amazon.com/ecr/)
+- [Karpenter Documentation](https://karpenter.sh/)
+- [AWS App Runner Documentation](https://docs.aws.amazon.com/apprunner/)

@@ -1,0 +1,287 @@
+---
+title: "Amazon VPC — Virtual Private Cloud"
+category: "amazon"
+topic: "aws-vpc"
+summary: "How AWS isolates your network with VPCs, subnets, security groups, NACLs, and endpoints for private connectivity."
+tags: ["aws", "vpc", "networking", "subnets", "security-groups", "nacl", "nat-gateway"]
+order: 15
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Amazon Virtual Private Cloud (VPC) is a logically isolated virtual network that you define within an AWS region. It is your private slice of the AWS cloud — a software-defined network that behaves like a traditional data center network but is fully managed by AWS.
+
+Every resource you launch in AWS runs inside a VPC. EC2 instances, RDS databases, Lambda functions connected to private resources, EKS nodes, ECS tasks — all of them live inside subnets that belong to a VPC. The VPC defines the IP address space, controls routing between subnets, and determines whether resources can reach the internet, other VPCs, or private corporate networks.
+
+Understanding VPC is foundational to understanding network security, connectivity, and architecture in AWS. Every architectural decision — where to place resources, how to secure them, how to connect them — depends on VPC constructs.
+
+---
+
+## CIDR Block Planning
+
+Every VPC is defined by one or more IPv4 CIDR blocks. The primary CIDR block is specified at creation time and **cannot be changed after the VPC is created**. Secondary CIDR blocks can be added later, subject to constraints, but the primary block is permanent.
+
+AWS allows primary CIDR sizes from **/16** (65,536 addresses) to **/28** (16 addresses). The practical minimum is usually a /24 for any real workload. RFC 1918 private address ranges are the standard choice:
+
+| RFC 1918 Range | Example VPC CIDR |
+|----------------|-----------------|
+| `10.0.0.0/8` | `10.0.0.0/16` — 65K addresses, common default |
+| `172.16.0.0/12` | `172.31.0.0/16` — default VPC uses this range |
+| `192.168.0.0/16` | `192.168.1.0/24` — small VPCs |
+
+**The default VPC** (automatically created in each region) uses `172.31.0.0/16` and comes with a public subnet in each Availability Zone, an Internet Gateway attached, and a default route table with internet access. The default VPC is useful for quick experimentation but not recommended for production workloads — create custom VPCs with deliberate subnet design.
+
+**Plan carefully before you create.** Key considerations:
+- Non-overlapping CIDRs across all VPCs and any on-premises networks (you cannot peer VPCs with overlapping CIDRs)
+- Enough address space for current and future subnets across multiple AZs
+- Reserve space for secondary CIDRs if you anticipate IP exhaustion
+
+---
+
+## Subnets
+
+A subnet is a range of IP addresses within a VPC, tied to exactly one Availability Zone. Resources in a subnet are in that AZ. Multi-AZ architectures require one subnet per AZ per tier (e.g., one public subnet in `us-east-1a`, one in `us-east-1b`, one in `us-east-1c`).
+
+**Reserved IP addresses per subnet**: AWS reserves 5 IP addresses in every subnet that are not available for your resources:
+
+| Offset | Purpose |
+|--------|---------|
+| `.0` | Network address |
+| `.1` | VPC router (default gateway) |
+| `.2` | DNS resolver (VPC Base IP + 2) |
+| `.3` | Reserved for future AWS use |
+| `.255` | Broadcast (not used in VPC but reserved) |
+
+A /28 subnet has 16 addresses and only 11 usable. A /24 has 256 addresses and 251 usable. Size subnets accordingly.
+
+### Public vs Private Subnets
+
+The distinction between public and private subnets comes down to routing, not a label:
+
+- **Public subnet**: The subnet's route table has a route sending `0.0.0.0/0` to an Internet Gateway. Resources in a public subnet with a public IP or Elastic IP can communicate bidirectionally with the internet.
+- **Private subnet**: No route to an Internet Gateway exists in the subnet's route table. Resources cannot be directly reached from the internet and cannot initiate outbound connections unless a NAT Gateway or similar mechanism is present.
+
+A typical three-tier architecture separates resources by sensitivity:
+
+| Tier | Subnet Type | Example Resources |
+|------|------------|-------------------|
+| Edge | Public | Load Balancers, NAT Gateways, Bastion Hosts |
+| Application | Private | EC2 app servers, EKS nodes, ECS tasks |
+| Data | Private (isolated) | RDS, ElastiCache, Redshift |
+
+---
+
+## Route Tables
+
+Route tables control how traffic is directed within the VPC. Every VPC has a **main route table** applied to any subnet not explicitly associated with a custom route table. Custom route tables can be created and associated with specific subnets.
+
+Every route table contains the **local route** — `VPC CIDR → local` — which routes traffic between resources within the VPC. This route is always present and cannot be removed or overridden.
+
+Additional routes direct traffic to specific targets:
+
+| Destination | Target | Effect |
+|-------------|--------|--------|
+| `0.0.0.0/0` | Internet Gateway | All internet-bound traffic goes to IGW (public subnet) |
+| `0.0.0.0/0` | NAT Gateway | Internet-bound traffic goes to NAT GW (private subnet) |
+| `10.100.0.0/16` | VPC Peering Connection | Traffic to peered VPC CIDR goes through peering |
+| `0.0.0.0/0` | Transit Gateway | All non-local traffic to TGW hub |
+| `pl-xxxxxxxx` (prefix list) | VPC Endpoint | S3/DynamoDB traffic stays on AWS network |
+
+Route selection follows **longest prefix match** — the most specific (longest) matching route wins.
+
+---
+
+## Internet Gateway
+
+An Internet Gateway (IGW) is an AWS-managed, horizontally scaled, redundant, and highly available component attached to a VPC. It provides bidirectional internet access for resources in public subnets.
+
+Key properties:
+- One IGW per VPC maximum (but you can detach and reattach)
+- The IGW itself is not a bottleneck — it scales automatically
+- Does not impose bandwidth limits
+- Enables two-way communication: both inbound (if instance has public IP) and outbound
+
+For a resource in a public subnet to reach the internet, it needs:
+1. A public IPv4 address (assigned at launch) or an Elastic IP address
+2. A route in its subnet's route table pointing `0.0.0.0/0` to the IGW
+3. A security group rule allowing the traffic
+
+---
+
+## NAT Gateway
+
+Resources in private subnets often need to reach the internet — to download software updates, call external APIs, or access AWS services not reachable via VPC endpoints. They cannot do this directly through an IGW because they have no public IP. NAT (Network Address Translation) solves this by translating private IP addresses to the NAT Gateway's public IP for outbound connections.
+
+**NAT Gateway** is AWS's managed NAT solution:
+- Deployed into a **public subnet** with an Elastic IP address
+- Allows private subnet resources to initiate outbound connections to the internet
+- **Does not allow inbound connections** initiated from the internet — NAT is one-directional for session initiation
+- Managed by AWS: highly available within an AZ, no patching required, scales to 45 Gbps
+- Billed per hour ($0.045/hour in us-east-1) plus per-GB of data processed ($0.045/GB)
+
+**AZ-specific behavior**: A NAT Gateway exists in a single AZ. If that AZ fails, private subnets in other AZs that route through it lose internet access. For production high availability, deploy **one NAT Gateway per AZ** and configure each AZ's private subnet route table to use its own AZ's NAT Gateway.
+
+<FlowDiagram
+  parties={["Private EC2", "NAT Gateway"]}
+  steps={[
+    { from: "Private EC2", to: "NAT Gateway", label: "Outbound packet", sub: "src: 10.0.2.45 → dst: 203.0.113.10" },
+    { from: "NAT Gateway", to: "Private EC2", label: "Src NAT applied", sub: "src rewritten to EIP: 54.x.x.x → forwarded to IGW → Internet" },
+    { from: "NAT Gateway", to: "Private EC2", label: "Response returns", sub: "Internet → IGW → NAT GW → translated back → 10.0.2.45" },
+  ]}
+/>
+
+**NAT Instance** (legacy): An EC2 instance configured as a NAT device. Cheaper, gives you full control (can use as a bastion, run custom routing scripts), but is a single point of failure, does not auto-scale, and requires source/destination check to be disabled. Use NAT Gateway for any production workload.
+
+---
+
+## Elastic IP Addresses
+
+An **Elastic IP (EIP)** is a static public IPv4 address that belongs to your AWS account rather than a specific instance. You can attach it to an instance or NAT Gateway, detach it, and reattach it to another resource.
+
+Use cases:
+- NAT Gateway (requires an EIP)
+- Applications that need a predictable, stable public IP that external firewalls or allowlists reference
+- Replacing a failed instance while preserving the same IP address
+
+**Cost**: An EIP is free while attached to a running instance or NAT Gateway. AWS charges approximately $0.005/hour for any EIP that is allocated but not attached to a running resource. This encourages you not to hoard unused EIPs.
+
+---
+
+## Security Groups
+
+Security Groups are stateful virtual firewalls applied at the **Elastic Network Interface (ENI)** level — the virtual NIC of an EC2 instance, RDS endpoint, Lambda in a VPC, or other resource. Every resource in a VPC has at least one security group.
+
+**Key properties:**
+
+| Property | Behavior |
+|----------|---------|
+| Stateful | Return traffic is automatically allowed. If inbound rule allows a TCP connection, the response packets are allowed out without a matching outbound rule. |
+| Allow-only | Rules can only Allow. There are no Deny rules in security groups. Traffic not explicitly allowed is implicitly denied. |
+| Scope | Applied to ENI (instance level), not subnet level. Multiple instances in the same subnet can have different security groups. |
+| Multiple groups | An ENI can have up to 5 security groups. Rules from all groups are combined — most permissive wins. |
+| Source/destination | Can specify CIDR, another security group ID, or prefix list as source/destination. |
+
+**SG referencing**: Using a security group ID as the source/destination in a rule allows you to write rules like "allow port 3306 from anything in the `app-sg` security group." This builds layered architectures without hardcoding IP addresses — any new application server added to `app-sg` immediately gets database access.
+
+**Default security group**: Every VPC has a default SG. It allows all outbound traffic and denies all inbound traffic by default (from external sources). Resources in the same default SG can communicate with each other because the default SG allows inbound from itself.
+
+---
+
+## Network ACLs
+
+Network ACLs (NACLs) are stateless firewalls at the **subnet boundary**. All traffic entering or leaving a subnet is evaluated against the NACL associated with that subnet.
+
+**Key properties:**
+
+| Property | Behavior |
+|----------|---------|
+| Stateless | Return traffic must be explicitly allowed. If you allow inbound TCP on port 443, you must also allow outbound TCP on ephemeral ports (1024–65535) for the responses. |
+| Allow and Deny rules | Unlike security groups, NACLs support explicit Deny rules. Use this to block specific IP ranges regardless of other rules. |
+| Rule evaluation order | Rules evaluated from lowest rule number to highest. The first matching rule applies. If no rule matches, the default `*` rule denies. |
+| Scope | Applied to subnet, not individual instances. Every resource in the subnet is subject to the same NACL. |
+
+**Default NACL**: Allows all inbound and outbound traffic. New subnets are associated with the default NACL unless you specify otherwise.
+
+**Rule numbering convention**: Use increments of 10 (100, 110, 120) to leave room for inserting rules between existing ones without renumbering.
+
+### Security Group vs NACL Comparison
+
+| Aspect | Security Group | NACL |
+|--------|---------------|------|
+| Level | ENI (instance) | Subnet |
+| Statefulness | Stateful — return traffic automatic | Stateless — return traffic must be explicitly allowed |
+| Rule types | Allow only | Allow and Deny |
+| Rule evaluation | All rules evaluated together | Lowest rule number first; first match applies |
+| Default behavior | New SG: deny all inbound, allow all outbound | Default NACL: allow all inbound and outbound |
+| Primary use case | Primary instance-level firewall for all resources | Additional subnet-level layer; explicitly blocking known bad IPs |
+
+The recommended pattern is to rely primarily on Security Groups for granular control and use NACLs as a secondary layer to deny specific known-bad CIDRs or enforce subnet-level traffic boundaries.
+
+---
+
+## VPC Endpoints
+
+VPC Endpoints allow you to access AWS services from within your VPC without routing traffic through the public internet, a NAT Gateway, or an Internet Gateway. Traffic stays on the AWS private network.
+
+### Gateway Endpoints
+
+- **Free** — no hourly charge, no per-GB charge
+- Support **Amazon S3** and **Amazon DynamoDB** only
+- Implemented as a route in the route table pointing the S3 or DynamoDB prefix lists to the endpoint
+- Do not use an ENI — no IP address consumed in your subnet
+- **Region-scoped**: one endpoint can cover all S3 buckets in the region
+- Bucket/table policies can restrict access to only traffic originating from the endpoint
+
+### Interface Endpoints (PrivateLink)
+
+- Support **most AWS services** and third-party services via AWS PrivateLink
+- Implemented as an **ENI with a private IP address** in your subnet — uses one of your IP addresses
+- Charged: approximately $0.01/hour per AZ plus $0.01/GB processed
+- DNS updated automatically: the service's default DNS name resolves to the endpoint's private IP within your VPC
+- Accessible from **on-premises networks** connected via Direct Connect or Site-to-Site VPN — queries resolve to the private ENI IP rather than the public service endpoint
+
+---
+
+## VPC Peering
+
+VPC Peering creates a direct private network connection between two VPCs, allowing traffic to route between them as if they were in the same network.
+
+Properties:
+- **Not transitive**: If VPC A peers with VPC B and VPC B peers with VPC C, VPC A cannot reach VPC C through VPC B. Each pair requires its own peering connection.
+- Supports **cross-account** and **cross-region** peering
+- **CIDRs must not overlap** — this is enforced at creation time
+- After creating the peering connection, you must update route tables in **both VPCs** to add routes for the peer's CIDR pointing to the peering connection
+- Security groups in one VPC can reference security group IDs from a peered VPC within the same region
+
+Peering works well for small numbers of VPCs. As the number of VPCs grows, the number of peering connections required grows quadratically (N×(N-1)/2 connections for full mesh). For larger environments, use AWS Transit Gateway instead.
+
+---
+
+## VPC Flow Logs
+
+VPC Flow Logs capture metadata about IP traffic flowing through network interfaces in your VPC. They are the primary tool for network troubleshooting and security analysis.
+
+**What they capture:**
+- Source and destination IP address
+- Source and destination port
+- Protocol (TCP, UDP, ICMP)
+- Packet and byte count
+- Start and end timestamp
+- Action (ACCEPT or REJECT — based on security group and NACL rules)
+
+**What they do NOT capture:**
+- Traffic content — no payload data
+- DNS queries (use Route 53 Resolver query logs for that)
+- DHCP traffic
+- Metadata service traffic (instance → 169.254.169.254)
+
+**Scope**: Enable flow logs at the VPC level (all ENIs), subnet level, or individual ENI level.
+
+**Destinations**: Amazon CloudWatch Logs (queryable via Log Insights) or Amazon S3 (queryable via Athena). CloudWatch has higher cost per GB but enables real-time alarming. S3 is cheaper for long-term retention and bulk analysis.
+
+---
+
+## VPC Sharing
+
+VPC Sharing, enabled by AWS Resource Access Manager (RAM), allows a central networking team to share subnets with other AWS accounts in the same Organization. Participant accounts can deploy resources (EC2, RDS, Lambda) into shared subnets without owning or managing the VPC infrastructure.
+
+Benefits:
+- One VPC per environment (not one per team/account), reducing routing complexity
+- Centralized networking controls (route tables, NACLs, VPC endpoints) managed by the platform team
+- Participant accounts cannot modify the VPC, subnets, or route tables — only deploy resources into them
+- Reduces NAT Gateway duplication (share one NAT Gateway across multiple account workloads in the same VPC)
+
+VPC Sharing is a common pattern in large Organizations where a centralized platform team manages the network layer and individual business unit accounts manage their own applications.
+
+---
+
+## References
+
+- [Amazon VPC User Guide](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html)
+- [VPC quotas](https://docs.aws.amazon.com/vpc/latest/userguide/amazon-vpc-limits.html)
+- [Security groups and NACLs comparison](https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Security.html)
+- [VPC Endpoints documentation](https://docs.aws.amazon.com/vpc/latest/privatelink/vpc-endpoints.html)
+- [VPC Flow Logs](https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html)

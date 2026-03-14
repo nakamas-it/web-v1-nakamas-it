@@ -1,0 +1,227 @@
+---
+title: "Amazon S3 — Object Storage"
+category: "amazon"
+topic: "aws-s3"
+summary: "How S3 stores unlimited objects across storage classes, handles versioning and replication, and secures data at rest."
+tags: ["aws", "s3", "object-storage", "storage-classes", "encryption", "versioning", "replication"]
+order: 9
+draft: false
+---
+
+import FlowDiagram from '../../../components/FlowDiagram.astro';
+
+## Overview
+
+Amazon S3 (Simple Storage Service) is object storage — a fundamentally different model from block storage (EBS) and file storage (EFS). In object storage, each piece of data is a flat, self-contained object with a key, a value (the data), and metadata. There is no hierarchy, no filesystem, no inodes. The slash in a key like `logs/2025/01/app.log` is just a character in a string — S3 uses it to simulate folder-like prefixes in the console, but the underlying model has no directories.
+
+S3 stores objects in **buckets**. Bucket names are globally unique across all AWS accounts worldwide. A bucket lives in a single AWS region. Objects can be up to 5 TB in size. There is no limit on the number of objects or total storage in a bucket.
+
+---
+
+## Durability and Availability
+
+S3 Standard provides **11 nines of durability** — 99.999999999%. AWS achieves this by storing each object redundantly across a minimum of three Availability Zones within a region. Losing data from S3 Standard requires simultaneous, independent failure across three physically separated data centres — a scenario AWS designs against with multiple layers of hardware redundancy and continuous integrity checking.
+
+Availability (the ability to retrieve objects) is a separate metric. S3 Standard offers 99.99% availability. Lower-cost storage classes trade availability (and sometimes durability) for cost reduction.
+
+---
+
+## Storage Classes
+
+| Class | Min Storage Duration | Retrieval Fee | AZs | Retrieval Latency | Typical Use Case |
+|---|---|---|---|---|---|
+| **Standard** | None | None | 3+ | Milliseconds | Frequently accessed data |
+| **Intelligent-Tiering** | 30 days (per tier) | None (auto-managed) | 3+ | Milliseconds–hours (tier dependent) | Unknown or changing access patterns |
+| **Standard-IA** | 30 days | Per-GB | 3+ | Milliseconds | Infrequent but immediately needed |
+| **One Zone-IA** | 30 days | Per-GB | 1 | Milliseconds | Reproducible infrequent data |
+| **Glacier Instant Retrieval** | 90 days | Per-GB | 3+ | Milliseconds | Archive needing instant access |
+| **Glacier Flexible Retrieval** | 90 days | Per-GB | 3+ | 1–5 min / 3–5 hr / 5–12 hr | Archive, flexible retrieval |
+| **Glacier Deep Archive** | 180 days | Per-GB | 3+ | 12 hr / 48 hr | Compliance archive, rarely accessed |
+
+**One Zone-IA** is the only class that does not replicate across 3+ AZs. It is appropriate only for data that can be recreated (re-generated thumbnails, replicated backups from another region) — losing the AZ means losing the data.
+
+**Glacier Flexible Retrieval** offers three retrieval tiers: Expedited (1–5 minutes, higher cost), Standard (3–5 hours), and Bulk (5–12 hours, cheapest). Most archive workflows use Bulk retrieval.
+
+---
+
+## S3 Intelligent-Tiering
+
+Intelligent-Tiering monitors object access patterns and automatically moves objects between tiers with no performance impact and no retrieval fees. AWS charges a small per-object monitoring fee (~$0.0025 per 1,000 objects/month).
+
+Tiers within Intelligent-Tiering:
+
+| Tier | Activation | Description |
+|---|---|---|
+| Frequent Access | Default | Objects accessed within 30 days |
+| Infrequent Access | After 30 days without access | Automatic |
+| Archive Instant Access | After 90 days | Automatic |
+| Archive Access | Configurable (90–730 days) | Must be opted in; same as Glacier Flexible |
+| Deep Archive Access | Configurable (180–730 days) | Must be opted in; same as Glacier Deep Archive |
+
+For the Archive Access and Deep Archive Access tiers, objects are moved asynchronously and retrieval times match Glacier Flexible and Glacier Deep Archive respectively. These tiers must be explicitly enabled on the Intelligent-Tiering configuration.
+
+---
+
+## Lifecycle Policies
+
+Lifecycle policies automate storage class transitions and object expiration. Rules are applied at the bucket or prefix/tag level.
+
+A typical lifecycle rule:
+
+1. **Day 0**: Object uploaded to Standard
+2. **Day 30**: Transition to Standard-IA
+3. **Day 90**: Transition to Glacier Flexible Retrieval
+4. **Day 365**: Expire (permanently delete) object
+
+Transitions can also target specific object versions. A common pattern for versioned buckets: expire non-current versions after 30 days and permanently delete expired delete markers.
+
+---
+
+## Versioning
+
+When versioning is enabled on a bucket, S3 preserves every version of every object. Uploading a new version of `report.pdf` does not overwrite the previous version — both exist with different version IDs.
+
+**Deleting a versioned object** without specifying a version ID places a **delete marker** — a special zero-byte placeholder — as the current version. The object appears deleted to clients that don't specify a version ID. All previous versions remain stored and accessible by their version ID. To truly remove the data, you must explicitly delete each version by its version ID.
+
+Once enabled, versioning cannot be fully disabled — it can only be **suspended**. Suspended buckets stop creating new versions but preserve all existing versions.
+
+### MFA Delete
+
+MFA Delete adds a second authentication factor to two specific operations:
+
+- Permanently deleting an object version
+- Disabling versioning on the bucket
+
+Only the root account can enable MFA Delete. Once enabled, these operations require the root user to provide an MFA token with each API call. This protects against a compromised IAM credential deleting all object versions.
+
+---
+
+## Replication
+
+S3 replication copies objects from a source bucket to one or more destination buckets.
+
+- **CRR (Cross-Region Replication)**: source and destination in different AWS regions. Use cases: geographic redundancy, compliance, low-latency regional access.
+- **SRR (Same-Region Replication)**: source and destination in the same region. Use cases: log aggregation across accounts, test/production data synchronisation.
+
+Both require versioning enabled on source and destination. Replication is asynchronous. New objects uploaded after replication is configured are replicated. Existing objects require **S3 Batch Replication** — a separate job-based mechanism.
+
+Replication rules can filter by prefix or object tag. **Delete marker replication** is optional — by default, deletes in the source are not propagated to the destination (to prevent accidental mass deletion).
+
+---
+
+## Encryption
+
+### Encryption at Rest
+
+| Method | Key Management | Notes |
+|---|---|---|
+| **SSE-S3** | AWS-managed, per-object AES-256 | Transparent, no extra cost, default since 2023 |
+| **SSE-KMS** | AWS KMS Customer Managed Key (CMK) | CloudTrail audit trail per operation, key rotation, cross-account control |
+| **SSE-C** | Customer-provided per-request | HTTPS required; AWS encrypts/decrypts but never stores the key |
+| **DSSE-KMS** | Two independent KMS encryption layers | For regulatory requirements mandating dual-layer encryption |
+
+**SSE-KMS** adds meaningful security controls over SSE-S3: you can audit every decrypt operation in CloudTrail, disable the CMK to revoke access to all encrypted objects, set key rotation, and control cross-account access at the key level. The tradeoff is KMS API cost ($0.03 per 10,000 requests) and KMS rate limits.
+
+Bucket default encryption applies to objects uploaded without specifying an encryption method. A bucket policy can enforce encryption by denying `s3:PutObject` calls that do not include the required `x-amz-server-side-encryption` header.
+
+---
+
+## Object Lock
+
+Object Lock enforces WORM (Write Once Read Many) behaviour. Locked objects cannot be overwritten or deleted until their retention period expires.
+
+**Retention modes:**
+
+- **Compliance mode**: No user, including the root account, can override or shorten the retention period. The object is immutable for the specified duration. Required for regulatory retention mandates (financial records, healthcare data).
+- **Governance mode**: Users with the `s3:BypassGovernanceRetention` IAM permission can override the lock. Provides WORM protection against accidental deletion without the absolute immutability of Compliance mode.
+
+**Legal Hold**: Independent of retention period. Applies WORM protection indefinitely until explicitly removed. Uses the `s3:PutObjectLegalHold` permission.
+
+Object Lock must be enabled at bucket creation. It automatically enables versioning.
+
+---
+
+## Access Control
+
+### Bucket Policies
+
+Bucket policies are JSON documents attached to a bucket, using the same IAM policy syntax. They can grant or deny:
+
+- Public access (Principal: `*`)
+- Cross-account access (Principal: another AWS account ARN)
+- Conditional access (IP address, VPC endpoint, encrypted uploads required, specific IAM user)
+
+Bucket policies are evaluated alongside IAM identity policies. For cross-account access, both the bucket policy and the caller's IAM policy must permit the action.
+
+### S3 Block Public Access
+
+Block Public Access settings override bucket policies and ACLs for any public access grant. Four settings, each independently togglable:
+
+- Block new public ACLs on this bucket
+- Remove existing public ACLs from this bucket
+- Block new public bucket policies
+- Block public bucket policies (effectively makes bucket policy non-public even if it tries to be)
+
+AWS enables all four by default for new buckets. If you need public access (static website, public CDN origin), you must explicitly disable the relevant settings.
+
+### ACLs
+
+Access Control Lists are a legacy access mechanism predating bucket policies. AWS now recommends disabling ACLs (Object Ownership: Bucket Owner Enforced) so that all access is managed through bucket policies and IAM. New buckets default to ACLs disabled.
+
+### Presigned URLs
+
+A presigned URL is a time-limited URL that grants temporary access to a private S3 object. The URL is generated using the signing credentials of an IAM identity. Any holder of the URL can perform the specific operation (GET or PUT) until the URL expires, without needing their own AWS credentials.
+
+Use cases: allow a user to download a private file through an application without exposing the bucket, allow direct upload from a browser to S3 without proxying through a server.
+
+---
+
+## Static Website Hosting
+
+Enable static website hosting on a bucket to serve content via an S3 website endpoint (`http://bucket.s3-website-region.amazonaws.com`). Configure:
+
+- Index document (e.g., `index.html`)
+- Error document (e.g., `404.html`)
+- Redirection rules (optional)
+
+For HTTPS on a custom domain, serve through CloudFront with an Origin Access Control (OAC) — CloudFront provides the TLS certificate while keeping the bucket private. The bucket policy then grants access only to the CloudFront distribution's OAC.
+
+---
+
+## S3 Select and Object Lambda
+
+**S3 Select** executes SQL expressions directly against the content of S3 objects (CSV, JSON, Parquet, compressed with GZIP or BZIP2). Instead of downloading a 10 GB CSV to extract 100 rows, S3 Select evaluates the query server-side and returns only matching data. AWS reports up to 400% faster and 80% cheaper queries compared to full-object retrieval for selective queries.
+
+**S3 Object Lambda** attaches an AWS Lambda function to an S3 GET request path. When an object is retrieved, Lambda receives the original object, transforms it (redact PII, convert format, add watermark), and returns the modified response — without storing a second copy of the transformed object. The client receives the transformed data; the original object in S3 is unchanged.
+
+---
+
+## Performance
+
+S3 supports **3,500 PUT/COPY/POST/DELETE** and **5,500 GET/HEAD** requests per second per prefix. A prefix is any string up to the last `/` in the key. Objects spread across multiple prefixes multiply total throughput: 10 prefixes yield 55,000 GET requests/second.
+
+**Multipart upload** splits large objects into parts uploaded in parallel, then assembled by S3. Required for objects over 5 GB. Recommended for objects over 100 MB. Benefits: parallelism (faster upload), resume on failure (only failed parts need retry), individual part MD5 checksums.
+
+**Transfer Acceleration** routes uploads through the nearest CloudFront edge location, then uses AWS's private network backbone to S3. Useful when uploading from geographically distant clients. The S3 Transfer Acceleration endpoint is `bucket.s3-accelerate.amazonaws.com`.
+
+<FlowDiagram
+  parties={["Application", "Amazon S3", "S3 Lifecycle Rule", "S3 Glacier"]}
+  steps={[
+    { from: "Application", to: "Amazon S3", label: "PUT object (multipart if > 100 MB)", sub: "Lands in Standard storage class" },
+    { from: "Amazon S3", to: "Amazon S3", label: "Versioning: new version ID assigned", sub: "Previous version preserved" },
+    { from: "S3 Lifecycle Rule", to: "Amazon S3", label: "Day 30: transition to Standard-IA", sub: "Object moved, same key and version ID" },
+    { from: "S3 Lifecycle Rule", to: "Amazon S3", label: "Day 90: transition to Glacier", sub: "Object moved, Glacier Flexible Retrieval" },
+    { from: "Amazon S3", to: "S3 Glacier", label: "Object stored in Glacier tier", sub: "Retrieval: 1–5 min / 3–5 hr / 5–12 hr" },
+    { from: "S3 Lifecycle Rule", to: "Amazon S3", label: "Day 365: expire (delete)", sub: "Delete marker created if versioning enabled" },
+  ]}
+/>
+
+---
+
+## References
+
+- [Amazon S3 Developer Guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/)
+- [S3 Storage Classes](https://aws.amazon.com/s3/storage-classes/)
+- [S3 Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)
+- [S3 Replication](https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html)
+- [S3 Encryption](https://docs.aws.amazon.com/AmazonS3/latest/userguide/serv-side-encryption.html)
