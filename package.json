@@ -10,10 +10,10 @@
     "check": "html-validate \"dist/**/*.html\""
   },
   "dependencies": {
-    "@astrojs/mdx": "^4.3.13",
+    "@astrojs/mdx": "^5.0.4",
     "@tailwindcss/typography": "^0.5.19",
     "@tailwindcss/vite": "^4.2.1",
-    "astro": "^5.17.1",
+    "astro": "^6.2.1",
     "tailwindcss": "^4.2.1"
   },
   "devDependencies": {
