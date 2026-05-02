@@ -52,7 +52,7 @@ const meta = layerMeta[layer!] ?? { label: layer, description: '', accent: 'text
 
 <Layout title={meta.label}>
 
-  <nav class="font-mono text-sm text-slate-500 mb-8">
+  <nav aria-label="Breadcrumb" class="font-mono text-sm text-slate-500 mb-8">
     <a href={`${base}`} class="hover:text-slate-300 transition-colors">home</a>
     <span class="mx-2">/</span>
     <a href={`${base}school`} class="hover:text-slate-300 transition-colors">school</a>
